@@ -55,6 +55,8 @@ func runCommand(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "ghost-claude.yaml", "Path to the workflow config file")
 	workspace := fs.String("workspace", "", "Workspace directory containing the workflow config")
 	dryRun := fs.Bool("dry-run", false, "Render prompts and commands without executing them")
+	coder := fs.String("coder", "", "Coder agent to use at runtime: claude or codex (default: codex)")
+	reviewer := fs.String("reviewer", "", "Peer reviewer agent to use at runtime: claude or codex (default: claude)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -73,12 +75,29 @@ func runCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	cfg.DryRun = cfg.DryRun || *dryRun
+	if err := applyRuntimeAgentRoles(cfg, *coder, *reviewer); err != nil {
+		return err
+	}
 
 	app, err := runner.New(cfg, os.Stdout, os.Stderr)
 	if err != nil {
 		return err
 	}
 	return app.Run(ctx)
+}
+
+func applyRuntimeAgentRoles(cfg *config.Config, coder, reviewer string) error {
+	cfg.Coder = config.AgentCodex
+	cfg.Reviewer = config.AgentClaude
+
+	if value := strings.TrimSpace(coder); value != "" {
+		cfg.Coder = value
+	}
+	if value := strings.TrimSpace(reviewer); value != "" {
+		cfg.Reviewer = value
+	}
+
+	return cfg.Validate()
 }
 
 func initCommand(ctx context.Context, args []string) error {
@@ -114,7 +133,7 @@ func printUsage() {
 	fmt.Println(`ghost-claude
 
 Usage:
-  ghost-claude run [-config ghost-claude.yaml] [-workspace /path/to/repo] [-dry-run]
+  ghost-claude run [-config ghost-claude.yaml] [-workspace /path/to/repo] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
   ghost-claude init [-config ghost-claude.yaml] [-workspace /path/to/repo] [-source PATH] [-force] [SOURCE]
   ghost-claude task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 

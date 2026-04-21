@@ -13,6 +13,7 @@ import (
 
 	"ghost_claude/internal/automation"
 	"ghost_claude/internal/claude"
+	codexcli "ghost_claude/internal/codex"
 	"ghost_claude/internal/config"
 	"ghost_claude/internal/plan"
 	"ghost_claude/internal/render"
@@ -23,7 +24,8 @@ type Runner struct {
 	cfg    *config.Config
 	stdout io.Writer
 	stderr io.Writer
-	agent  agentClient
+	claude claudeClient
+	codex  codexClient
 
 	executablePath string
 	newSession     func(string) (*claude.Session, error)
@@ -35,6 +37,7 @@ type TemplateData struct {
 	Iteration      int
 	SessionID      string
 	TaskResultPath string
+	ReviewPath     string
 	Workspace      string
 	TodoFile       string
 	NextTodo       todo.Item
@@ -44,19 +47,34 @@ type TemplateData struct {
 	Now            time.Time
 }
 
-type agentClient interface {
+type claudeClient interface {
 	RunPrompt(ctx context.Context, session *claude.Session, prompt string) error
 	Close(session *claude.Session) error
 	IsFullscreenTUI() bool
 }
 
+type codexClient interface {
+	RunPrompt(ctx context.Context, prompt string) error
+}
+
 func New(cfg *config.Config, stdout, stderr io.Writer) (*Runner, error) {
-	agent, err := claude.New(
+	claudeAgent, err := claude.New(
 		cfg.Claude.Command,
 		cfg.Claude.Args,
 		cfg.Workspace,
 		cfg.Claude.Transport,
 		cfg.Claude.StartupTimeout,
+		stdout,
+		stderr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	codexAgent, err := codexcli.New(
+		cfg.Codex.Command,
+		cfg.Codex.Args,
+		cfg.Workspace,
 		stdout,
 		stderr,
 	)
@@ -78,7 +96,8 @@ func New(cfg *config.Config, stdout, stderr io.Writer) (*Runner, error) {
 		cfg:            cfg,
 		stdout:         stdout,
 		stderr:         stderr,
-		agent:          agent,
+		claude:         claudeAgent,
+		codex:          codexAgent,
 		executablePath: executablePath,
 		newSession: func(strategy string) (*claude.Session, error) {
 			return claude.NewSession(strategy)
@@ -212,6 +231,7 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			ExecutablePath: r.executablePath,
 			Iteration:      iteration,
 			TaskResultPath: automation.ResultPath(r.cfg.Workspace, task.ID),
+			ReviewPath:     automation.ReviewPath(r.cfg.Workspace, task.ID),
 			Workspace:      r.cfg.Workspace,
 			TodoFile:       r.cfg.TodoFile,
 			PlanFile:       r.cfg.PlanFile,
@@ -275,7 +295,7 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 			return runErr
 		}
 
-		closeErr := r.agent.Close(sharedSession)
+		closeErr := r.claude.Close(sharedSession)
 		if runErr != nil {
 			if closeErr != nil {
 				return fmt.Errorf("%w; also failed to close claude session: %v", runErr, closeErr)
@@ -293,12 +313,18 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 
 		err := func() error {
 			var (
+				target           string
 				session          *claude.Session
 				closeStepSession bool
 				err              error
 			)
 
-			if strings.EqualFold(step.Type, config.StepTypeClaude) {
+			target, err = r.stepAgent(step)
+			if err != nil {
+				return err
+			}
+
+			if target == config.AgentClaude {
 				switch {
 				case step.FreshSession:
 					session, err = r.createSession()
@@ -319,7 +345,7 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 
 			runErr := r.runStep(ctx, session, step, data)
 			if closeStepSession {
-				closeErr := r.agent.Close(session)
+				closeErr := r.claude.Close(session)
 				if runErr != nil {
 					if closeErr != nil {
 						return fmt.Errorf("%w; also failed to close claude session: %v", runErr, closeErr)
@@ -359,8 +385,13 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, step conf
 		defer cancel()
 	}
 
-	switch strings.ToLower(step.Type) {
-	case config.StepTypeClaude:
+	target, err := r.stepAgent(step)
+	if err != nil {
+		return err
+	}
+
+	switch target {
+	case config.AgentClaude:
 		if session == nil {
 			return fmt.Errorf("claude step %q requires a session", step.Name)
 		}
@@ -380,7 +411,25 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, step conf
 			fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
 			return nil
 		}
-		return r.agent.RunPrompt(stepCtx, session, prompt)
+		return r.claude.RunPrompt(stepCtx, session, prompt)
+	case config.AgentCodex:
+		if r.codex == nil {
+			return fmt.Errorf("codex step %q requires a codex client", step.Name)
+		}
+
+		prompt, err := render.String(step.Prompt, data)
+		if err != nil {
+			return fmt.Errorf("render prompt: %w", err)
+		}
+
+		if r.shouldLogProgress() {
+			fmt.Fprintf(r.stdout, "\n--> codex step: %s\n", step.Name)
+		}
+		if r.cfg.DryRun {
+			fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
+			return nil
+		}
+		return r.codex.RunPrompt(stepCtx, prompt)
 	case config.StepTypeExec:
 		command, err := render.Strings(step.Command, data)
 		if err != nil {
@@ -433,8 +482,36 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, step conf
 	}
 }
 
+func (r *Runner) stepAgent(step config.Step) (string, error) {
+	switch strings.ToLower(step.Type) {
+	case config.StepTypeClaude:
+		return config.AgentClaude, nil
+	case config.StepTypeCodex:
+		return config.AgentCodex, nil
+	case config.StepTypeAgent:
+		switch strings.ToLower(step.Actor) {
+		case config.StepActorCoder:
+			return r.cfg.CoderAgent(), nil
+		case config.StepActorReviewer:
+			return r.cfg.ReviewerAgent(), nil
+		default:
+			return "", fmt.Errorf("agent step %q has unsupported actor %q", step.Name, step.Actor)
+		}
+	case config.StepTypeExec:
+		return config.StepTypeExec, nil
+	default:
+		return "", fmt.Errorf("unsupported step type %q", step.Type)
+	}
+}
+
 func (r *Runner) shouldLogProgress() bool {
-	return r.cfg.DryRun || !r.agent.IsFullscreenTUI()
+	if r.cfg.DryRun {
+		return true
+	}
+	if r.claude == nil {
+		return true
+	}
+	return !r.claude.IsFullscreenTUI()
 }
 
 func (r *Runner) stepsForTask(task plan.Task) ([]config.Step, string, error) {

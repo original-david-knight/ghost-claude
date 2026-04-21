@@ -3,6 +3,8 @@ package main
 import (
 	"path/filepath"
 	"testing"
+
+	"ghost_claude/internal/config"
 )
 
 func TestResolveInitSourceArgFromFlag(t *testing.T) {
@@ -77,5 +79,51 @@ func TestResolveConfigPathKeepsAbsoluteConfigPath(t *testing.T) {
 
 	if got != absConfig {
 		t.Fatalf("expected %q, got %q", absConfig, got)
+	}
+}
+
+func TestApplyRuntimeAgentRolesUsesDefaults(t *testing.T) {
+	cfg := newRuntimeRoleConfig()
+
+	if err := applyRuntimeAgentRoles(cfg, "", ""); err != nil {
+		t.Fatalf("applyRuntimeAgentRoles returned error: %v", err)
+	}
+
+	if cfg.CoderAgent() != config.AgentCodex {
+		t.Fatalf("expected default coder %q, got %q", config.AgentCodex, cfg.CoderAgent())
+	}
+	if cfg.ReviewerAgent() != config.AgentClaude {
+		t.Fatalf("expected default reviewer %q, got %q", config.AgentClaude, cfg.ReviewerAgent())
+	}
+}
+
+func TestApplyRuntimeAgentRolesOverridesDefaults(t *testing.T) {
+	cfg := newRuntimeRoleConfig()
+
+	if err := applyRuntimeAgentRoles(cfg, config.AgentClaude, config.AgentCodex); err != nil {
+		t.Fatalf("applyRuntimeAgentRoles returned error: %v", err)
+	}
+
+	if cfg.CoderAgent() != config.AgentClaude {
+		t.Fatalf("expected coder %q, got %q", config.AgentClaude, cfg.CoderAgent())
+	}
+	if cfg.ReviewerAgent() != config.AgentCodex {
+		t.Fatalf("expected reviewer %q, got %q", config.AgentCodex, cfg.ReviewerAgent())
+	}
+}
+
+func newRuntimeRoleConfig() *config.Config {
+	return &config.Config{
+		MaxStalledIterations: 1,
+		Claude: config.ClaudeConfig{
+			Command:         "claude",
+			Transport:       config.ClaudeTransportTUI,
+			StartupTimeout:  "30s",
+			SessionStrategy: config.SessionStrategySessionID,
+		},
+		Steps: []config.Step{
+			{Name: "execute", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "execute"},
+			{Name: "review", Type: config.StepTypeAgent, Actor: config.StepActorReviewer, Prompt: "review"},
+		},
 	}
 }

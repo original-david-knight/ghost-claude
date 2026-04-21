@@ -1,17 +1,18 @@
 # ghost-claude
 
-`ghost-claude` is a terminal-native Go runner that drives Claude Code through a configurable workflow.
+`ghost-claude` is a terminal-native Go runner that drives Claude Code and Codex through a configurable workflow.
 
 Its primary execution queue is `ghost-plan.yaml`: a machine-readable task graph that the runner reads, updates, and advances automatically.
 
 Legacy TODO mode still exists for compatibility, but the current scaffolded flow does not step through `TODO.md` unless you intentionally omit `plan_file` and configure checklist-based steps.
 
-It launches Claude's real fullscreen TUI inside a PTY, types prompts as terminal input, and waits for Claude to return to idle before sending the next step. Each work item gets a fresh Claude session, and individual Claude steps can opt into their own fresh sessions too.
+It launches Claude's real fullscreen TUI inside a PTY when Claude-backed steps run, and it can also invoke Codex non-interactively. The scaffolded workflow uses stable coder/reviewer steps, and you can flip either role at run time.
 
 ## Requirements
 
 - Go 1.26+ (the version declared in `go.mod` is currently `1.26.0`)
 - The `claude` CLI installed and on your `$PATH` ([Claude Code](https://docs.claude.com/en/docs/claude-code))
+- The `codex` CLI installed and on your `$PATH` for the default scaffolded implementation flow
 - A `ghost-plan.yaml` file with machine-readable tasks for normal operation
 - Optionally, a `TODO.md` file with GitHub-style checkboxes if you intentionally want legacy checklist mode or want to use it as a planning input
 
@@ -32,9 +33,11 @@ go run ./cmd/ghost-claude <subcommand>
 From inside the repo you want ghost-claude to work on:
 
 ```bash
-ghost-claude init              # writes ghost-claude.yaml, uses all top-level regular files in the workspace dir as source, then asks Claude to generate ghost-plan.yaml and review it with Codex
+ghost-claude init              # writes ghost-claude.yaml, uses all top-level regular files in the workspace dir as source, then asks Claude to generate ghost-plan.yaml and review it
 ghost-claude init DESIGN.md    # or point init at a specific source file or directory
-ghost-claude run    # starts the loop
+ghost-claude run    # starts the loop with coder=codex and reviewer=claude
+ghost-claude run --coder claude --reviewer codex   # flips roles at run time without changing ghost-plan.yaml
+ghost-claude run --coder codex --reviewer codex    # same agent can both code and review
 ```
 
 Target a different repo without `cd`:
@@ -60,7 +63,7 @@ For each iteration:
    In the default and current flow, this is the first ready task in `ghost-plan.yaml`, with `in_progress` tasks preferred over `todo` tasks and dependencies respected.
    Legacy TODO mode instead uses the first unchecked `- [ ]` item in `TODO.md`.
 2. Start a fresh Claude session when a Claude step needs one.
-3. Run every configured step in order. By default Claude steps share one session for the work item, but `fresh_session: true` isolates a step in its own Claude session.
+3. Run every configured step in order. Claude steps share one session for the work item by default, but `fresh_session: true` isolates a Claude step in its own session. Codex steps run non-interactively.
 4. Close any Claude sessions that were opened.
 5. Re-read the queue state. If the selected item changed state, advance. If not, count a stall and retry.
 
@@ -68,19 +71,20 @@ The runner stops when there is no work left, when `max_iterations` is reached, o
 
 The default workflow scaffolded by `ghost-claude init` is plan-oriented and uses `ghost-plan.yaml` as the execution queue:
 
-1. Execute the selected task in a fresh Claude session while preserving the plan's hard constraints.
-2. Ask Codex for a review on non-trivial diffs in a separate fresh Claude session.
-3. Run the task's configured `verify_commands`, apply the JSON task result to `ghost-plan.yaml`, and commit the iteration with an exec step.
+1. Execute the selected task with the current coder while preserving the plan's hard constraints.
+2. Ask the current reviewer to review the changes and write a structured review artifact.
+3. Run a second coder step that reads the review artifact and fixes any actionable findings.
+4. Run the task's configured `verify_commands`, apply the JSON task result to `ghost-plan.yaml`, and commit the iteration with an exec step.
 
 During `init`, ghost-claude bootstraps plan mode in two phases:
 
 1. Write `ghost-claude.yaml`.
-2. Ask Claude to read the provided source file or directory, or all regular files in the workspace directory when no source is provided, then generate `ghost-plan.yaml`, perform a Codex-backed review, and revise the plan.
+2. Ask Claude to read the provided source file or directory, or all regular files in the workspace directory when no source is provided, then generate `ghost-plan.yaml`, review it critically, and revise the plan.
 
 ## Subcommands
 
 ```
-ghost-claude run  [-config PATH] [-workspace DIR] [-dry-run]
+ghost-claude run  [-config PATH] [-workspace DIR] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
 ghost-claude init [-config PATH] [-workspace DIR] [-source PATH] [-force] [SOURCE]
 ghost-claude task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 ghost-claude help
@@ -109,15 +113,25 @@ claude:
   startup_timeout: 30s
   session_strategy: session_id
   args:
+    - --effort
+    - max
     - --permission-mode
     - bypassPermissions
+
+codex:
+  command: codex
+  args:
+    - --dangerously-bypass-approvals-and-sandbox
+    - exec
+    - -c
+    - model_reasoning_effort="xhigh"
 
 workflows:
   implement:
     steps:
       - name: execute-task
-        type: claude
-        fresh_session: true
+        type: agent
+        actor: coder
         prompt: |
           Execute task {{ .Task.ID }} from {{ .PlanFile }}.
           Title: {{ .Task.Title }}
@@ -127,11 +141,17 @@ workflows:
           - {{ . }}
           {{- end }}
 
-      - name: codex-review
-        type: claude
-        fresh_session: true
+      - name: peer-review
+        type: agent
+        actor: reviewer
         prompt: |
-          If the current diff represents a non-trivial change, use /codex for a code review and address any actionable feedback.
+          Review the current uncommitted changes for task {{ .Task.ID }} from {{ .PlanFile }}.
+
+      - name: address-peer-review
+        type: agent
+        actor: coder
+        prompt: |
+          Read the peer review artifact at {{ .ReviewPath }} for task {{ .Task.ID }} from {{ .PlanFile }}.
 
       - name: finalize-task
         type: exec
@@ -240,7 +260,7 @@ The intended use is:
 
 | Field                    | Default       | Meaning                                                            |
 | ------------------------ | ------------- | ------------------------------------------------------------------ |
-| `workspace`              | `.`           | Directory Claude and exec steps run in. Relative `todo_file` and `plan_file` resolve under it. |
+| `workspace`              | `.`           | Directory Claude, Codex, and exec steps run in. Relative `todo_file` and `plan_file` resolve under it. |
 | `todo_file`              | `TODO.md`     | Legacy checklist file. Also useful as a constraints source.        |
 | `plan_file`              | unset         | Machine-readable task file for plan mode.                          |
 | `max_iterations`         | `0`           | Hard cap on iterations. `0` means unlimited.                       |
@@ -253,22 +273,34 @@ The intended use is:
 | Field              | Default      | Meaning                                                                 |
 | ------------------ | ------------ | ----------------------------------------------------------------------- |
 | `command`          | `claude`     | Executable to launch.                                                   |
-| `args`             | `[]`         | Extra CLI flags passed to Claude.                                       |
+| `args`             | `["--effort", "max"]` | Extra CLI flags passed to Claude. If you set custom args without an explicit `--effort`, ghost-claude appends `--effort max`. |
 | `transport`        | `tui`        | `tui` drives the fullscreen UI inside a PTY. `print` uses `--print`.   |
 | `startup_timeout`  | `30s`        | How long to wait for Claude to become ready before failing.             |
 | `session_strategy` | `session_id` | `session_id` starts a new session per item; `continue` resumes.         |
+
+### `codex` block
+
+| Field     | Default                                           | Meaning                                                  |
+| --------- | ------------------------------------------------- | -------------------------------------------------------- |
+| `command` | `codex`                                           | Executable to launch.                                    |
+| `args`    | `["--dangerously-bypass-approvals-and-sandbox", "exec", "-c", "model_reasoning_effort=\"xhigh\""]` | Extra CLI flags passed to Codex before the rendered prompt. |
+
+ghost-claude prepends `--dangerously-bypass-approvals-and-sandbox` to Codex invocations so the agent never pauses for approval prompts. If you set custom `codex.args` without an explicit `model_reasoning_effort=...` override, ghost-claude appends `-c model_reasoning_effort="xhigh"`.
+
+When the Codex subcommand is `exec`, ghost-claude enables Codex's JSON event stream internally and renders a filtered terminal view: agent messages, command names, and file-change summaries stay visible, while command output, raw file reads, and diff bodies are suppressed. If you explicitly include `--json` in `codex.args`, ghost-claude leaves the stream untouched.
 
 ### Step fields
 
 | Field               | Applies to  | Meaning                                                           |
 | ------------------- | ----------- | ----------------------------------------------------------------- |
 | `name`              | all         | Required. Shown in logs.                                          |
-| `type`              | all         | `claude` (default) or `exec`.                                     |
-| `prompt`            | claude      | Go template rendered and sent to Claude.                          |
+| `type`              | all         | `claude` (default), `codex`, `agent`, or `exec`.                  |
+| `actor`             | agent       | `coder` or `reviewer`. Resolved at runtime from `--coder` / `--reviewer`, defaulting to `codex` and `claude`. |
+| `prompt`            | claude, codex, agent | Go template rendered and sent to the resolved agent.        |
 | `command`           | exec        | Argv list to run. Each element is a Go template.                  |
 | `working_dir`       | exec        | Defaults to `workspace`. Relative paths resolve from `workspace`. |
 | `env`               | exec        | Extra env vars. Values are Go templates.                          |
-| `fresh_session`     | claude      | Run this Claude step in a one-off session instead of the shared item session. |
+| `fresh_session`     | claude-backed steps | Run this Claude-backed step in a one-off session instead of the shared item session. |
 | `timeout`           | all         | Go duration (for example `10m`). No timeout by default.           |
 | `continue_on_error` | all         | Log the failure and keep going instead of aborting.               |
 | `disabled`          | all         | Skip the step.                                                    |
@@ -291,6 +323,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `{{ .Iteration }}`
 - `{{ .SessionID }}`
 - `{{ .TaskResultPath }}`
+- `{{ .ReviewPath }}`
 - `{{ .NextTodo.Line }}` — 1-indexed line number in `TODO.md`
 - `{{ .NextTodo.Raw }}` — the entire line, including the checkbox
 - `{{ .NextTodo.Text }}` — just the task description
@@ -304,11 +337,14 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - In the normal plan-based flow, the runner advances when the selected task changes status or notes in `ghost-plan.yaml`.
 - The generated config from `ghost-claude init` runs in plan mode, so `TODO.md` is not the live execution queue unless you deliberately switch back to legacy TODO mode.
 - `ghost-plan.yaml` is intended to be machine-owned state. The default workflow updates it through `ghost-claude task finalize`.
-- `ghost-claude task finalize` accepts `done`, `in_progress`, `blocked`, and `manual` task results. The scaffolded prompts only instruct Claude to emit the first three.
+- `ghost-claude task finalize` accepts `done`, `in_progress`, `blocked`, and `manual` task results. The scaffolded prompts only instruct the implementation steps to emit the first three.
 - `verify_commands` lets plan tasks declare deterministic checks for the exec finalizer to run before a task can stay `done`.
 - If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note, removes the result file, and returns an error without committing.
+- `ghost-claude task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - The finalizer stages changes with `git add -A` and only creates a commit when something is actually staged.
-- Review prompts can assume Claude has a `/codex` command available and can use it for code or plan review.
+- Codex steps are non-interactive by default because the scaffold uses `codex exec`. In that mode, ghost-claude suppresses raw file-read and diff payloads but still shows the rest of Codex's progress. If you want a different Codex mode, change the `codex.args` block.
+- `--coder` and `--reviewer` are independent. You can set them to different agents or to the same agent.
+- Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`codex` and reviewer=`claude`.
 - `ghost-claude init` uses the configured Claude transport. With the default `tui` transport, you can watch Claude generate and review the plan live in your terminal.
 - In TUI mode, YAML multiline prompts are flattened into one submitted message, because real newlines would be interpreted as separate messages by Claude's composer.
 - In a fresh workspace, the runner auto-confirms Claude's trust dialog so the loop can start unattended.

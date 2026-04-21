@@ -30,8 +30,26 @@ func TestWritePreservesExistingTODO(t *testing.T) {
 	if !strings.Contains(string(configContent), "plan_file: ghost-plan.yaml") {
 		t.Fatalf("expected plan mode sample config, got %q", string(configContent))
 	}
-	if !strings.Contains(string(configContent), "fresh_session: true") {
-		t.Fatalf("expected scaffolded config to isolate key Claude steps, got %q", string(configContent))
+	if !strings.Contains(string(configContent), "codex:") {
+		t.Fatalf("expected scaffolded config to define codex, got %q", string(configContent))
+	}
+	if strings.Contains(string(configContent), "\ncoder:") || strings.Contains(string(configContent), "\nreviewer:") {
+		t.Fatalf("expected scaffolded config to leave runtime role selection to CLI flags, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "type: agent") || !strings.Contains(string(configContent), "actor: coder") {
+		t.Fatalf("expected scaffolded config to use runtime-resolved coder steps, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "peer-review") || !strings.Contains(string(configContent), "actor: reviewer") {
+		t.Fatalf("expected scaffolded config to use runtime-resolved reviewer steps, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "address-peer-review") {
+		t.Fatalf("expected scaffolded config to hand peer-review findings back to the coder, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "{{ .ReviewPath }}") {
+		t.Fatalf("expected scaffolded config to use the review artifact path, got %q", string(configContent))
+	}
+	if strings.Contains(string(configContent), "fresh_session: true") {
+		t.Fatalf("expected scaffolded config to avoid extra Claude sessions in the default workflow, got %q", string(configContent))
 	}
 	if !strings.Contains(string(configContent), "task\n          - finalize") && !strings.Contains(string(configContent), "- task\n          - finalize") {
 		t.Fatalf("expected scaffolded config to use the task finalize helper, got %q", string(configContent))
@@ -97,8 +115,17 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	if !strings.Contains(string(configContent), "workspace: .") {
 		t.Fatalf("expected sample config content, got %q", string(configContent))
 	}
-	if !strings.Contains(string(configContent), "fresh_session: true") {
-		t.Fatalf("expected scaffolded config to isolate key Claude steps, got %q", string(configContent))
+	if !strings.Contains(string(configContent), "type: agent") || !strings.Contains(string(configContent), "actor: coder") {
+		t.Fatalf("expected scaffolded config to use runtime-resolved coder steps, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "address-peer-review") {
+		t.Fatalf("expected scaffolded config to hand peer-review findings back to the coder, got %q", string(configContent))
+	}
+	if strings.Contains(string(configContent), "\ncoder:") || strings.Contains(string(configContent), "\nreviewer:") {
+		t.Fatalf("expected scaffolded config to leave runtime role selection to CLI flags, got %q", string(configContent))
+	}
+	if strings.Contains(string(configContent), "fresh_session: true") {
+		t.Fatalf("expected scaffolded config to avoid extra Claude sessions in the default workflow, got %q", string(configContent))
 	}
 	if strings.Contains(string(configContent), "todo_file:") {
 		t.Fatalf("expected scaffolded config to stop pinning todo_file, got %q", string(configContent))

@@ -67,8 +67,11 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if strings.Contains(client.prompts[0], "TODO.md") {
 		t.Fatalf("expected first prompt to stop assuming TODO.md, got %q", client.prompts[0])
 	}
-	if !strings.Contains(client.prompts[1], "Use the /codex command") {
-		t.Fatalf("expected second prompt to require /codex review, got %q", client.prompts[1])
+	if !strings.Contains(client.prompts[1], "Perform a critical review of the plan") {
+		t.Fatalf("expected second prompt to request a critical plan review, got %q", client.prompts[1])
+	}
+	if strings.Contains(client.prompts[1], "/codex") {
+		t.Fatalf("expected second prompt to stop requiring /codex, got %q", client.prompts[1])
 	}
 	if !client.closed {
 		t.Fatal("expected client to be closed")

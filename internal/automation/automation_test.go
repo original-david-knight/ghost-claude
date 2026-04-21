@@ -28,10 +28,12 @@ tasks:
 `)
 
 	resultPath := ResultPath(dir, "scaffold")
+	reviewPath := ReviewPath(dir, "scaffold")
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
 	writeFile(t, resultPath, `{"status":"done","notes":"finished work"}`)
+	writeFile(t, reviewPath, `{"decision":"approved","summary":"looks good","findings":[]}`)
 
 	err := Finalize(context.Background(), FinalizeOptions{
 		Workspace:     dir,
@@ -62,6 +64,9 @@ tasks:
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
 	}
+	if _, err := os.Stat(reviewPath); !os.IsNotExist(err) {
+		t.Fatalf("expected review file to be removed, stat err=%v", err)
+	}
 
 	commitMessage := runCmd(t, dir, "git", "-C", dir, "log", "-1", "--pretty=%s")
 	if strings.TrimSpace(commitMessage) != "feat: finish scaffold" {
@@ -86,10 +91,12 @@ tasks:
 `)
 
 	resultPath := ResultPath(dir, "scaffold")
+	reviewPath := ReviewPath(dir, "scaffold")
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
 	writeFile(t, resultPath, `{"status":"done","notes":"implementation complete"}`)
+	writeFile(t, reviewPath, `{"decision":"changes_requested","summary":"needs fixes","findings":["add a real verification command"]}`)
 
 	err := Finalize(context.Background(), FinalizeOptions{
 		Workspace:     dir,
@@ -119,6 +126,9 @@ tasks:
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(reviewPath); !os.IsNotExist(err) {
+		t.Fatalf("expected review file to be removed, stat err=%v", err)
 	}
 	if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err == nil {
 		t.Fatal("expected no commit to be created when verification fails")

@@ -15,6 +15,7 @@ import (
 )
 
 const resultDir = ".ghost-claude/task-results"
+const reviewDir = ".ghost-claude/reviews"
 
 type TaskResult struct {
 	Status string `json:"status"`
@@ -30,11 +31,19 @@ type FinalizeOptions struct {
 }
 
 func ResultPath(workspace, taskID string) string {
+	return artifactPath(workspace, resultDir, taskID, ".json")
+}
+
+func ReviewPath(workspace, taskID string) string {
+	return artifactPath(workspace, reviewDir, taskID, ".json")
+}
+
+func artifactPath(workspace, dir, taskID, ext string) string {
 	fileName := strings.NewReplacer("/", "_", "\\", "_").Replace(strings.TrimSpace(taskID))
 	if fileName == "" {
 		fileName = "task"
 	}
-	return filepath.Join(workspace, resultDir, fileName+".json")
+	return filepath.Join(workspace, dir, fileName+ext)
 }
 
 func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Writer) error {
@@ -64,6 +73,9 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 			if err := removeResultFile(opts.ResultPath); err != nil {
 				return err
 			}
+			if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
+				return err
+			}
 			if err := file.Save(); err != nil {
 				return err
 			}
@@ -78,6 +90,9 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 		return err
 	}
 	if err := removeResultFile(opts.ResultPath); err != nil {
+		return err
+	}
+	if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
 		return err
 	}
 	if err := file.Save(); err != nil {
@@ -185,6 +200,10 @@ func runGit(ctx context.Context, workspace string, stdout, stderr io.Writer, arg
 }
 
 func removeResultFile(path string) error {
+	return removeArtifactFile(path)
+}
+
+func removeArtifactFile(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}

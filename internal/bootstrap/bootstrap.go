@@ -154,7 +154,7 @@ Requirements for the plan:
 - source_docs must include every listed source input and any repo docs referenced from them that are necessary to execute the project correctly
 - constraint_files must include the subset of source_docs that define hard requirements, constraints, checkpoints, or success criteria
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
-- decompose the project into executable tasks that are sized for one focused Claude iteration and one coherent commit when practical
+- decompose the project into executable tasks that are sized for one focused implementation iteration and one coherent commit when practical
 - use workflow implement for coding work and workflow checkpoint for explicit full-suite or milestone verification gates
 - keep all generated tasks at status todo
 - do not silently drop manual, machine-specific, or external-dependency work; represent it in tasks/details so the execution plan remains faithful to the source requirements
@@ -177,7 +177,7 @@ Review the generated execution plan in %s against these source inputs:
 
 Also inspect any source docs they reference when checking plan coverage and fidelity.
 
-Use the /codex command to perform a critical review of the plan. Focus on:
+Perform a critical review of the plan. Focus on:
 - missing constraints or success criteria
 - incorrect or weak task decomposition
 - missing checkpoints or verification work

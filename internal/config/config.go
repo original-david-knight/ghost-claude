@@ -11,6 +11,8 @@ import (
 
 const (
 	StepTypeClaude = "claude"
+	StepTypeCodex  = "codex"
+	StepTypeAgent  = "agent"
 	StepTypeExec   = "exec"
 
 	ClaudeTransportPrint = "print"
@@ -18,6 +20,16 @@ const (
 
 	SessionStrategySessionID = "session_id"
 	SessionStrategyContinue  = "continue"
+
+	defaultClaudeEffort         = "max"
+	defaultCodexReasoningEffort = "xhigh"
+	defaultCodexBypassFlag      = "--dangerously-bypass-approvals-and-sandbox"
+
+	AgentClaude = "claude"
+	AgentCodex  = "codex"
+
+	StepActorCoder    = "coder"
+	StepActorReviewer = "reviewer"
 )
 
 type Config struct {
@@ -30,7 +42,10 @@ type Config struct {
 	MaxIterations        int                 `yaml:"max_iterations"`
 	MaxStalledIterations int                 `yaml:"max_stalled_iterations"`
 	DefaultWorkflow      string              `yaml:"default_workflow"`
+	Coder                string              `yaml:"-"`
+	Reviewer             string              `yaml:"-"`
 	Claude               ClaudeConfig        `yaml:"claude"`
+	Codex                CodexConfig         `yaml:"codex"`
 	Steps                []Step              `yaml:"steps"`
 	Workflows            map[string]Workflow `yaml:"workflows"`
 }
@@ -43,9 +58,15 @@ type ClaudeConfig struct {
 	SessionStrategy string   `yaml:"session_strategy"`
 }
 
+type CodexConfig struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+}
+
 type Step struct {
 	Name            string            `yaml:"name"`
 	Type            string            `yaml:"type"`
+	Actor           string            `yaml:"actor"`
 	Prompt          string            `yaml:"prompt"`
 	Command         []string          `yaml:"command"`
 	WorkingDir      string            `yaml:"working_dir"`
@@ -114,6 +135,12 @@ func Load(path string) (*Config, error) {
 	if cfg.Claude.SessionStrategy == "" {
 		cfg.Claude.SessionStrategy = SessionStrategySessionID
 	}
+	cfg.Claude.Args = ensureDefaultClaudeArgs(cfg.Claude.Args)
+
+	if cfg.Codex.Command == "" {
+		cfg.Codex.Command = "codex"
+	}
+	cfg.Codex.Args = ensureDefaultCodexArgs(cfg.Codex.Args)
 
 	for i := range cfg.Steps {
 		if cfg.Steps[i].Type == "" {
@@ -146,6 +173,12 @@ func (c *Config) Validate() error {
 	if c.Claude.Command == "" {
 		return fmt.Errorf("claude.command is required")
 	}
+	if strings.TrimSpace(c.Coder) != "" && !isValidAgent(c.CoderAgent()) {
+		return fmt.Errorf("coder %q is not supported", c.Coder)
+	}
+	if strings.TrimSpace(c.Reviewer) != "" && !isValidAgent(c.ReviewerAgent()) {
+		return fmt.Errorf("reviewer %q is not supported", c.Reviewer)
+	}
 
 	switch normalize(c.Claude.Transport) {
 	case ClaudeTransportPrint, ClaudeTransportTUI:
@@ -170,6 +203,15 @@ func (c *Config) Validate() error {
 	for i, step := range c.Steps {
 		if err := validateStep(fmt.Sprintf("steps[%d]", i), step); err != nil {
 			return err
+		}
+	}
+
+	if c.usesAgentSteps() {
+		if strings.TrimSpace(c.Coder) == "" {
+			return fmt.Errorf("coder is required when using agent steps")
+		}
+		if strings.TrimSpace(c.Reviewer) == "" {
+			return fmt.Errorf("reviewer is required when using agent steps")
 		}
 	}
 
@@ -203,17 +245,136 @@ func defaultConfig() Config {
 		Workspace:            ".",
 		TodoFile:             "TODO.md",
 		MaxStalledIterations: 2,
+		Coder:                AgentCodex,
+		Reviewer:             AgentClaude,
 		Claude: ClaudeConfig{
 			Command:         "claude",
+			Args:            []string{"--effort", defaultClaudeEffort},
 			Transport:       ClaudeTransportTUI,
 			StartupTimeout:  "30s",
 			SessionStrategy: SessionStrategySessionID,
+		},
+		Codex: CodexConfig{
+			Command: "codex",
+			Args:    defaultCodexArgs(),
 		},
 	}
 }
 
 func normalize(value string) string {
 	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func normalizeAgent(value string) string {
+	return normalize(value)
+}
+
+func isValidAgent(value string) bool {
+	switch normalizeAgent(value) {
+	case AgentClaude, AgentCodex:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Config) CoderAgent() string {
+	return normalizeAgent(c.Coder)
+}
+
+func (c *Config) ReviewerAgent() string {
+	return normalizeAgent(c.Reviewer)
+}
+
+func ensureDefaultClaudeArgs(args []string) []string {
+	if hasClaudeEffortArg(args) {
+		return append([]string{}, args...)
+	}
+
+	withDefault := append([]string{}, args...)
+	withDefault = append(withDefault, "--effort", defaultClaudeEffort)
+	return withDefault
+}
+
+func ensureDefaultCodexArgs(args []string) []string {
+	if len(args) == 0 {
+		return defaultCodexArgs()
+	}
+
+	withDefault := ensureCodexYOLOArgs(args)
+	if hasCodexReasoningArg(withDefault) {
+		return withDefault
+	}
+	withDefault = append(withDefault, "-c", defaultCodexReasoningConfig())
+	return withDefault
+}
+
+func defaultCodexArgs() []string {
+	return []string{
+		defaultCodexBypassFlag,
+		"exec",
+		"-c",
+		defaultCodexReasoningConfig(),
+	}
+}
+
+func ensureCodexYOLOArgs(args []string) []string {
+	stripped := stripCodexPermissionArgs(args)
+	withBypass := []string{defaultCodexBypassFlag}
+	return append(withBypass, stripped...)
+}
+
+func defaultCodexReasoningConfig() string {
+	return fmt.Sprintf(`model_reasoning_effort=%q`, defaultCodexReasoningEffort)
+}
+
+func hasClaudeEffortArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--effort" || strings.HasPrefix(arg, "--effort=") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCodexReasoningArg(args []string) bool {
+	for i, arg := range args {
+		if hasCodexReasoningConfig(arg) {
+			return true
+		}
+		if (arg == "-c" || arg == "--config") && i+1 < len(args) && hasCodexReasoningConfig(args[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCodexReasoningConfig(arg string) bool {
+	return strings.Contains(arg, "model_reasoning_effort=") || strings.Contains(arg, "reasoning_effort=")
+}
+
+func stripCodexPermissionArgs(args []string) []string {
+	stripped := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch {
+		case arg == defaultCodexBypassFlag, arg == "--full-auto":
+			continue
+		case arg == "-a" || arg == "--ask-for-approval" || arg == "-s" || arg == "--sandbox":
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		case strings.HasPrefix(arg, "--ask-for-approval="), strings.HasPrefix(arg, "--sandbox="):
+			continue
+		default:
+			stripped = append(stripped, arg)
+		}
+	}
+
+	return stripped
 }
 
 func validateStep(path string, step Step) error {
@@ -226,6 +387,19 @@ func validateStep(path string, step Step) error {
 		if strings.TrimSpace(step.Prompt) == "" {
 			return fmt.Errorf("%s.prompt is required for claude steps", path)
 		}
+	case StepTypeCodex:
+		if strings.TrimSpace(step.Prompt) == "" {
+			return fmt.Errorf("%s.prompt is required for codex steps", path)
+		}
+	case StepTypeAgent:
+		if strings.TrimSpace(step.Prompt) == "" {
+			return fmt.Errorf("%s.prompt is required for agent steps", path)
+		}
+		switch normalize(step.Actor) {
+		case StepActorCoder, StepActorReviewer:
+		default:
+			return fmt.Errorf("%s.actor %q is not supported", path, step.Actor)
+		}
 	case StepTypeExec:
 		if len(step.Command) == 0 {
 			return fmt.Errorf("%s.command is required for exec steps", path)
@@ -235,4 +409,20 @@ func validateStep(path string, step Step) error {
 	}
 
 	return nil
+}
+
+func (c *Config) usesAgentSteps() bool {
+	for _, step := range c.Steps {
+		if normalize(step.Type) == StepTypeAgent {
+			return true
+		}
+	}
+	for _, workflow := range c.Workflows {
+		for _, step := range workflow.Steps {
+			if normalize(step.Type) == StepTypeAgent {
+				return true
+			}
+		}
+	}
+	return false
 }

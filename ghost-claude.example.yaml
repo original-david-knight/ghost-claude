@@ -9,15 +9,25 @@ claude:
   transport: tui
   startup_timeout: 30s
   args:
+    - --effort
+    - max
     - --permission-mode
     - bypassPermissions
+
+codex:
+  command: codex
+  args:
+    - --dangerously-bypass-approvals-and-sandbox
+    - exec
+    - -c
+    - model_reasoning_effort="xhigh"
 
 workflows:
   implement:
     steps:
       - name: execute-task
-        type: claude
-        fresh_session: true
+        type: agent
+        actor: coder
         prompt: |
           Execute task {{ .Task.ID }} from {{ .PlanFile }}.
           Title: {{ .Task.Title }}
@@ -58,13 +68,35 @@ workflows:
           Set status to blocked when an external dependency, human decision, or missing prerequisite prevents completion.
           Keep notes short and specific.
 
-      - name: codex-review
-        type: claude
-        fresh_session: true
+      - name: peer-review
+        type: agent
+        actor: reviewer
         prompt: |
-          If the current diff represents a non-trivial change, use /codex for a code review and address any actionable feedback.
-          If your review changes the task's completion state or remaining work, update {{ .TaskResultPath }} to keep the status and notes accurate.
-          Skip this step for trivial changes and leave {{ .TaskResultPath }} unchanged.
+          Review the current uncommitted changes for task {{ .Task.ID }} from {{ .PlanFile }}.
+          Focus on correctness issues, regressions, missing tests, and mismatches with the task requirements.
+          Do not make code changes in this step.
+
+          Write {{ .ReviewPath }} as JSON with this schema:
+          {"decision":"approved|changes_requested","summary":"brief summary","findings":["actionable finding","..."]}
+
+          Use decision=approved with an empty findings list when there are no actionable issues.
+          Use decision=changes_requested only when the coder should make follow-up fixes before finalize.
+          Keep findings short, concrete, and specific enough for the coder to act on directly.
+
+      - name: address-peer-review
+        type: agent
+        actor: coder
+        prompt: |
+          Read the peer review artifact at {{ .ReviewPath }} for task {{ .Task.ID }} from {{ .PlanFile }}.
+          If the reviewer requested changes, address each actionable finding before finalizing the task.
+          If the reviewer approved the change, leave the code and {{ .TaskResultPath }} unchanged unless you discover a real issue while verifying the review.
+
+          Keep {{ .TaskResultPath }} accurate:
+          - leave it as done only if the task is complete and ready for verification
+          - change it to in_progress if review issues remain or more work is needed
+          - change it to blocked if an external dependency or human decision prevents completion
+
+          Do not edit {{ .PlanFile }} directly.
 
       - name: finalize-task
         type: exec
@@ -86,8 +118,8 @@ workflows:
   checkpoint:
     steps:
       - name: run-checkpoint
-        type: claude
-        fresh_session: true
+        type: agent
+        actor: coder
         prompt: |
           Execute the checkpoint task {{ .Task.ID }} from {{ .PlanFile }}.
           Title: {{ .Task.Title }}
@@ -120,6 +152,36 @@ workflows:
           Set status to in_progress when meaningful progress was made but more work is still required.
           Set status to blocked when an external dependency, human decision, or missing prerequisite prevents completion.
           Keep notes short and specific.
+
+      - name: peer-review
+        type: agent
+        actor: reviewer
+        prompt: |
+          Review the current uncommitted changes for checkpoint task {{ .Task.ID }} from {{ .PlanFile }}.
+          Focus on correctness issues, regressions, missing tests, and mismatches with the checkpoint requirements.
+          Do not make code changes in this step.
+
+          Write {{ .ReviewPath }} as JSON with this schema:
+          {"decision":"approved|changes_requested","summary":"brief summary","findings":["actionable finding","..."]}
+
+          Use decision=approved with an empty findings list when there are no actionable issues.
+          Use decision=changes_requested only when the coder should make follow-up fixes before finalize.
+          Keep findings short, concrete, and specific enough for the coder to act on directly.
+
+      - name: address-peer-review
+        type: agent
+        actor: coder
+        prompt: |
+          Read the peer review artifact at {{ .ReviewPath }} for checkpoint task {{ .Task.ID }} from {{ .PlanFile }}.
+          If the reviewer requested changes, address each actionable finding before finalizing the checkpoint.
+          If the reviewer approved the change, leave the code and {{ .TaskResultPath }} unchanged unless you discover a real issue while verifying the review.
+
+          Keep {{ .TaskResultPath }} accurate:
+          - leave it as done only if the checkpoint is complete and ready for verification
+          - change it to in_progress if review issues remain or more work is needed
+          - change it to blocked if an external dependency or human decision prevents completion
+
+          Do not edit {{ .PlanFile }} directly.
 
       - name: finalize-task
         type: exec
