@@ -143,7 +143,7 @@ tasks:
     - id: verify-init-improvements
       title: Verify the init improvements end to end
       details: Run the targeted and broad verification needed to catch regressions in the init, bootstrap, restart, and plan-handling paths after the new behavior lands.
-      status: todo
+      status: done
       workflow: checkpoint
       deps:
         - document-init-improvements
@@ -162,3 +162,4 @@ tasks:
         - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/plan ./internal/automation
         - go test ./...
       commit_message: 'chore: verify init improvements'
+      notes: Targeted `go test ./cmd/ghost-claude ./internal/bootstrap ./internal/plan ./internal/automation` and full `go test ./...` passed. `help`, `init -h`, and a temp-workspace `init --print-sources --source DESIGN.md --source docs/specs DESIGN.md` smoke check matched the README/help text, confirmed deduped sorted source resolution, and confirmed no config or plan files are written; on fresh reruns, keep that smoke check because help/docs drift is still the main risk.
