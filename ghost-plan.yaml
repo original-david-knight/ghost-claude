@@ -1,191 +1,159 @@
 project:
-  name: improve-init-bootstrap
-  objective: Improve `ghost-claude init` so it generates pragmatic plans with trigger-based debt review, explicit source selection, and configurable bootstrap planner behavior without promising runtime capabilities the runner does not implement today.
-  source_docs:
-    - README.md
-    - cmd/ghost-claude/main.go
-    - cmd/ghost-claude/main_test.go
-    - internal/bootstrap/bootstrap.go
-    - internal/bootstrap/bootstrap_test.go
-    - internal/bootstrap/restart.go
-    - internal/bootstrap/restart_test.go
-    - internal/plan/plan.go
-    - internal/automation/automation.go
-  constraint_files:
-    - internal/plan/plan.go
-    - internal/automation/automation.go
-
+    name: improve-init-bootstrap
+    objective: Improve `ghost-claude init` so it generates pragmatic plans with trigger-based debt review, explicit source selection, and configurable bootstrap planner behavior without promising runtime capabilities the runner does not implement today.
+    source_docs:
+        - README.md
+        - cmd/ghost-claude/main.go
+        - cmd/ghost-claude/main_test.go
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/bootstrap_test.go
+        - internal/bootstrap/restart.go
+        - internal/bootstrap/restart_test.go
+        - internal/plan/plan.go
+        - internal/automation/automation.go
+    constraint_files:
+        - internal/plan/plan.go
+        - internal/automation/automation.go
 tasks:
-  - id: trigger-based-init-policy
-    title: Replace init's fixed debt cadence with trigger-based planning rules
-    workflow: implement
-    status: todo
-    details: >-
-      Update the bootstrap plan-generation and review prompts so standalone
-      tech-debt tasks are created only when a task is expected to introduce a
-      new abstraction, risky temporary coupling or workaround, destructive or
-      stateful behavior, or broad expected file impact. Keep test and cleanup
-      expectations attached to implementation tasks otherwise, and remove the
-      scheduled "five dev steps then debt review" rhythm entirely.
-    context_files:
-      - internal/bootstrap/bootstrap.go
-      - internal/bootstrap/bootstrap_test.go
-      - README.md
-    acceptance:
-      - The create-plan and review-plan prompts no longer require a fixed scheduled debt-review cadence.
-      - The bootstrap prompts require inline testing and cleanup by default, with standalone tech-debt tasks only when explicit risk triggers justify them.
-      - Bootstrap tests assert the new trigger-based language and stop depending on the removed cadence wording.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./internal/bootstrap
-    commit_message: "feat: make init debt planning trigger-based"
-
-  - id: align-restart-with-triggered-debt-review
-    title: Mirror the trigger-based debt policy in restart replanning
-    workflow: implement
-    status: todo
-    deps:
-      - trigger-based-init-policy
-    details: >-
-      Carry the same trigger-based debt policy through restart so replanning
-      preserves meaningful follow-up work from prior notes without
-      reintroducing a scheduled cleanup rhythm.
-    context_files:
-      - internal/bootstrap/restart.go
-      - internal/bootstrap/restart_test.go
-      - internal/bootstrap/bootstrap.go
-    acceptance:
-      - Restart plan and review prompts preserve risk-driven debt follow-up work instead of restoring a fixed cadence.
-      - Restart review checks for both missing triggered debt tasks and unnecessary standalone cleanup tasks.
-      - Restart tests cover the new prompt requirements while preserving fresh-restart status and notes reset behavior.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./internal/bootstrap
-    commit_message: "feat: apply trigger-based debt review to restart"
-
-  - id: clarify-init-planning-boundaries
-    title: Clarify what init can predict versus what runtime can observe
-    workflow: implement
-    status: todo
-    deps:
-      - align-restart-with-triggered-debt-review
-    details: >-
-      Make init and restart prompts describe plan-time heuristics honestly.
-      They should talk about expected breadth and discovered risks, not claim
-      init can know actual changed-file counts that are only observable at
-      finalize time.
-    context_files:
-      - internal/bootstrap/bootstrap.go
-      - internal/bootstrap/restart.go
-      - internal/automation/automation.go
-      - README.md
-    acceptance:
-      - Prompt language distinguishes expected scope at planning time from facts that are only known after execution.
-      - Documentation explains that runtime currently records task status and notes but does not auto-insert follow-up tasks during finalize.
-      - No README or help text promises observed-file-count triggers that the current runner cannot enforce.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./internal/bootstrap ./internal/automation
-    commit_message: "docs: align init planning with current runtime limits"
-
-  - id: support-multiple-init-sources
-    title: Add repeatable init sources and a source-preview path
-    workflow: implement
-    status: todo
-    deps:
-      - clarify-init-planning-boundaries
-    details: >-
-      Replace the single-source init path with repeatable --source flags while
-      preserving the current single positional source alias. Add a
-      preview-oriented path so users can inspect the resolved source set before
-      bootstrap writes config or prompts a planner.
-    context_files:
-      - cmd/ghost-claude/main.go
-      - cmd/ghost-claude/main_test.go
-      - internal/bootstrap/bootstrap.go
-      - internal/bootstrap/bootstrap_test.go
-      - README.md
-    acceptance:
-      - The init CLI accepts repeatable --source flags while preserving existing single positional source support.
-      - `ghost-claude init --print-sources` resolves, prints, and exits without writing config or bootstrapping the planner.
-      - Bootstrap renders resolved sources in deterministic order and returns clear errors for invalid or empty selections.
-      - Tests cover argument parsing, preview behavior, and source-resolution edge cases.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./cmd/ghost-claude ./internal/bootstrap
-    commit_message: "feat: improve init source selection"
-
-  - id: add-init-planner-selection
-    title: Let init choose the bootstrap planner
-    workflow: implement
-    status: todo
-    deps:
-      - support-multiple-init-sources
-    details: >-
-      Let users choose whether bootstrap planning runs through Claude or Codex,
-      reusing existing agent naming and validation instead of hard-coding
-      Claude in the initializer.
-    context_files:
-      - cmd/ghost-claude/main.go
-      - cmd/ghost-claude/main_test.go
-      - internal/bootstrap/bootstrap.go
-      - internal/config/config.go
-      - README.md
-    acceptance:
-      - `ghost-claude init` accepts `--planner claude|codex` with a documented default.
-      - The initializer routes bootstrap prompts through the selected planner without changing runtime coder and reviewer defaults.
-      - Invalid planner values fail fast with a clear error message.
-      - Tests cover planner parsing and the selected client path.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/config
-    commit_message: "feat: add init planner selection"
-
-  - id: document-init-improvements
-    title: Refresh docs and help text for the new init workflow
-    workflow: implement
-    status: todo
-    deps:
-      - add-init-planner-selection
-    details: >-
-      Update user-facing docs, command help, and narrative examples to match
-      the new debt-review policy, source-selection workflow, and
-      planner-selection behavior.
-    context_files:
-      - README.md
-      - cmd/ghost-claude/main.go
-      - ghost-plan.example.yaml
-    acceptance:
-      - README and CLI usage describe trigger-based debt review instead of scheduled cleanup windows.
-      - Documentation explains how to pass multiple sources, preview resolved sources, and choose a bootstrap planner.
-      - Examples and narrative about init stay aligned with actual code paths and supported flags.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./cmd/ghost-claude
-    commit_message: "docs: refresh init documentation"
-
-  - id: verify-init-improvements
-    title: Verify the init improvements end to end
-    workflow: checkpoint
-    status: todo
-    deps:
-      - document-init-improvements
-    details: >-
-      Run the targeted and broad verification needed to catch regressions in
-      the init, bootstrap, restart, and plan-handling paths after the new
-      behavior lands.
-    context_files:
-      - README.md
-      - cmd/ghost-claude/main.go
-      - internal/bootstrap/bootstrap.go
-      - internal/bootstrap/restart.go
-      - internal/plan/plan.go
-    acceptance:
-      - Run the targeted CLI and bootstrap test suites for the changed init and restart paths.
-      - Run the broader repository test suite needed to catch regressions from the init changes.
-      - Smoke-check the updated help text and init docs against at least one representative init invocation.
-      - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-    verify_commands:
-      - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/plan ./internal/automation
-      - go test ./...
-    commit_message: "chore: verify init improvements"
+    - id: trigger-based-init-policy
+      title: Replace init's fixed debt cadence with trigger-based planning rules
+      details: Update the bootstrap plan-generation and review prompts so standalone tech-debt tasks are created only when a task is expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or broad expected file impact. Keep test and cleanup expectations attached to implementation tasks otherwise, and remove the scheduled "five dev steps then debt review" rhythm entirely.
+      status: done
+      workflow: implement
+      context_files:
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/bootstrap_test.go
+        - README.md
+      acceptance:
+        - The create-plan and review-plan prompts no longer require a fixed scheduled debt-review cadence.
+        - The bootstrap prompts require inline testing and cleanup by default, with standalone tech-debt tasks only when explicit risk triggers justify them.
+        - Bootstrap tests assert the new trigger-based language and stop depending on the removed cadence wording.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/bootstrap
+      commit_message: 'feat: make init debt planning trigger-based'
+      notes: Init bootstrap now uses explicit risk triggers for standalone tech-debt tasks, and tests guard against reintroducing the old 5-step cadence. If replanned from a fresh environment, update restart next so init and restart stay aligned.
+    - id: align-restart-with-triggered-debt-review
+      title: Mirror the trigger-based debt policy in restart replanning
+      details: Carry the same trigger-based debt policy through restart so replanning preserves meaningful follow-up work from prior notes without reintroducing a scheduled cleanup rhythm.
+      status: todo
+      workflow: implement
+      deps:
+        - trigger-based-init-policy
+      context_files:
+        - internal/bootstrap/restart.go
+        - internal/bootstrap/restart_test.go
+        - internal/bootstrap/bootstrap.go
+      acceptance:
+        - Restart plan and review prompts preserve risk-driven debt follow-up work instead of restoring a fixed cadence.
+        - Restart review checks for both missing triggered debt tasks and unnecessary standalone cleanup tasks.
+        - Restart tests cover the new prompt requirements while preserving fresh-restart status and notes reset behavior.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/bootstrap
+      commit_message: 'feat: apply trigger-based debt review to restart'
+    - id: clarify-init-planning-boundaries
+      title: Clarify what init can predict versus what runtime can observe
+      details: Make init and restart prompts describe plan-time heuristics honestly. They should talk about expected breadth and discovered risks, not claim init can know actual changed-file counts that are only observable at finalize time.
+      status: todo
+      workflow: implement
+      deps:
+        - align-restart-with-triggered-debt-review
+      context_files:
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/restart.go
+        - internal/automation/automation.go
+        - README.md
+      acceptance:
+        - Prompt language distinguishes expected scope at planning time from facts that are only known after execution.
+        - Documentation explains that runtime currently records task status and notes but does not auto-insert follow-up tasks during finalize.
+        - No README or help text promises observed-file-count triggers that the current runner cannot enforce.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/bootstrap ./internal/automation
+      commit_message: 'docs: align init planning with current runtime limits'
+    - id: support-multiple-init-sources
+      title: Add repeatable init sources and a source-preview path
+      details: Replace the single-source init path with repeatable --source flags while preserving the current single positional source alias. Add a preview-oriented path so users can inspect the resolved source set before bootstrap writes config or prompts a planner.
+      status: todo
+      workflow: implement
+      deps:
+        - clarify-init-planning-boundaries
+      context_files:
+        - cmd/ghost-claude/main.go
+        - cmd/ghost-claude/main_test.go
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/bootstrap_test.go
+        - README.md
+      acceptance:
+        - The init CLI accepts repeatable --source flags while preserving existing single positional source support.
+        - '`ghost-claude init --print-sources` resolves, prints, and exits without writing config or bootstrapping the planner.'
+        - Bootstrap renders resolved sources in deterministic order and returns clear errors for invalid or empty selections.
+        - Tests cover argument parsing, preview behavior, and source-resolution edge cases.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./cmd/ghost-claude ./internal/bootstrap
+      commit_message: 'feat: improve init source selection'
+    - id: add-init-planner-selection
+      title: Let init choose the bootstrap planner
+      details: Let users choose whether bootstrap planning runs through Claude or Codex, reusing existing agent naming and validation instead of hard-coding Claude in the initializer.
+      status: todo
+      workflow: implement
+      deps:
+        - support-multiple-init-sources
+      context_files:
+        - cmd/ghost-claude/main.go
+        - cmd/ghost-claude/main_test.go
+        - internal/bootstrap/bootstrap.go
+        - internal/config/config.go
+        - README.md
+      acceptance:
+        - '`ghost-claude init` accepts `--planner claude|codex` with a documented default.'
+        - The initializer routes bootstrap prompts through the selected planner without changing runtime coder and reviewer defaults.
+        - Invalid planner values fail fast with a clear error message.
+        - Tests cover planner parsing and the selected client path.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/config
+      commit_message: 'feat: add init planner selection'
+    - id: document-init-improvements
+      title: Refresh docs and help text for the new init workflow
+      details: Update user-facing docs, command help, and narrative examples to match the new debt-review policy, source-selection workflow, and planner-selection behavior.
+      status: todo
+      workflow: implement
+      deps:
+        - add-init-planner-selection
+      context_files:
+        - README.md
+        - cmd/ghost-claude/main.go
+        - ghost-plan.example.yaml
+      acceptance:
+        - README and CLI usage describe trigger-based debt review instead of scheduled cleanup windows.
+        - Documentation explains how to pass multiple sources, preview resolved sources, and choose a bootstrap planner.
+        - Examples and narrative about init stay aligned with actual code paths and supported flags.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./cmd/ghost-claude
+      commit_message: 'docs: refresh init documentation'
+    - id: verify-init-improvements
+      title: Verify the init improvements end to end
+      details: Run the targeted and broad verification needed to catch regressions in the init, bootstrap, restart, and plan-handling paths after the new behavior lands.
+      status: todo
+      workflow: checkpoint
+      deps:
+        - document-init-improvements
+      context_files:
+        - README.md
+        - cmd/ghost-claude/main.go
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/restart.go
+        - internal/plan/plan.go
+      acceptance:
+        - Run the targeted CLI and bootstrap test suites for the changed init and restart paths.
+        - Run the broader repository test suite needed to catch regressions from the init changes.
+        - Smoke-check the updated help text and init docs against at least one representative init invocation.
+        - Leave short task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/plan ./internal/automation
+        - go test ./...
+      commit_message: 'chore: verify init improvements'

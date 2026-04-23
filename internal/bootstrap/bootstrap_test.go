@@ -61,14 +61,17 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(client.prompts[0], "what it learned in that phase") {
 		t.Fatalf("expected first prompt to require per-task phase notes, got %q", client.prompts[0])
 	}
-	if !strings.Contains(client.prompts[0], "after every 5 significant dev steps") {
-		t.Fatalf("expected first prompt to require tech-debt cadence, got %q", client.prompts[0])
+	if !strings.Contains(client.prompts[0], "keep testing, verification, and cleanup work attached to the implementation task") {
+		t.Fatalf("expected first prompt to keep testing and cleanup inline by default, got %q", client.prompts[0])
 	}
-	if !strings.Contains(client.prompts[0], "review recent test coverage and add or update tests") {
-		t.Fatalf("expected first prompt to require the test-coverage tech-debt step, got %q", client.prompts[0])
+	if !strings.Contains(client.prompts[0], "expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or broad expected file impact") {
+		t.Fatalf("expected first prompt to describe trigger-based tech-debt rules, got %q", client.prompts[0])
 	}
-	if !strings.Contains(client.prompts[0], "stale, overcomplicated, duplicated, or unreadable code") {
-		t.Fatalf("expected first prompt to require the cleanup tech-debt step, got %q", client.prompts[0])
+	if !strings.Contains(client.prompts[0], "do not add standalone tech-debt tasks on a fixed schedule") {
+		t.Fatalf("expected first prompt to reject fixed tech-debt cadence, got %q", client.prompts[0])
+	}
+	if strings.Contains(client.prompts[0], "after every 5 significant dev steps") {
+		t.Fatalf("expected first prompt to remove the old tech-debt cadence, got %q", client.prompts[0])
 	}
 	if strings.Contains(client.prompts[0], "Replace the file if it already exists.") {
 		t.Fatalf("expected first prompt to omit replace instructions, got %q", client.prompts[0])
@@ -85,8 +88,14 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(client.prompts[1], "capturing phase learnings") {
 		t.Fatalf("expected second prompt to review note-capture coverage, got %q", client.prompts[1])
 	}
-	if !strings.Contains(client.prompts[1], "required 2 tech-debt tasks after each block of 5 significant dev steps") {
-		t.Fatalf("expected second prompt to review the tech-debt cadence, got %q", client.prompts[1])
+	if !strings.Contains(client.prompts[1], "missing trigger-justified standalone tech-debt tasks") {
+		t.Fatalf("expected second prompt to review trigger-based tech-debt gaps, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "defer routine testing, verification, or cleanup work that should stay attached to implementation") {
+		t.Fatalf("expected second prompt to keep routine testing and cleanup inline, got %q", client.prompts[1])
+	}
+	if strings.Contains(client.prompts[1], "required 2 tech-debt tasks after each block of 5 significant dev steps") {
+		t.Fatalf("expected second prompt to remove the old tech-debt cadence review, got %q", client.prompts[1])
 	}
 	if strings.Contains(client.prompts[1], "/codex") {
 		t.Fatalf("expected second prompt to stop requiring /codex, got %q", client.prompts[1])

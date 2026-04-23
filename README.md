@@ -81,7 +81,7 @@ The default workflow scaffolded by `ghost-claude init` is plan-oriented and uses
 During `init`, ghost-claude bootstraps plan mode in two phases:
 
 1. Write `ghost-claude.yaml`.
-2. Ask Claude to read the provided source file or directory, or all regular files in the workspace directory when no source is provided, then generate `ghost-plan.yaml`, review it critically, and revise the plan. The bootstrap prompt also requires two tech-debt tasks after every five significant implementation tasks: one to review test coverage and add missing tests, and one to clean up stale, overcomplicated, duplicated, or unreadable code.
+2. Ask Claude to read the provided source file or directory, or all regular files in the workspace directory when no source is provided, then generate `ghost-plan.yaml`, review it critically, and revise the plan. The bootstrap prompt keeps testing and cleanup expectations inline with implementation by default, and only asks for standalone tech-debt tasks when explicit risk triggers apply, such as a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or broad expected file impact.
 
 ## Subcommands
 
@@ -234,7 +234,7 @@ The intended use is:
 - `ghost-claude restart` re-reads the current plan, source docs, and prior task notes, then rewrites `ghost-plan.yaml` for a fresh rerun with every task back at `todo`
 - `TODO.md` is still useful when you want legacy checklist mode or want to keep one constraints doc
 - `ghost-claude init` can generate the initial plan from a TODO file, a design doc, or a directory of source files
-- the scaffolded `init` prompt asks for two tech-debt tasks after every five significant implementation tasks: a test-coverage pass and a code-health cleanup pass
+- the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit risk triggers justify a standalone tech-debt follow-up
 - your external planner can still generate both files if you prefer that flow
 
 ### Project fields
