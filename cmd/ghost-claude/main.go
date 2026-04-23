@@ -89,15 +89,17 @@ func runCommand(ctx context.Context, args []string) error {
 }
 
 func applyRuntimeAgentRoles(cfg *config.Config, coder, reviewer string) error {
-	cfg.Coder = config.AgentCodex
-	cfg.Reviewer = config.AgentClaude
+	resolvedCoder, err := config.ResolveAgent(coder, config.AgentCodex, "coder")
+	if err != nil {
+		return err
+	}
+	resolvedReviewer, err := config.ResolveAgent(reviewer, config.AgentClaude, "reviewer")
+	if err != nil {
+		return err
+	}
 
-	if value := strings.TrimSpace(coder); value != "" {
-		cfg.Coder = value
-	}
-	if value := strings.TrimSpace(reviewer); value != "" {
-		cfg.Reviewer = value
-	}
+	cfg.Coder = resolvedCoder
+	cfg.Reviewer = resolvedReviewer
 
 	return cfg.Validate()
 }
@@ -110,6 +112,7 @@ func initCommand(ctx context.Context, args []string) error {
 	workspace := fs.String("workspace", "", "Workspace directory where the workflow config should be created")
 	var sources stringListFlag
 	fs.Var(&sources, "source", "Source file or directory to use when generating the initial plan (repeatable)")
+	planner := fs.String("planner", config.AgentClaude, "Bootstrap planner to use during init: claude or codex (default: claude)")
 	force := fs.Bool("force", false, "Overwrite existing files")
 	printSources := fs.Bool("print-sources", false, "Resolve init sources, print them, and exit without writing config")
 
@@ -117,6 +120,11 @@ func initCommand(ctx context.Context, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
+		return err
+	}
+
+	resolvedPlanner, err := resolveInitPlanner(*planner)
+	if err != nil {
 		return err
 	}
 
@@ -135,7 +143,11 @@ func initCommand(ctx context.Context, args []string) error {
 		return init.PrintSources(absConfig, sourceArgs)
 	}
 
-	return init.Run(ctx, absConfig, sourceArgs, *force)
+	return init.Run(ctx, absConfig, sourceArgs, *force, resolvedPlanner)
+}
+
+func resolveInitPlanner(value string) (string, error) {
+	return config.ResolveAgent(value, config.AgentClaude, "planner")
 }
 
 func printUsage() {
@@ -143,7 +155,7 @@ func printUsage() {
 
 Usage:
   ghost-claude run [-config ghost-claude.yaml] [-workspace /path/to/repo] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
-  ghost-claude init [-config ghost-claude.yaml] [-workspace /path/to/repo] [--source PATH ...] [--print-sources] [-force] [SOURCE]
+  ghost-claude init [-config ghost-claude.yaml] [-workspace /path/to/repo] [--source PATH ...] [--planner claude|codex] [--print-sources] [-force] [SOURCE]
   ghost-claude restart [-config ghost-claude.yaml] [-workspace /path/to/repo]
   ghost-claude task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 

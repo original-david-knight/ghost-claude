@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"ghost_claude/internal/claude"
+	codexcli "ghost_claude/internal/codex"
 	"ghost_claude/internal/config"
 	"ghost_claude/internal/scaffold"
 )
@@ -18,13 +19,50 @@ type Initializer struct {
 	stdout io.Writer
 	stderr io.Writer
 
+	newPlanner func(*config.Config, string, io.Writer, io.Writer) (bootstrapPlanner, error)
 	newClient  func(*config.Config, io.Writer, io.Writer) (promptClient, error)
 	newSession func(string) (*claude.Session, error)
+}
+
+type bootstrapPlanner interface {
+	RunPrompt(ctx context.Context, prompt string) error
+	Close() error
 }
 
 type promptClient interface {
 	RunPrompt(ctx context.Context, session *claude.Session, prompt string) error
 	Close(session *claude.Session) error
+}
+
+type codexPromptClient interface {
+	RunPrompt(ctx context.Context, session *codexcli.Session, prompt string) error
+	Close(session *codexcli.Session) error
+}
+
+type claudeBootstrapPlanner struct {
+	client  promptClient
+	session *claude.Session
+}
+
+func (p *claudeBootstrapPlanner) RunPrompt(ctx context.Context, prompt string) error {
+	return p.client.RunPrompt(ctx, p.session, prompt)
+}
+
+func (p *claudeBootstrapPlanner) Close() error {
+	return p.client.Close(p.session)
+}
+
+type codexBootstrapPlanner struct {
+	client  codexPromptClient
+	session *codexcli.Session
+}
+
+func (p *codexBootstrapPlanner) RunPrompt(ctx context.Context, prompt string) error {
+	return p.client.RunPrompt(ctx, p.session, prompt)
+}
+
+func (p *codexBootstrapPlanner) Close() error {
+	return p.client.Close(p.session)
 }
 
 type sourceSpec struct {
@@ -35,8 +73,9 @@ const defaultPlanFile = "ghost-plan.yaml"
 
 func New(stdout, stderr io.Writer) *Initializer {
 	return &Initializer{
-		stdout: stdout,
-		stderr: stderr,
+		stdout:     stdout,
+		stderr:     stderr,
+		newPlanner: newBootstrapPlanner,
 		newClient: func(cfg *config.Config, stdout, stderr io.Writer) (promptClient, error) {
 			return claude.New(
 				cfg.Claude.Command,
@@ -52,7 +91,59 @@ func New(stdout, stderr io.Writer) *Initializer {
 	}
 }
 
-func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool) error {
+func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
+	resolvedPlanner, err := config.ResolveAgent(planner, config.AgentClaude, "planner")
+	if err != nil {
+		return nil, err
+	}
+
+	switch resolvedPlanner {
+	case config.AgentClaude:
+		client, err := claude.New(
+			cfg.Claude.Command,
+			cfg.Claude.Args,
+			cfg.Workspace,
+			cfg.Claude.Transport,
+			cfg.Claude.StartupTimeout,
+			stdout,
+			stderr,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		session, err := claude.NewSession(config.SessionStrategySessionID)
+		if err != nil {
+			return nil, err
+		}
+
+		return &claudeBootstrapPlanner{client: client, session: session}, nil
+	case config.AgentCodex:
+		client, err := codexcli.New(
+			cfg.Codex.Command,
+			cfg.Codex.Args,
+			cfg.Workspace,
+			cfg.Codex.Transport,
+			cfg.Codex.StartupTimeout,
+			stdout,
+			stderr,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		session, err := codexcli.NewSession()
+		if err != nil {
+			return nil, err
+		}
+
+		return &codexBootstrapPlanner{client: client, session: session}, nil
+	default:
+		return nil, fmt.Errorf("planner %q is not supported; expected claude or codex", planner)
+	}
+}
+
+func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool, planner string) error {
 	if err := scaffold.Write(configPath, force); err != nil {
 		return err
 	}
@@ -84,18 +175,13 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 		return err
 	}
 
-	client, err := i.newClient(cfg, i.stdout, i.stderr)
-	if err != nil {
-		return err
-	}
-
-	session, err := i.newSession(config.SessionStrategySessionID)
+	plannerClient, err := i.newPlanner(cfg, planner, i.stdout, i.stderr)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		_ = client.Close(session)
+		_ = plannerClient.Close()
 	}()
 
 	prompts := []string{
@@ -104,7 +190,7 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 	}
 
 	for _, prompt := range prompts {
-		if err := client.RunPrompt(ctx, session, prompt); err != nil {
+		if err := plannerClient.RunPrompt(ctx, prompt); err != nil {
 			return err
 		}
 	}

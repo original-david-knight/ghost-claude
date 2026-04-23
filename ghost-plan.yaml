@@ -100,7 +100,7 @@ tasks:
     - id: add-init-planner-selection
       title: Let init choose the bootstrap planner
       details: Let users choose whether bootstrap planning runs through Claude or Codex, reusing existing agent naming and validation instead of hard-coding Claude in the initializer.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - support-multiple-init-sources
@@ -119,6 +119,7 @@ tasks:
       verify_commands:
         - go test ./cmd/ghost-claude ./internal/bootstrap ./internal/config
       commit_message: 'feat: add init planner selection'
+      notes: Init now accepts --planner with a Claude default, and bootstrap selects Claude or Codex through shared agent resolution without changing runtime coder/reviewer defaults. Fresh reruns need the chosen planner CLI/configured transport available because init now bootstraps through that client path.
     - id: document-init-improvements
       title: Refresh docs and help text for the new init workflow
       details: Update user-facing docs, command help, and narrative examples to match the new debt-review policy, source-selection workflow, and planner-selection behavior.

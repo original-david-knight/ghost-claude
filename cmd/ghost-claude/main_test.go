@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"ghost_claude/internal/config"
@@ -123,6 +124,36 @@ func TestApplyRuntimeAgentRolesOverridesDefaults(t *testing.T) {
 	}
 	if cfg.ReviewerAgent() != config.AgentCodex {
 		t.Fatalf("expected reviewer %q, got %q", config.AgentCodex, cfg.ReviewerAgent())
+	}
+}
+
+func TestResolveInitPlannerUsesClaudeDefault(t *testing.T) {
+	got, err := resolveInitPlanner("")
+	if err != nil {
+		t.Fatalf("resolveInitPlanner returned error: %v", err)
+	}
+	if got != config.AgentClaude {
+		t.Fatalf("expected default planner %q, got %q", config.AgentClaude, got)
+	}
+}
+
+func TestResolveInitPlannerNormalizesCodex(t *testing.T) {
+	got, err := resolveInitPlanner(" CoDeX ")
+	if err != nil {
+		t.Fatalf("resolveInitPlanner returned error: %v", err)
+	}
+	if got != config.AgentCodex {
+		t.Fatalf("expected planner %q, got %q", config.AgentCodex, got)
+	}
+}
+
+func TestResolveInitPlannerRejectsInvalidValue(t *testing.T) {
+	_, err := resolveInitPlanner("cursor")
+	if err == nil {
+		t.Fatal("expected resolveInitPlanner to reject an unsupported planner")
+	}
+	if !strings.Contains(err.Error(), `planner "cursor" is not supported; expected claude or codex`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

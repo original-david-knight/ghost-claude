@@ -294,8 +294,28 @@ func normalize(value string) string {
 	return strings.TrimSpace(strings.ToLower(value))
 }
 
+func NormalizeAgent(value string) string {
+	return normalizeAgent(value)
+}
+
 func normalizeAgent(value string) string {
 	return normalize(value)
+}
+
+func ResolveAgent(value, fallback, role string) (string, error) {
+	resolved := NormalizeAgent(value)
+	if resolved == "" {
+		resolved = NormalizeAgent(fallback)
+	}
+	if isValidAgent(resolved) {
+		return resolved, nil
+	}
+
+	role = strings.TrimSpace(role)
+	if role == "" {
+		return "", fmt.Errorf("agent %q is not supported; expected claude or codex", value)
+	}
+	return "", fmt.Errorf("%s %q is not supported; expected claude or codex", role, value)
 }
 
 func isValidAgent(value string) bool {
