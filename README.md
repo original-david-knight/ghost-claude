@@ -1,20 +1,36 @@
 # vibedrive
 
-`vibedrive` is a terminal-native Go runner that drives Claude Code and Codex through a configurable workflow.
+**Run Claude Code and Codex through a plan until your project is built.**
 
-Its primary execution queue is `vibedrive-plan.yaml`: a machine-readable task graph that the runner reads, updates, and advances automatically.
+vibedrive is a CLI that orchestrates AI coding agents against a machine-readable task graph. You give it a spec document. It turns the spec into `vibedrive-plan.yaml`, then runs a loop: pick the next task, have one agent implement it, have another agent peer-review the diff, apply the review feedback, run per-task verification commands, commit — and move on. The loop stops when the plan is done.
 
-Legacy TODO mode still exists for compatibility, but the current scaffolded flow does not step through `TODO.md` unless you intentionally omit `plan_file` and configure checklist-based steps.
+Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so you can watch the work happen. Either agent can play coder or reviewer; pick roles per run.
 
-It launches Claude's real fullscreen TUI inside a PTY when Claude-backed steps run, and it can also invoke Codex non-interactively. The scaffolded workflow uses stable coder/reviewer steps, and you can flip either role at run time.
+## Why use it
+
+- **Unattended loops.** The runner picks the next ready task, dispatches it to the agents, stages, verifies, and commits — no babysitting.
+- **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
+- **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status and short phase notes, so the run is resumable and the plan stays honest about what actually shipped.
+- **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). A task only stays `done` when those commands pass; otherwise it drops back to `in_progress` with a failure note.
+- **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
+
+## Example
+
+From inside the repo you want built:
+
+```bash
+vibedrive init DESIGN.md      # scaffold vibedrive.yaml + vibedrive-plan.yaml from your spec
+vibedrive run                 # run the loop: codex codes, claude reviews
+```
+
+That's the whole flow. The runner walks the plan, dispatches each task, commits each iteration, and stops when there is nothing left to do. Rerunning `vibedrive run` resumes where you left off.
 
 ## Requirements
 
 - Go 1.26+ (the version declared in `go.mod` is currently `1.26.0`)
 - The `claude` CLI installed and on your `$PATH` ([Claude Code](https://docs.claude.com/en/docs/claude-code))
 - The `codex` CLI installed and on your `$PATH` for the default scaffolded implementation flow
-- A `vibedrive-plan.yaml` file with machine-readable tasks for normal operation
-- Optionally, a `TODO.md` file with GitHub-style checkboxes if you intentionally want legacy checklist mode or want to use it as a planning input
+- A `vibedrive-plan.yaml` file with machine-readable tasks
 
 ## Install
 
@@ -60,15 +76,13 @@ vibedrive init --print-sources
 vibedrive init --print-sources --source DESIGN.md --source docs/specs
 ```
 
-`vibedrive init` bootstraps plan mode. The generated config points the runner at `vibedrive-plan.yaml`, not at `TODO.md`.
+`vibedrive init` bootstraps the plan. The generated config points the runner at `vibedrive-plan.yaml`.
 
 ## How the loop works
 
 For each iteration:
 
-1. Select the next work item.
-   In the default and current flow, this is the first ready task in `vibedrive-plan.yaml`, with `in_progress` tasks preferred over `todo` tasks and dependencies respected.
-   Legacy TODO mode instead uses the first unchecked `- [ ]` item in `TODO.md`.
+1. Select the next ready task in `vibedrive-plan.yaml`, with `in_progress` tasks preferred over `todo` tasks and dependencies respected.
 2. Start a fresh Claude session when a Claude step needs one.
 3. Run every configured step in order. Claude steps share one session for the work item by default, but `fresh_session: true` isolates a Claude step in its own session. Codex steps run non-interactively.
 4. Close any Claude sessions that were opened.
@@ -76,14 +90,14 @@ For each iteration:
 
 The runner stops when there is no work left, when `max_iterations` is reached, or when the same item stalls `max_stalled_iterations` times in a row.
 
-The default workflow scaffolded by `vibedrive init` is plan-oriented and uses `vibedrive-plan.yaml` as the execution queue:
+The default workflow scaffolded by `vibedrive init` uses `vibedrive-plan.yaml` as the execution queue:
 
 1. Execute the selected task with the current coder while preserving the plan's hard constraints.
 2. Ask the current reviewer to review the changes and write a structured review artifact.
 3. Run a second coder step that reads the review artifact and fixes any actionable findings.
 4. Run the task's configured `verify_commands`, apply the JSON task result to `vibedrive-plan.yaml`, and commit the iteration with an exec step.
 
-During `init`, vibedrive bootstraps plan mode in two phases:
+During `init`, vibedrive bootstraps the plan in two phases:
 
 1. Write `vibedrive.yaml`.
 2. Ask the selected bootstrap planner to read every resolved init source, then generate `vibedrive-plan.yaml`, review it critically, and revise the plan. `vibedrive init` defaults to `--planner claude`, and `--planner codex` switches bootstrap planning to Codex without changing the runtime coder/reviewer defaults used by `run`. You can supply sources with repeatable `--source` flags and still use a single positional source as an alias for one extra entry. When no source is provided, init falls back to all top-level regular files in the workspace directory. `vibedrive init --print-sources` resolves that same deduped, sorted source set in deterministic order and exits before writing config or prompting the planner. The bootstrap prompt keeps testing and cleanup expectations inline with implementation by default, and only asks for standalone tech-debt tasks when planning-time risk triggers apply, such as a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface. Those triggers describe expected breadth and discovered risk, not actual changed-file counts that only exist after execution.
@@ -102,11 +116,9 @@ If you omit the subcommand, `vibedrive` behaves like `run`.
 
 When `-workspace` is set, the default config path becomes `<workspace>/vibedrive.yaml` and every relative path in the config resolves against that workspace.
 
-In the generated config, `plan_file` is set, so `run` executes from `vibedrive-plan.yaml`. It does not read `TODO.md` as the task queue unless you reconfigure it into legacy TODO mode.
-
 ## Config
 
-The runner reads `vibedrive.yaml` by default. `vibedrive init` writes a complete scaffold matching [`vibedrive.example.yaml`](vibedrive.example.yaml). Shortened plan-mode example:
+The runner reads `vibedrive.yaml` by default. `vibedrive init` writes a complete scaffold matching [`vibedrive.example.yaml`](vibedrive.example.yaml). Shortened example:
 
 ```yaml
 workspace: .
@@ -186,11 +198,9 @@ workflows:
           - "{{- if .Task.CommitMessage -}}{{ .Task.CommitMessage }}{{- else -}}{{ .Task.Title }}{{- end -}}"
 ```
 
-Legacy TODO mode still works, but it is no longer the default or recommended flow: omit `plan_file` and `workflows`, keep `steps`, and drive progress by editing the first unchecked checkbox in `TODO.md`.
-
 ### `vibedrive-plan.yaml`
 
-Plan mode uses a machine-readable task file. The repository ships a complete starter in [`vibedrive-plan.example.yaml`](vibedrive-plan.example.yaml). Minimal example:
+The runner uses a machine-readable task file. The repository ships a complete starter in [`vibedrive-plan.example.yaml`](vibedrive-plan.example.yaml). Minimal example:
 
 ```yaml
 project:
@@ -234,10 +244,9 @@ tasks:
 The intended use is:
 
 - `vibedrive-plan.yaml` is machine-owned execution state
-- the runner normally advances by updating task status and notes in `vibedrive-plan.yaml`, not by checking boxes in `TODO.md`
+- the runner advances by updating task status and notes in `vibedrive-plan.yaml`
 - each task should end by leaving short notes about what it learned in that phase so the plan can be revised and rerun from a fresh environment
 - `vibedrive restart` re-reads the current plan, source docs, and prior task notes, then rewrites `vibedrive-plan.yaml` for a fresh rerun with every task back at `todo`
-- `TODO.md` is still useful when you want legacy checklist mode or want to keep one constraints doc
 - `vibedrive init` can generate the initial plan from one or more `--source` inputs, the single positional source alias, or the workspace's top-level regular files when you omit sources
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts
@@ -283,9 +292,8 @@ The intended use is:
 
 | Field                    | Default       | Meaning                                                            |
 | ------------------------ | ------------- | ------------------------------------------------------------------ |
-| `workspace`              | `.`           | Directory Claude, Codex, and exec steps run in. Relative `todo_file` and `plan_file` resolve under it. |
-| `todo_file`              | `TODO.md`     | Legacy checklist file. Also useful as a constraints source.        |
-| `plan_file`              | unset         | Machine-readable task file for plan mode.                          |
+| `workspace`              | `.`                   | Directory Claude, Codex, and exec steps run in. Relative `plan_file` resolves under it. |
+| `plan_file`              | `vibedrive-plan.yaml` | Machine-readable task file the runner advances through.            |
 | `max_iterations`         | `0`           | Hard cap on iterations. `0` means unlimited.                       |
 | `max_stalled_iterations` | `2`           | Abort after this many no-progress iterations on the same item.     |
 | `default_workflow`       | unset         | Workflow used when a plan task omits `workflow`.                   |
@@ -341,7 +349,6 @@ In `tui` mode, Codex runs the same fullscreen terminal UI you get from invoking 
 Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text/template`. Available fields:
 
 - `{{ .Workspace }}`
-- `{{ .TodoFile }}`
 - `{{ .PlanFile }}`
 - `{{ .ConfigPath }}`
 - `{{ .ExecutablePath }}`
@@ -349,18 +356,13 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `{{ .SessionID }}`
 - `{{ .TaskResultPath }}`
 - `{{ .ReviewPath }}`
-- `{{ .NextTodo.Line }}` — 1-indexed line number in `TODO.md`
-- `{{ .NextTodo.Raw }}` — the entire line, including the checkbox
-- `{{ .NextTodo.Text }}` — just the task description
 - `{{ .Plan }}` — parsed `vibedrive-plan.yaml`
-- `{{ .Task }}` — selected plan task in plan mode
+- `{{ .Task }}` — selected plan task
 - `{{ .Now }}` — current time
 
 ## Notes & gotchas
 
-- In TODO mode, the runner only advances when the first incomplete checkbox in the TODO file changes.
-- In the normal plan-based flow, the runner advances when the selected task changes status or notes in `vibedrive-plan.yaml`.
-- The generated config from `vibedrive init` runs in plan mode, so `TODO.md` is not the live execution queue unless you deliberately switch back to legacy TODO mode.
+- The runner advances when the selected task changes status or notes in `vibedrive-plan.yaml`.
 - `vibedrive-plan.yaml` is intended to be machine-owned state. The default workflow updates it through `vibedrive task finalize`.
 - `vibedrive task finalize` currently writes task status and notes back into `vibedrive-plan.yaml`, runs `verify_commands`, removes task artifacts, and commits staged changes when needed. It does not auto-insert follow-up tasks or enforce changed-file-count triggers.
 - In the default scaffold, task-result notes are intended to capture what the coder learned in that phase so you can revise the plan and rerun it from a fresh environment.
