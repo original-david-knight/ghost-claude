@@ -49,8 +49,8 @@ go run ./cmd/vibedrive <subcommand>
 From inside the repo you want vibedrive to work on:
 
 ```bash
-vibedrive init              # writes vibedrive.yaml, resolves top-level regular files as sources by default, then asks the selected bootstrap planner to generate and review vibedrive-plan.yaml
-vibedrive init --planner codex   # bootstrap the plan with Codex instead of the default Claude planner
+vibedrive init              # writes vibedrive.yaml, resolves top-level regular files as sources by default, then asks the selected bootstrap author to generate and review vibedrive-plan.yaml
+vibedrive init --author claude   # bootstrap the plan with Claude instead of the default Codex author
 vibedrive init DESIGN.md    # single positional source alias
 vibedrive init --source DESIGN.md --source docs/specs
 vibedrive init --source DESIGN.md --source docs/specs --print-sources   # preview resolved sources without writing config or plan
@@ -100,13 +100,13 @@ The default workflow scaffolded by `vibedrive init` uses `vibedrive-plan.yaml` a
 During `init`, vibedrive bootstraps the plan in two phases:
 
 1. Write `vibedrive.yaml`.
-2. Ask the selected bootstrap planner to read every resolved init source, then generate `vibedrive-plan.yaml`, review it critically, and revise the plan. `vibedrive init` defaults to `--planner claude`, and `--planner codex` switches bootstrap planning to Codex without changing the runtime coder/reviewer defaults used by `run`. You can supply sources with repeatable `--source` flags and still use a single positional source as an alias for one extra entry. When no source is provided, init falls back to all top-level regular files in the workspace directory. `vibedrive init --print-sources` resolves that same deduped, sorted source set in deterministic order and exits before writing config or prompting the planner. The bootstrap prompt keeps testing and cleanup expectations inline with implementation by default, and only asks for standalone tech-debt tasks when planning-time risk triggers apply, such as a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface. Those triggers describe expected breadth and discovered risk, not actual changed-file counts that only exist after execution.
+2. Ask the selected bootstrap author to read every resolved init source, then generate `vibedrive-plan.yaml`, review it critically, and revise the plan. `vibedrive init` defaults to `--author codex`, and `--author claude` switches bootstrap authoring to Claude without changing the runtime coder/reviewer defaults used by `run`. You can supply sources with repeatable `--source` flags and still use a single positional source as an alias for one extra entry. When no source is provided, init falls back to all top-level regular files in the workspace directory. `vibedrive init --print-sources` resolves that same deduped, sorted source set in deterministic order and exits before writing config or prompting the author. The bootstrap prompt keeps testing and cleanup expectations inline with implementation by default, and only asks for standalone tech-debt tasks when planning-time risk triggers apply, such as a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface. Those triggers describe expected breadth and discovered risk, not actual changed-file counts that only exist after execution.
 
 ## Subcommands
 
 ```
 vibedrive run  [-config PATH] [-workspace DIR] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
-vibedrive init [-config PATH] [-workspace DIR] [--source PATH ...] [--planner claude|codex] [--print-sources] [-force] [SOURCE]
+vibedrive init [-config PATH] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--print-sources] [-force] [SOURCE]
 vibedrive restart [-config PATH] [-workspace DIR]
 vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 vibedrive help
@@ -376,7 +376,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - If you prefer the older non-interactive behavior, set `codex.transport: exec`. In that mode, vibedrive suppresses raw file-read and diff payloads but still shows the rest of Codex's progress.
 - `--coder` and `--reviewer` are independent. You can set them to different agents or to the same agent.
 - Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`codex` and reviewer=`claude`.
-- `vibedrive init` uses the selected bootstrap planner and that planner's configured transport. With the default `--planner claude` and Claude `tui` transport, you can watch plan generation and review live in your terminal. `--planner codex` bootstraps through the configured Codex client instead.
+- `vibedrive init` uses the selected bootstrap author and that author's configured transport. With the default `--author codex`, init bootstraps through the configured Codex client. `--author claude` uses Claude, and with Claude `tui` transport you can watch plan generation and review live in your terminal.
 - In TUI mode, YAML multiline prompts are flattened into one submitted message, because real newlines would be interpreted as separate messages by Claude's composer.
 - In a fresh workspace, the runner auto-confirms Claude's trust dialog so the loop can start unattended.
 - TUI automation detects "Claude is idle" from terminal-title transitions. If a future Claude release changes that behavior, the detector may need updating.

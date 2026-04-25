@@ -28,17 +28,17 @@ func (f *fakeClient) Close(_ *claude.Session) error {
 	return nil
 }
 
-type fakeBootstrapPlanner struct {
+type fakeBootstrapAuthor struct {
 	prompts []string
 	closed  bool
 }
 
-func (f *fakeBootstrapPlanner) RunPrompt(_ context.Context, prompt string) error {
+func (f *fakeBootstrapAuthor) RunPrompt(_ context.Context, prompt string) error {
 	f.prompts = append(f.prompts, prompt)
 	return nil
 }
 
-func (f *fakeBootstrapPlanner) Close() error {
+func (f *fakeBootstrapAuthor) Close() error {
 	f.closed = true
 	return nil
 }
@@ -52,75 +52,75 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
 		if cfg.PlanFile != filepath.Join(dir, "vibedrive-plan.yaml") {
 			t.Fatalf("expected plan path to resolve under workspace, got %q", cfg.PlanFile)
 		}
-		if planner != config.AgentClaude {
-			t.Fatalf("expected planner %q, got %q", config.AgentClaude, planner)
+		if author != config.AgentClaude {
+			t.Fatalf("expected author %q, got %q", config.AgentClaude, author)
 		}
-		return plannerClient, nil
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, []string{designPath}, false, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 2 {
-		t.Fatalf("expected 2 prompts, got %d", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(authorClient.prompts))
 	}
-	if !strings.Contains(plannerClient.prompts[0], "Create vibedrive-plan.yaml") {
-		t.Fatalf("expected first prompt to create the plan file, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "Create vibedrive-plan.yaml") {
+		t.Fatalf("expected first prompt to create the plan file, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "what it learned in that phase") {
-		t.Fatalf("expected first prompt to require per-task phase notes, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "what it learned in that phase") {
+		t.Fatalf("expected first prompt to require per-task phase notes, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "keep testing, verification, and cleanup work attached to the implementation task") {
-		t.Fatalf("expected first prompt to keep testing and cleanup inline by default, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "keep testing, verification, and cleanup work attached to the implementation task") {
+		t.Fatalf("expected first prompt to keep testing and cleanup inline by default, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface") {
-		t.Fatalf("expected first prompt to describe trigger-based tech-debt rules, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface") {
+		t.Fatalf("expected first prompt to describe trigger-based tech-debt rules, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "do not claim the plan can know actual changed-file counts or other finalize-time facts before execution") {
-		t.Fatalf("expected first prompt to distinguish planning heuristics from finalize-time facts, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "do not claim the plan can know actual changed-file counts or other finalize-time facts before execution") {
+		t.Fatalf("expected first prompt to distinguish planning heuristics from finalize-time facts, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "do not add standalone tech-debt tasks on a fixed schedule") {
-		t.Fatalf("expected first prompt to reject fixed tech-debt cadence, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "do not add standalone tech-debt tasks on a fixed schedule") {
+		t.Fatalf("expected first prompt to reject fixed tech-debt cadence, got %q", authorClient.prompts[0])
 	}
-	if strings.Contains(plannerClient.prompts[0], "after every 5 significant dev steps") {
-		t.Fatalf("expected first prompt to remove the old tech-debt cadence, got %q", plannerClient.prompts[0])
+	if strings.Contains(authorClient.prompts[0], "after every 5 significant dev steps") {
+		t.Fatalf("expected first prompt to remove the old tech-debt cadence, got %q", authorClient.prompts[0])
 	}
-	if strings.Contains(plannerClient.prompts[0], "Replace the file if it already exists.") {
-		t.Fatalf("expected first prompt to omit replace instructions, got %q", plannerClient.prompts[0])
+	if strings.Contains(authorClient.prompts[0], "Replace the file if it already exists.") {
+		t.Fatalf("expected first prompt to omit replace instructions, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "DESIGN.md") {
-		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "DESIGN.md") {
+		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[1], "Perform a critical review of the plan") {
-		t.Fatalf("expected second prompt to request a critical plan review, got %q", plannerClient.prompts[1])
+	if !strings.Contains(authorClient.prompts[1], "Perform a critical review of the plan") {
+		t.Fatalf("expected second prompt to request a critical plan review, got %q", authorClient.prompts[1])
 	}
-	if !strings.Contains(plannerClient.prompts[1], "capturing phase learnings") {
-		t.Fatalf("expected second prompt to review note-capture coverage, got %q", plannerClient.prompts[1])
+	if !strings.Contains(authorClient.prompts[1], "capturing phase learnings") {
+		t.Fatalf("expected second prompt to review note-capture coverage, got %q", authorClient.prompts[1])
 	}
-	if !strings.Contains(plannerClient.prompts[1], "missing trigger-justified standalone tech-debt tasks") {
-		t.Fatalf("expected second prompt to review trigger-based tech-debt gaps, got %q", plannerClient.prompts[1])
+	if !strings.Contains(authorClient.prompts[1], "missing trigger-justified standalone tech-debt tasks") {
+		t.Fatalf("expected second prompt to review trigger-based tech-debt gaps, got %q", authorClient.prompts[1])
 	}
-	if !strings.Contains(plannerClient.prompts[1], "plan-time knowledge of actual changed-file counts or other finalize-time facts") {
-		t.Fatalf("expected second prompt to review planning-boundary violations, got %q", plannerClient.prompts[1])
+	if !strings.Contains(authorClient.prompts[1], "plan-time knowledge of actual changed-file counts or other finalize-time facts") {
+		t.Fatalf("expected second prompt to review planning-boundary violations, got %q", authorClient.prompts[1])
 	}
-	if !strings.Contains(plannerClient.prompts[1], "defer routine testing, verification, or cleanup work that should stay attached to implementation") {
-		t.Fatalf("expected second prompt to keep routine testing and cleanup inline, got %q", plannerClient.prompts[1])
+	if !strings.Contains(authorClient.prompts[1], "defer routine testing, verification, or cleanup work that should stay attached to implementation") {
+		t.Fatalf("expected second prompt to keep routine testing and cleanup inline, got %q", authorClient.prompts[1])
 	}
-	if strings.Contains(plannerClient.prompts[1], "required 2 tech-debt tasks after each block of 5 significant dev steps") {
-		t.Fatalf("expected second prompt to remove the old tech-debt cadence review, got %q", plannerClient.prompts[1])
+	if strings.Contains(authorClient.prompts[1], "required 2 tech-debt tasks after each block of 5 significant dev steps") {
+		t.Fatalf("expected second prompt to remove the old tech-debt cadence review, got %q", authorClient.prompts[1])
 	}
-	if strings.Contains(plannerClient.prompts[1], "/codex") {
-		t.Fatalf("expected second prompt to stop requiring /codex, got %q", plannerClient.prompts[1])
+	if strings.Contains(authorClient.prompts[1], "/codex") {
+		t.Fatalf("expected second prompt to stop requiring /codex, got %q", authorClient.prompts[1])
 	}
-	if !plannerClient.closed {
-		t.Fatal("expected planner client to be closed")
+	if !authorClient.closed {
+		t.Fatal("expected author client to be closed")
 	}
 }
 
@@ -144,24 +144,24 @@ steps:
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
 		if cfg.PlanFile != filepath.Join(dir, "vibedrive-plan.yaml") {
 			t.Fatalf("expected plan path to resolve under existing config workspace, got %q", cfg.PlanFile)
 		}
-		return plannerClient, nil
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, []string{sourcePath}, false, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 2 {
-		t.Fatalf("expected 2 prompts, got %d", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(authorClient.prompts))
 	}
-	if !strings.Contains(plannerClient.prompts[0], "DESIGN.md") {
-		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "DESIGN.md") {
+		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", authorClient.prompts[0])
 	}
 
 	content, err := os.ReadFile(configPath)
@@ -186,18 +186,18 @@ func TestInitializerRunSkipsExistingPlanWithoutForce(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
-		return plannerClient, nil
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, []string{sourcePath}, false, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 0 {
-		t.Fatalf("expected no prompts when plan already exists, got %d", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 0 {
+		t.Fatalf("expected no prompts when plan already exists, got %d", len(authorClient.prompts))
 	}
 }
 
@@ -214,21 +214,21 @@ func TestInitializerRunRegeneratesPlanWithForce(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
-		return plannerClient, nil
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, []string{sourcePath}, true, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 2 {
-		t.Fatalf("expected forced init to regenerate the plan, got %d prompts", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 2 {
+		t.Fatalf("expected forced init to regenerate the plan, got %d prompts", len(authorClient.prompts))
 	}
-	if !strings.Contains(plannerClient.prompts[0], "vibedrive-plan.yaml") {
-		t.Fatalf("expected first prompt to mention the plan path, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "vibedrive-plan.yaml") {
+		t.Fatalf("expected first prompt to mention the plan path, got %q", authorClient.prompts[0])
 	}
 	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
 		t.Fatalf("expected existing plan file to be removed before prompting, stat err=%v", err)
@@ -246,27 +246,27 @@ func TestInitializerRunUsesWorkspaceFilesWhenSourceOmitted(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
-		return plannerClient, nil
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, nil, false, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 2 {
-		t.Fatalf("expected 2 prompts, got %d", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(authorClient.prompts))
 	}
-	if !strings.Contains(plannerClient.prompts[0], "- DESIGN.md") {
-		t.Fatalf("expected first prompt to include DESIGN.md as a source, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "- DESIGN.md") {
+		t.Fatalf("expected first prompt to include DESIGN.md as a source, got %q", authorClient.prompts[0])
 	}
-	if !strings.Contains(plannerClient.prompts[0], "- TEST_PLAN.md") {
-		t.Fatalf("expected first prompt to include TEST_PLAN.md as a source, got %q", plannerClient.prompts[0])
+	if !strings.Contains(authorClient.prompts[0], "- TEST_PLAN.md") {
+		t.Fatalf("expected first prompt to include TEST_PLAN.md as a source, got %q", authorClient.prompts[0])
 	}
-	if strings.Contains(plannerClient.prompts[0], "- vibedrive.yaml") {
-		t.Fatalf("expected generated config to be excluded from default sources, got %q", plannerClient.prompts[0])
+	if strings.Contains(authorClient.prompts[0], "- vibedrive.yaml") {
+		t.Fatalf("expected generated config to be excluded from default sources, got %q", authorClient.prompts[0])
 	}
 }
 
@@ -285,31 +285,31 @@ func TestInitializerRunRendersResolvedSourcesInSortedOrder(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	plannerClient := &fakeBootstrapPlanner{}
+	authorClient := &fakeBootstrapAuthor{}
 	init := New(io.Discard, io.Discard)
-	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
-		return plannerClient, nil
+	init.newAuthor = func(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
+		return authorClient, nil
 	}
 
 	if err := init.Run(context.Background(), configPath, []string{"docs/zeta.md", "docs"}, false, config.AgentClaude); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(plannerClient.prompts) != 2 {
-		t.Fatalf("expected 2 prompts, got %d", len(plannerClient.prompts))
+	if len(authorClient.prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(authorClient.prompts))
 	}
 
-	alphaIndex := strings.Index(plannerClient.prompts[0], "- docs/alpha.md")
-	zetaIndex := strings.Index(plannerClient.prompts[0], "- docs/zeta.md")
+	alphaIndex := strings.Index(authorClient.prompts[0], "- docs/alpha.md")
+	zetaIndex := strings.Index(authorClient.prompts[0], "- docs/zeta.md")
 	if alphaIndex == -1 || zetaIndex == -1 {
-		t.Fatalf("expected prompt to include both resolved sources, got %q", plannerClient.prompts[0])
+		t.Fatalf("expected prompt to include both resolved sources, got %q", authorClient.prompts[0])
 	}
 	if alphaIndex > zetaIndex {
-		t.Fatalf("expected prompt to render sources in sorted order, got %q", plannerClient.prompts[0])
+		t.Fatalf("expected prompt to render sources in sorted order, got %q", authorClient.prompts[0])
 	}
 }
 
-func TestNewBootstrapPlannerUsesSelectedClient(t *testing.T) {
+func TestNewBootstrapAuthorDefaultsToCodexClient(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
 		Workspace: dir,
@@ -327,16 +327,16 @@ func TestNewBootstrapPlannerUsesSelectedClient(t *testing.T) {
 		},
 	}
 
-	planner, err := newBootstrapPlanner(cfg, config.AgentCodex, io.Discard, io.Discard)
+	author, err := newBootstrapAuthor(cfg, "", io.Discard, io.Discard)
 	if err != nil {
-		t.Fatalf("newBootstrapPlanner returned error: %v", err)
+		t.Fatalf("newBootstrapAuthor returned error: %v", err)
 	}
 	defer func() {
-		_ = planner.Close()
+		_ = author.Close()
 	}()
 
-	if _, ok := planner.(*codexBootstrapPlanner); !ok {
-		t.Fatalf("expected codex bootstrap planner, got %T", planner)
+	if _, ok := author.(*codexBootstrapAuthor); !ok {
+		t.Fatalf("expected codex bootstrap author, got %T", author)
 	}
 }
 

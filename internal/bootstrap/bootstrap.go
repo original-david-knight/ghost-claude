@@ -19,12 +19,12 @@ type Initializer struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	newPlanner func(*config.Config, string, io.Writer, io.Writer) (bootstrapPlanner, error)
+	newAuthor  func(*config.Config, string, io.Writer, io.Writer) (bootstrapAuthor, error)
 	newClient  func(*config.Config, io.Writer, io.Writer) (promptClient, error)
 	newSession func(string) (*claude.Session, error)
 }
 
-type bootstrapPlanner interface {
+type bootstrapAuthor interface {
 	RunPrompt(ctx context.Context, prompt string) error
 	Close() error
 }
@@ -39,29 +39,29 @@ type codexPromptClient interface {
 	Close(session *codex.Session) error
 }
 
-type claudeBootstrapPlanner struct {
+type claudeBootstrapAuthor struct {
 	client  promptClient
 	session *claude.Session
 }
 
-func (p *claudeBootstrapPlanner) RunPrompt(ctx context.Context, prompt string) error {
+func (p *claudeBootstrapAuthor) RunPrompt(ctx context.Context, prompt string) error {
 	return p.client.RunPrompt(ctx, p.session, prompt)
 }
 
-func (p *claudeBootstrapPlanner) Close() error {
+func (p *claudeBootstrapAuthor) Close() error {
 	return p.client.Close(p.session)
 }
 
-type codexBootstrapPlanner struct {
+type codexBootstrapAuthor struct {
 	client  codexPromptClient
 	session *codex.Session
 }
 
-func (p *codexBootstrapPlanner) RunPrompt(ctx context.Context, prompt string) error {
+func (p *codexBootstrapAuthor) RunPrompt(ctx context.Context, prompt string) error {
 	return p.client.RunPrompt(ctx, p.session, prompt)
 }
 
-func (p *codexBootstrapPlanner) Close() error {
+func (p *codexBootstrapAuthor) Close() error {
 	return p.client.Close(p.session)
 }
 
@@ -73,9 +73,9 @@ const defaultPlanFile = "vibedrive-plan.yaml"
 
 func New(stdout, stderr io.Writer) *Initializer {
 	return &Initializer{
-		stdout:     stdout,
-		stderr:     stderr,
-		newPlanner: newBootstrapPlanner,
+		stdout:    stdout,
+		stderr:    stderr,
+		newAuthor: newBootstrapAuthor,
 		newClient: func(cfg *config.Config, stdout, stderr io.Writer) (promptClient, error) {
 			return claude.New(
 				cfg.Claude.Command,
@@ -91,13 +91,13 @@ func New(stdout, stderr io.Writer) *Initializer {
 	}
 }
 
-func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
-	resolvedPlanner, err := config.ResolveAgent(planner, config.AgentClaude, "planner")
+func newBootstrapAuthor(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
+	resolvedAuthor, err := config.ResolveAgent(author, config.AgentCodex, "author")
 	if err != nil {
 		return nil, err
 	}
 
-	switch resolvedPlanner {
+	switch resolvedAuthor {
 	case config.AgentClaude:
 		client, err := claude.New(
 			cfg.Claude.Command,
@@ -117,7 +117,7 @@ func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.W
 			return nil, err
 		}
 
-		return &claudeBootstrapPlanner{client: client, session: session}, nil
+		return &claudeBootstrapAuthor{client: client, session: session}, nil
 	case config.AgentCodex:
 		client, err := codex.New(
 			cfg.Codex.Command,
@@ -137,13 +137,13 @@ func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.W
 			return nil, err
 		}
 
-		return &codexBootstrapPlanner{client: client, session: session}, nil
+		return &codexBootstrapAuthor{client: client, session: session}, nil
 	default:
-		return nil, fmt.Errorf("planner %q is not supported; expected claude or codex", planner)
+		return nil, fmt.Errorf("author %q is not supported; expected claude or codex", author)
 	}
 }
 
-func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool, planner string) error {
+func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool, author string) error {
 	if err := scaffold.Write(configPath, force); err != nil {
 		return err
 	}
@@ -175,13 +175,13 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 		return err
 	}
 
-	plannerClient, err := i.newPlanner(cfg, planner, i.stdout, i.stderr)
+	authorClient, err := i.newAuthor(cfg, author, i.stdout, i.stderr)
 	if err != nil {
 		return err
 	}
 
 	defer func() {
-		_ = plannerClient.Close()
+		_ = authorClient.Close()
 	}()
 
 	prompts := []string{
@@ -190,7 +190,7 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 	}
 
 	for _, prompt := range prompts {
-		if err := plannerClient.RunPrompt(ctx, prompt); err != nil {
+		if err := authorClient.RunPrompt(ctx, prompt); err != nil {
 			return err
 		}
 	}

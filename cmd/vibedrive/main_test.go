@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -127,32 +129,61 @@ func TestApplyRuntimeAgentRolesOverridesDefaults(t *testing.T) {
 	}
 }
 
-func TestResolveInitPlannerUsesClaudeDefault(t *testing.T) {
-	got, err := resolveInitPlanner("")
+func TestResolveInitAuthorUsesCodexDefault(t *testing.T) {
+	got, err := resolveInitAuthor("")
 	if err != nil {
-		t.Fatalf("resolveInitPlanner returned error: %v", err)
-	}
-	if got != config.AgentClaude {
-		t.Fatalf("expected default planner %q, got %q", config.AgentClaude, got)
-	}
-}
-
-func TestResolveInitPlannerNormalizesCodex(t *testing.T) {
-	got, err := resolveInitPlanner(" CoDeX ")
-	if err != nil {
-		t.Fatalf("resolveInitPlanner returned error: %v", err)
+		t.Fatalf("resolveInitAuthor returned error: %v", err)
 	}
 	if got != config.AgentCodex {
-		t.Fatalf("expected planner %q, got %q", config.AgentCodex, got)
+		t.Fatalf("expected default author %q, got %q", config.AgentCodex, got)
 	}
 }
 
-func TestResolveInitPlannerRejectsInvalidValue(t *testing.T) {
-	_, err := resolveInitPlanner("cursor")
-	if err == nil {
-		t.Fatal("expected resolveInitPlanner to reject an unsupported planner")
+func TestResolveInitAuthorNormalizesClaude(t *testing.T) {
+	got, err := resolveInitAuthor(" ClAuDe ")
+	if err != nil {
+		t.Fatalf("resolveInitAuthor returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), `planner "cursor" is not supported; expected claude or codex`) {
+	if got != config.AgentClaude {
+		t.Fatalf("expected author %q, got %q", config.AgentClaude, got)
+	}
+}
+
+func TestResolveInitAuthorRejectsInvalidValue(t *testing.T) {
+	_, err := resolveInitAuthor("cursor")
+	if err == nil {
+		t.Fatal("expected resolveInitAuthor to reject an unsupported author")
+	}
+	if !strings.Contains(err.Error(), `author "cursor" is not supported; expected claude or codex`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInitCommandAcceptsAuthorFlagWithPrintSources(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "DESIGN.md"), []byte("design\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	for _, author := range []string{config.AgentClaude, config.AgentCodex} {
+		err := initCommand(context.Background(), []string{
+			"--workspace", dir,
+			"--source", "DESIGN.md",
+			"--author", author,
+			"--print-sources",
+		})
+		if err != nil {
+			t.Fatalf("initCommand rejected --author %s: %v", author, err)
+		}
+	}
+}
+
+func TestInitCommandRejectsPlannerFlag(t *testing.T) {
+	err := initCommand(context.Background(), []string{"--planner", config.AgentCodex, "--print-sources"})
+	if err == nil {
+		t.Fatal("expected initCommand to reject --planner")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

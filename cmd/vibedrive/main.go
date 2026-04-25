@@ -110,15 +110,15 @@ func initCommand(ctx context.Context, args []string) error {
 	fs.Usage = func() {
 		out := fs.Output()
 		fmt.Fprint(out, `Usage:
-  vibedrive init [-config vibedrive.yaml] [-workspace /path/to/repo] [--source PATH ...] [--planner claude|codex] [--print-sources] [-force] [SOURCE]
+  vibedrive init [-config vibedrive.yaml] [-workspace /path/to/repo] [--source PATH ...] [--author claude|codex] [--print-sources] [-force] [SOURCE]
 
 Init source selection:
   Repeat --source to add files or directories. A single positional SOURCE is accepted as one extra source.
   Omit both --source and SOURCE to fall back to the workspace's top-level regular files.
-  --print-sources resolves, dedupes, sorts, and prints that source set without writing config or bootstrapping a planner.
+  --print-sources resolves, dedupes, sorts, and prints that source set without writing config or starting the author.
 
-Bootstrap planning:
-  --planner selects the bootstrap planner and defaults to claude. Choosing it does not change runtime --coder/--reviewer defaults.
+Plan authoring:
+  --author selects the bootstrap author and defaults to codex. Choosing it does not change runtime --coder/--reviewer defaults.
   The generated plan keeps routine testing and cleanup inline by default and only adds standalone tech-debt follow-up when risk triggers justify it.
 
 Flags:
@@ -130,7 +130,7 @@ Flags:
 	workspace := fs.String("workspace", "", "Workspace directory where the workflow config should be created")
 	var sources stringListFlag
 	fs.Var(&sources, "source", "Source file or directory to use when generating the initial plan (repeatable)")
-	planner := fs.String("planner", config.AgentClaude, "Bootstrap planner to use during init: claude or codex")
+	author := fs.String("author", config.AgentCodex, "Bootstrap author to use during init: claude or codex")
 	force := fs.Bool("force", false, "Overwrite existing files")
 	printSources := fs.Bool("print-sources", false, "Resolve init sources, print them, and exit without writing config")
 
@@ -141,7 +141,7 @@ Flags:
 		return err
 	}
 
-	resolvedPlanner, err := resolveInitPlanner(*planner)
+	resolvedAuthor, err := resolveInitAuthor(*author)
 	if err != nil {
 		return err
 	}
@@ -161,11 +161,11 @@ Flags:
 		return init.PrintSources(absConfig, sourceArgs)
 	}
 
-	return init.Run(ctx, absConfig, sourceArgs, *force, resolvedPlanner)
+	return init.Run(ctx, absConfig, sourceArgs, *force, resolvedAuthor)
 }
 
-func resolveInitPlanner(value string) (string, error) {
-	return config.ResolveAgent(value, config.AgentClaude, "planner")
+func resolveInitAuthor(value string) (string, error) {
+	return config.ResolveAgent(value, config.AgentCodex, "author")
 }
 
 func printUsage() {
@@ -173,7 +173,7 @@ func printUsage() {
 
 Usage:
   vibedrive run [-config vibedrive.yaml] [-workspace /path/to/repo] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
-  vibedrive init [-config vibedrive.yaml] [-workspace /path/to/repo] [--source PATH ...] [--planner claude|codex] [--print-sources] [-force] [SOURCE]
+  vibedrive init [-config vibedrive.yaml] [-workspace /path/to/repo] [--source PATH ...] [--author claude|codex] [--print-sources] [-force] [SOURCE]
   vibedrive restart [-config vibedrive.yaml] [-workspace /path/to/repo]
   vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 
@@ -182,7 +182,7 @@ If no subcommand is provided, vibedrive behaves like "run".
 Init notes:
   Repeat --source to add files or directories. A single positional SOURCE adds one extra source.
   Omit sources to scan the workspace's top-level regular files. Use --print-sources to preview that resolved source set.
-  Use --planner claude|codex to pick the bootstrap planner. This does not change runtime --coder/--reviewer defaults.
+  Use --author claude|codex to pick the bootstrap author. This does not change runtime --coder/--reviewer defaults.
   Bootstrap planning keeps routine testing and cleanup inline by default and only adds standalone tech-debt follow-up when risk triggers justify it.`)
 }
 
