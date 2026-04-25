@@ -229,7 +229,8 @@ workflows:
 func Write(configPath string, force bool) error {
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
-			return fmt.Errorf("%s already exists; use -force to overwrite", configPath)
+			fmt.Printf("Skipped %s (already exists)\n", configPath)
+			return nil
 		} else if !os.IsNotExist(err) {
 			return err
 		}

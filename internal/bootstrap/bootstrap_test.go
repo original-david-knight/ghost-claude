@@ -124,6 +124,55 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 }
 
+func TestInitializerRunUsesExistingConfigWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+	sourcePath := filepath.Join(dir, "DESIGN.md")
+	configContent := []byte(`workspace: .
+plan_file: vibedrive-plan.yaml
+steps:
+  - name: noop
+    type: exec
+    command:
+      - true
+`)
+
+	if err := os.WriteFile(configPath, configContent, 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("existing source\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	plannerClient := &fakeBootstrapPlanner{}
+	init := New(io.Discard, io.Discard)
+	init.newPlanner = func(cfg *config.Config, planner string, stdout, stderr io.Writer) (bootstrapPlanner, error) {
+		if cfg.PlanFile != filepath.Join(dir, "vibedrive-plan.yaml") {
+			t.Fatalf("expected plan path to resolve under existing config workspace, got %q", cfg.PlanFile)
+		}
+		return plannerClient, nil
+	}
+
+	if err := init.Run(context.Background(), configPath, []string{sourcePath}, false, config.AgentClaude); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(plannerClient.prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(plannerClient.prompts))
+	}
+	if !strings.Contains(plannerClient.prompts[0], "DESIGN.md") {
+		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", plannerClient.prompts[0])
+	}
+
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if !bytes.Equal(content, configContent) {
+		t.Fatalf("expected existing config to be preserved, got %q", string(content))
+	}
+}
+
 func TestInitializerRunSkipsExistingPlanWithoutForce(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")

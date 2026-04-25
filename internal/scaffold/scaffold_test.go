@@ -57,7 +57,7 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 	}
 }
 
-func TestWriteFailsWhenConfigExists(t *testing.T) {
+func TestWriteSkipsExistingConfigWithoutForce(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
 
@@ -65,12 +65,8 @@ func TestWriteFailsWhenConfigExists(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	err := Write(configPath, false)
-	if err == nil {
-		t.Fatal("expected Write to fail when config already exists")
-	}
-	if !strings.Contains(err.Error(), "already exists") {
-		t.Fatalf("expected already exists error, got %v", err)
+	if err := Write(configPath, false); err != nil {
+		t.Fatalf("Write returned error: %v", err)
 	}
 
 	content, err := os.ReadFile(configPath)
