@@ -11,7 +11,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 - **Unattended loops.** The runner picks the next ready task, dispatches it to the agents, stages, verifies, and commits — no babysitting.
 - **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
 - **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
-- **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). A task only stays `done` when those commands pass; otherwise it drops back to `in_progress` with a failure note.
+- **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). Plans should include any harnesses or instrumentation agents need to verify their own work, such as scripted screenshot capture for UI changes. A task only stays `done` when its commands pass; otherwise it drops back to `in_progress` with a failure note.
 - **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
 
 ## Example
@@ -19,6 +19,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 From inside the repo you want built:
 
 ```bash
+vibedrive start               # alias for create; does not require vibedrive.yaml
 vibedrive create              # interactively author DESIGN.md with the default Codex author and Claude critic
 vibedrive init DESIGN.md      # scaffold vibedrive.yaml + vibedrive-plan.yaml from your spec
 vibedrive run                 # run the loop: codex codes, claude reviews
@@ -50,6 +51,7 @@ go run ./cmd/vibedrive <subcommand>
 From inside the repo you want vibedrive to work on:
 
 ```bash
+vibedrive start             # alias for create; starts without vibedrive.yaml
 vibedrive create            # menu-driven DESIGN.md authoring; defaults author=codex and critic=claude
 vibedrive create --author claude --critic codex
 vibedrive init              # writes vibedrive.yaml, resolves top-level regular files as sources by default, then runs author, critic, and author-revision bootstrap phases
@@ -93,13 +95,14 @@ Usage:
 vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 ```
 
-`vibedrive create` starts a numbered menu with Product Definition, UX Review, Technical Review, and Stop. Planning appears in the menu only when `DESIGN.md` exists at the workspace root, and it appears whenever that file exists regardless of the last completed create stage.
+`vibedrive create` starts a numbered menu with Product Definition, Feature/Refactor, UX Review, Technical Review, and Stop. Planning appears in the menu only when `DESIGN.md` exists at the workspace root, and it appears whenever that file exists regardless of the last completed create stage.
 
-The three authoring stages all write or update the same root `DESIGN.md`:
+The authoring stages all write or update the same root `DESIGN.md`:
 
-1. Product Definition inspects the workspace, interviews the user in the agent TUI, pushes on unclear product scope or success criteria, and writes the initial design.
-2. UX Review reads the workspace and current `DESIGN.md`, then improves user journeys, interaction design, accessibility, states, content, terminology, and related product/design tradeoffs where useful.
-3. Technical Review reads the workspace and current `DESIGN.md`, then adds architecture, data model, integration, risk, edge-case, testing, rollout, and rough implementation guidance without creating a task-by-task plan.
+1. Product Definition inspects the workspace, interviews the user in the agent TUI, pushes on unclear product scope or success criteria, and writes the initial design with agent-verifiable outcomes.
+2. Feature/Refactor inspects an existing project, interviews the user about a new feature or refactor, captures current behavior to preserve, affected workflows, compatibility constraints, rollout or migration needs, relevant code paths, and agent-verifiable acceptance criteria.
+3. UX Review reads the workspace and current `DESIGN.md`, then improves user journeys, interaction design, accessibility, states, content, terminology, visual verification needs, and related product/design tradeoffs where useful.
+4. Technical Review reads the workspace and current `DESIGN.md`, then adds architecture, data model, integration, risk, edge-case, testing, self-verification instrumentation, rollout, and rough implementation guidance without creating a task-by-task plan.
 
 After each successful author stage, vibedrive returns to the menu. You can rerun any stage, jump forward or backward, stop and manually edit `DESIGN.md`, or choose Planning once `DESIGN.md` exists.
 
@@ -145,6 +148,7 @@ During `init`, vibedrive bootstraps the plan in four steps:
 
 ```
 vibedrive run  [-config PATH] [-workspace DIR] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
+vibedrive start [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
 vibedrive restart [-config PATH] [-workspace DIR]
@@ -290,6 +294,7 @@ The intended use is:
 - `vibedrive init` can generate the initial plan from one or more `--source` inputs, the single positional source alias, or the workspace's top-level regular files when you omit sources
 - `vibedrive init` runs fresh author, critic, and author-revision agent instances; the critic reviews without editing the plan and the author owns both plan writes
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
+- generated plans should give agents a self-verification path for each task, including preparatory checks, fixtures, harnesses, screenshot capture, or other instrumentation when existing commands are not enough
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts
 - your external planning tool can still generate both files if you prefer that flow
 
@@ -315,7 +320,7 @@ The intended use is:
 | `deps`            | Optional list of task IDs that must be `done` before this task is ready.                |
 | `context_files`   | Optional repo-relative files the task should pay attention to.                          |
 | `acceptance`      | Optional acceptance criteria for the task.                                              |
-| `verify_commands` | Optional shell commands run by `task finalize` before a `done` task stays `done`.       |
+| `verify_commands` | Optional shell commands run by `task finalize` before a `done` task stays `done`; if those commands need new tooling, the plan should include that instrumentation work first. |
 | `commit_message`  | Optional commit message used by the default finalizer workflow.                          |
 
 ### Task statuses

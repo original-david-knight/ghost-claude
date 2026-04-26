@@ -5,10 +5,12 @@ import (
 	"testing"
 )
 
-func TestSevenPromptDefinitionsExist(t *testing.T) {
+func TestNinePromptDefinitionsExist(t *testing.T) {
 	prompts := map[string]string{
 		"ProductDefinitionAuthor":  ProductDefinitionAuthor,
 		"ProductDefinitionCritic":  ProductDefinitionCritic,
+		"FeatureRefactorAuthor":    FeatureRefactorAuthor,
+		"FeatureRefactorCritic":    FeatureRefactorCritic,
 		"UXReviewAuthor":           UXReviewAuthor,
 		"UXReviewCritic":           UXReviewCritic,
 		"TechnicalReviewAuthor":    TechnicalReviewAuthor,
@@ -16,8 +18,8 @@ func TestSevenPromptDefinitionsExist(t *testing.T) {
 		"AuthorFollowUpFromCritic": AuthorFollowUpFromCritic,
 	}
 
-	if len(prompts) != 7 {
-		t.Fatalf("expected seven prompt definitions, got %d", len(prompts))
+	if len(prompts) != 9 {
+		t.Fatalf("expected nine prompt definitions, got %d", len(prompts))
 	}
 	for name, prompt := range prompts {
 		if strings.TrimSpace(prompt) == "" {
@@ -29,6 +31,7 @@ func TestSevenPromptDefinitionsExist(t *testing.T) {
 func TestAuthorPromptsInspectWorkspaceDesignAndWriteDesign(t *testing.T) {
 	authorPrompts := map[string]string{
 		"ProductDefinitionAuthor": ProductDefinitionAuthor,
+		"FeatureRefactorAuthor":   FeatureRefactorAuthor,
 		"UXReviewAuthor":          UXReviewAuthor,
 		"TechnicalReviewAuthor":   TechnicalReviewAuthor,
 	}
@@ -62,6 +65,24 @@ func TestProductDefinitionAuthorPromptCoversInterviewAndPushback(t *testing.T) {
 	)
 }
 
+func TestFeatureRefactorAuthorPromptCoversExistingProjectChanges(t *testing.T) {
+	assertContainsAll(t, "FeatureRefactorAuthor", FeatureRefactorAuthor,
+		"existing project",
+		"new feature",
+		"refactoring existing behavior",
+		"current behavior that must be preserved",
+		"compatibility constraints",
+		"rollout or migration needs",
+		"refactor boundary",
+		"current codebase",
+		"relevant files",
+		"integration points",
+		"risky coupling",
+		"too broad",
+		"measurable acceptance criteria",
+	)
+}
+
 func TestUXReviewAuthorPromptCoversDesignDimensions(t *testing.T) {
 	assertContainsAll(t, "UXReviewAuthor", UXReviewAuthor,
 		"without forcing all",
@@ -76,6 +97,36 @@ func TestUXReviewAuthorPromptCoversDesignDimensions(t *testing.T) {
 	)
 }
 
+func TestAuthorPromptsRequireAgentSelfVerification(t *testing.T) {
+	authorPrompts := map[string]string{
+		"ProductDefinitionAuthor": ProductDefinitionAuthor,
+		"FeatureRefactorAuthor":   FeatureRefactorAuthor,
+		"UXReviewAuthor":          UXReviewAuthor,
+		"TechnicalReviewAuthor":   TechnicalReviewAuthor,
+	}
+
+	for name, prompt := range authorPrompts {
+		assertContainsAll(t, name, prompt,
+			"verify",
+			"without manual help",
+			"instrumentation",
+		)
+	}
+
+	assertContainsAll(t, "UXReviewAuthor", UXReviewAuthor,
+		"scripted screenshots",
+		"accessibility checks",
+	)
+	assertContainsAll(t, "FeatureRefactorAuthor", FeatureRefactorAuthor,
+		"migration checks",
+		"fixtures",
+	)
+	assertContainsAll(t, "TechnicalReviewAuthor", TechnicalReviewAuthor,
+		"screenshot capture",
+		"fixtures",
+	)
+}
+
 func TestTechnicalReviewAuthorPromptCoversTechnicalDimensionsAndPlanBoundary(t *testing.T) {
 	assertContainsAll(t, "TechnicalReviewAuthor", TechnicalReviewAuthor,
 		"architecture",
@@ -84,11 +135,12 @@ func TestTechnicalReviewAuthorPromptCoversTechnicalDimensionsAndPlanBoundary(t *
 		"implementation risks",
 		"edge cases",
 		"test strategy",
+		"verification instrumentation",
 		"rollout/migration notes",
 		"known unknowns",
 		"rough implementation approach",
 		"do not produce a detailed task-by-task plan",
-		"detailed planning is reserved for vibedrive init",
+		"detailed planning is reserved for later",
 	)
 }
 
@@ -98,6 +150,7 @@ func TestCriticPromptsReadDesignAndDoNotEdit(t *testing.T) {
 		stage  string
 	}{
 		"ProductDefinitionCritic": {prompt: ProductDefinitionCritic, stage: "product definition"},
+		"FeatureRefactorCritic":   {prompt: FeatureRefactorCritic, stage: "feature or refactoring"},
 		"UXReviewCritic":          {prompt: UXReviewCritic, stage: "ux review"},
 		"TechnicalReviewCritic":   {prompt: TechnicalReviewCritic, stage: "technical review"},
 	}
@@ -113,9 +166,30 @@ func TestCriticPromptsReadDesignAndDoNotEdit(t *testing.T) {
 	}
 }
 
+func TestCriticPromptsReviewAgentSelfVerification(t *testing.T) {
+	assertContainsAll(t, "ProductDefinitionCritic", ProductDefinitionCritic,
+		"verify the intended outcome without manual help",
+	)
+	assertContainsAll(t, "FeatureRefactorCritic", FeatureRefactorCritic,
+		"current behavior",
+		"compatibility",
+		"clear change boundary",
+		"verify the intended outcome without manual help",
+	)
+	assertContainsAll(t, "UXReviewCritic", UXReviewCritic,
+		"agent-verifiable ui evidence",
+		"scripted screenshots",
+	)
+	assertContainsAll(t, "TechnicalReviewCritic", TechnicalReviewCritic,
+		"verification instrumentation",
+		"screenshot capture",
+		"verify their own work without manual help",
+	)
+}
+
 func TestAuthorFollowUpPromptOwnsDesignDocument(t *testing.T) {
 	assertContainsAll(t, "AuthorFollowUpFromCritic", AuthorFollowUpFromCritic,
-		"fresh author",
+		"design.md author instance",
 		"read the critic feedback",
 		"decide what to do with the feedback",
 		"update design.md",

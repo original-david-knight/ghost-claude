@@ -16,8 +16,11 @@ tasks:
       Describe the goal, relevant files, and any important constraints the agent
       should keep in mind while implementing this task. Keep routine testing and
       cleanup inline here unless a trigger-justified follow-up task is needed.
+      Include any automated checks, harnesses, fixtures, instrumentation, or
+      artifact capture needed for agents to verify the work without manual help.
     acceptance:
       - Define concrete acceptance criteria here.
+      - Agents can verify the work with the listed commands or artifacts without manual help.
       - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
     verify_commands:
       - go test ./...

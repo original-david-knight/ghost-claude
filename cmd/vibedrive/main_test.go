@@ -238,10 +238,41 @@ func TestInitCommandRejectsRemovedLegacyAuthorFlag(t *testing.T) {
 	}
 }
 
+func TestRealMainStartRoutesToConfigFreeCreateFlow(t *testing.T) {
+	dir := t.TempDir()
+	stdin, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe returned error: %v", err)
+	}
+	if _, err := stdinWriter.WriteString("5\n"); err != nil {
+		t.Fatalf("WriteString returned error: %v", err)
+	}
+	if err := stdinWriter.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	defer stdin.Close()
+
+	oldArgs := os.Args
+	oldStdin := os.Stdin
+	os.Args = []string{"vibedrive", "start", "--workspace", dir}
+	os.Stdin = stdin
+	defer func() {
+		os.Args = oldArgs
+		os.Stdin = oldStdin
+	}()
+
+	if err := realMain(); err != nil {
+		t.Fatalf("realMain returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "vibedrive.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected start menu stop not to require or create config, stat err=%v", err)
+	}
+}
+
 func TestCreateCommandRunsSelectedStagesAndReturnsToMenu(t *testing.T) {
 	dir := t.TempDir()
 	menu := &fakeCreateMenu{
-		choices: []string{"Product Definition", "UX Review", "Technical Review", "Stop"},
+		choices: []string{"Product Definition", "Feature/Refactor", "UX Review", "Technical Review", "Stop"},
 	}
 	stage := &fakeCreateStageRunner{}
 
@@ -252,6 +283,7 @@ func TestCreateCommandRunsSelectedStagesAndReturnsToMenu(t *testing.T) {
 
 	wantStages := []createpkg.Stage{
 		createpkg.StageProductDefinition,
+		createpkg.StageFeatureRefactor,
 		createpkg.StageUXReview,
 		createpkg.StageTechnicalReview,
 	}
@@ -267,7 +299,7 @@ func TestCreateCommandRunsSelectedStagesAndReturnsToMenu(t *testing.T) {
 			t.Fatalf("call %d: expected default author/critic codex/claude, got %s/%s", idx, call.Author, call.Critic)
 		}
 	}
-	if len(menu.seenEntries) != 4 {
+	if len(menu.seenEntries) != 5 {
 		t.Fatalf("expected menu after each successful stage plus stop, got %d", len(menu.seenEntries))
 	}
 }

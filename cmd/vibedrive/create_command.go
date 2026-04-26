@@ -79,6 +79,7 @@ func runCreateCommand(ctx context.Context, args []string, deps createCommandDeps
 
 Create stages:
   Product Definition interviews the user and writes or updates DESIGN.md.
+  Feature/Refactor scopes a change to an existing project and writes or updates DESIGN.md.
   UX Review improves product and user-experience coverage in DESIGN.md.
   Technical Review adds implementation guidance without creating a task-by-task plan.
   Planning appears only when DESIGN.md exists and runs init with DESIGN.md as the only source.
@@ -209,6 +210,7 @@ func loadCreateAgentConfig(configPath, workspace string) (*config.Config, error)
 func createMenuEntries(hasDesign bool) []createMenuEntry {
 	entries := []createMenuEntry{
 		{Label: "Product Definition", Stage: createpkg.StageProductDefinition},
+		{Label: "Feature/Refactor", Stage: createpkg.StageFeatureRefactor},
 		{Label: "UX Review", Stage: createpkg.StageUXReview},
 		{Label: "Technical Review", Stage: createpkg.StageTechnicalReview},
 	}

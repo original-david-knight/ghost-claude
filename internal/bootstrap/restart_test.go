@@ -87,6 +87,12 @@ tasks:
 	if !strings.Contains(client.prompts[0], "keep testing, verification, and cleanup work attached to the implementation task") {
 		t.Fatalf("expected first prompt to keep routine testing and cleanup inline, got %q", client.prompts[0])
 	}
+	if !strings.Contains(client.prompts[0], "self-verification path agents can run without manual help") {
+		t.Fatalf("expected first prompt to require self-verifying tasks, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "screenshot instrumentation or seeded test data") {
+		t.Fatalf("expected first prompt to include preparatory verification tooling, got %q", client.prompts[0])
+	}
 	if !strings.Contains(client.prompts[0], "prior-run notes or planned work show unresolved follow-up") {
 		t.Fatalf("expected first prompt to preserve trigger-based debt follow-up from prior notes, got %q", client.prompts[0])
 	}
@@ -107,6 +113,12 @@ tasks:
 	}
 	if !strings.Contains(client.prompts[1], "missing trigger-justified standalone tech-debt tasks") {
 		t.Fatalf("expected second prompt to review missing trigger-based tech-debt follow-up, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "self-verification path agents can run without manual help") {
+		t.Fatalf("expected second prompt to review self-verification paths, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "screenshot capture") {
+		t.Fatalf("expected second prompt to review screenshot instrumentation, got %q", client.prompts[1])
 	}
 	if !strings.Contains(client.prompts[1], "replanning can observe actual changed-file counts or other finalize-time facts") {
 		t.Fatalf("expected second prompt to review replanning-boundary violations, got %q", client.prompts[1])

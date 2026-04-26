@@ -200,6 +200,8 @@ Requirements for the plan:
 - decompose the project into executable tasks that are sized for one focused implementation iteration and one coherent commit when practical
 - use workflow implement for coding work and workflow checkpoint for explicit full-suite or milestone verification gates
 - by default, keep testing, verification, and cleanup work attached to the implementation task that introduces the change instead of deferring it to a later cleanup pass
+- design every task so agents can verify their own work without manual help; if existing checks are insufficient, include the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture in the task or an earlier dependency
+- for UI, visual, or interactive behavior, include deterministic browser automation, screenshot capture, DOM assertions, accessibility checks, or equivalent evidence wherever those artifacts are needed to verify the work
 - create a standalone implement tech-debt task only when the implementation task is expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface that justifies dedicated follow-up work
 - describe those triggers as planning-time heuristics about expected breadth and discovered risk; do not claim the plan can know actual changed-file counts or other finalize-time facts before execution
 - when a standalone tech-debt task is justified, make the trigger explicit in the task details or acceptance criteria and scope the task to the follow-up testing, cleanup, hardening, or rollback-safety work that the risk requires
@@ -210,6 +212,7 @@ Requirements for the plan:
 - include tasks that keep testing, verification, and cleanup expectations inline with implementation by default instead of deferring them to the end or to scheduled debt-review passes
 - for every task, make the last acceptance item instruct the coding agent to leave short notes about what it learned in that phase, including discoveries or plan adjustments that matter if the project is re-planned and rerun in a fresh environment
 - include verify_commands for each task whenever there is a concrete automated check or test command that should run before the task can be considered done
+- include preparatory implementation work before any verify_command that depends on newly required verification tooling, such as screenshot instrumentation or seeded test data
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
@@ -234,6 +237,8 @@ Focus on:
 - incorrect or weak task decomposition
 - missing checkpoints or verification work
 - missing or weak automated verification commands
+- tasks that lack a self-verification path agents can run without manual help
+- missing preparatory harnesses, fixtures, instrumentation, screenshot capture, or artifact generation needed to make verification executable
 - tasks that defer routine testing, verification, or cleanup work that should stay attached to implementation
 - missing trigger-justified standalone tech-debt tasks for work expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface
 - wording that claims plan-time knowledge of actual changed-file counts or other finalize-time facts instead of framing them as expected breadth or discovered risk
@@ -267,6 +272,8 @@ Keep the YAML valid. Keep task statuses at todo. Do not weaken or remove constra
 When revising:
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
 - keep testing, verification, and cleanup work attached to the implementation task that introduces the change by default
+- ensure every task has a self-verification path agents can run without manual help; add automated checks, harnesses, fixtures, instrumentation, or artifact capture where existing checks are insufficient
+- include deterministic screenshot capture, browser automation, DOM assertions, accessibility checks, or equivalent evidence for UI, visual, or interactive behavior when needed
 - add standalone implement tech-debt tasks only when expected new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or broad expected implementation surface justifies dedicated follow-up
 - describe standalone tech-debt triggers as planning-time heuristics about expected breadth and discovered risk, not as actual changed-file counts or other finalize-time facts before execution
 - do not add standalone tech-debt tasks on a fixed schedule or as generic placeholders
@@ -274,6 +281,7 @@ When revising:
 - keep all generated tasks at status todo
 - keep every task's last acceptance item focused on short phase notes about what was learned, including discoveries or plan adjustments that matter if the project is re-planned and rerun in a fresh environment
 - keep verify_commands wherever there is a concrete automated check or test command
+- keep preparatory implementation work before any verify_command that depends on newly required verification tooling, such as screenshot instrumentation or seeded test data
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.

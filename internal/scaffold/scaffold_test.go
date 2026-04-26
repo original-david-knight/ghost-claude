@@ -49,6 +49,15 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 	if !strings.Contains(string(configContent), "what was learned in this phase") {
 		t.Fatalf("expected scaffolded config to request phase-learnings notes, got %q", string(configContent))
 	}
+	if !strings.Contains(string(configContent), "missing self-verification instrumentation") {
+		t.Fatalf("expected scaffolded config to review self-verification instrumentation, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "scripted screenshots") {
+		t.Fatalf("expected scaffolded config to mention screenshot-based verification artifacts, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "{{ .TaskNotesPath }}") {
+		t.Fatalf("expected scaffolded config to explain external notes path, got %q", string(configContent))
+	}
 	if strings.Contains(string(configContent), "fresh_session: true") {
 		t.Fatalf("expected scaffolded config to avoid extra Claude sessions in the default workflow, got %q", string(configContent))
 	}
@@ -108,6 +117,15 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	}
 	if !strings.Contains(string(configContent), "what was learned in this phase") {
 		t.Fatalf("expected scaffolded config to request phase-learnings notes, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "missing self-verification instrumentation") {
+		t.Fatalf("expected scaffolded config to review self-verification instrumentation, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "scripted screenshots") {
+		t.Fatalf("expected scaffolded config to mention screenshot-based verification artifacts, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "{{ .TaskNotesPath }}") {
+		t.Fatalf("expected scaffolded config to explain external notes path, got %q", string(configContent))
 	}
 	if strings.Contains(string(configContent), "\ncoder:") || strings.Contains(string(configContent), "\nreviewer:") {
 		t.Fatalf("expected scaffolded config to leave runtime role selection to CLI flags, got %q", string(configContent))

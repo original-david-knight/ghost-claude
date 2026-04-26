@@ -66,6 +66,8 @@ workflows:
           {{- end }}
 
           Make the necessary code changes in {{ .Workspace }}.
+          When the task depends on new verification tooling, build or update the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture as part of the task.
+          For UI, visual, or interactive work, make sure agents can verify the result without manual help using deterministic evidence such as scripted screenshots, DOM assertions, accessibility checks, or equivalent artifacts.
           Consult additional repository files only when they are needed to complete this task correctly.
           Do not edit {{ .PlanFile }} directly.
 
@@ -85,7 +87,7 @@ workflows:
         actor: reviewer
         prompt: |
           Review the current uncommitted changes for task {{ .Task.ID }} from {{ .PlanFile }}.
-          Focus on correctness issues, regressions, missing tests, and mismatches with the task requirements.
+          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, and mismatches with the task requirements.
           Do not make code changes in this step.
 
           Write {{ .ReviewPath }} as JSON with this schema:
@@ -159,6 +161,8 @@ workflows:
           {{- end }}
 
           Run the full required verification for this checkpoint, fix any regressions you find, and leave the repository green before moving on.
+          When the checkpoint depends on new verification tooling, build or update the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture as part of the checkpoint.
+          For UI, visual, or interactive work, make sure agents can verify the result without manual help using deterministic evidence such as scripted screenshots, DOM assertions, accessibility checks, or equivalent artifacts.
           Consult additional repository files only when they are needed to complete this checkpoint correctly.
           Do not edit {{ .PlanFile }} directly.
 
@@ -178,7 +182,7 @@ workflows:
         actor: reviewer
         prompt: |
           Review the current uncommitted changes for checkpoint task {{ .Task.ID }} from {{ .PlanFile }}.
-          Focus on correctness issues, regressions, missing tests, and mismatches with the checkpoint requirements.
+          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, and mismatches with the checkpoint requirements.
           Do not make code changes in this step.
 
           Write {{ .ReviewPath }} as JSON with this schema:

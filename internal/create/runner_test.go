@@ -248,6 +248,13 @@ func TestStageRunnerSelectsMatchingPromptsForAllStages(t *testing.T) {
 			criticPrompt: ProductDefinitionCritic,
 		},
 		{
+			name:         "feature refactor",
+			stage:        StageFeatureRefactor,
+			displayName:  "Feature/Refactor",
+			authorPrompt: FeatureRefactorAuthor,
+			criticPrompt: FeatureRefactorCritic,
+		},
+		{
 			name:         "ux review",
 			stage:        StageUXReview,
 			displayName:  "UX Review",

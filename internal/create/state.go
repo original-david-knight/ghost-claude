@@ -13,6 +13,7 @@ type Stage string
 
 const (
 	StageProductDefinition Stage = "product_definition"
+	StageFeatureRefactor   Stage = "feature_refactor"
 	StageUXReview          Stage = "ux_review"
 	StageTechnicalReview   Stage = "technical_review"
 )

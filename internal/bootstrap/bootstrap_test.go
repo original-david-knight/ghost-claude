@@ -158,6 +158,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(createPrompt, "keep testing, verification, and cleanup work attached to the implementation task") {
 		t.Fatalf("expected first prompt to keep testing and cleanup inline by default, got %q", createPrompt)
 	}
+	if !strings.Contains(createPrompt, "agents can verify their own work without manual help") {
+		t.Fatalf("expected first prompt to require self-verifying tasks, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "screenshot instrumentation or seeded test data") {
+		t.Fatalf("expected first prompt to include preparatory verification tooling, got %q", createPrompt)
+	}
 	if !strings.Contains(createPrompt, "expected to introduce a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface") {
 		t.Fatalf("expected first prompt to describe trigger-based tech-debt rules, got %q", createPrompt)
 	}
@@ -184,6 +190,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(criticPrompt, "capturing phase learnings") {
 		t.Fatalf("expected second prompt to review note-capture coverage, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "self-verification path agents can run without manual help") {
+		t.Fatalf("expected second prompt to review self-verification paths, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "screenshot capture") {
+		t.Fatalf("expected second prompt to review screenshot instrumentation, got %q", criticPrompt)
 	}
 	if !strings.Contains(criticPrompt, "missing trigger-justified standalone tech-debt tasks") {
 		t.Fatalf("expected second prompt to review trigger-based tech-debt gaps, got %q", criticPrompt)
@@ -220,6 +232,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(revisionPrompt, "keep testing, verification, and cleanup work attached to the implementation task") {
 		t.Fatalf("expected third prompt to preserve inline testing and cleanup, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "self-verification path agents can run without manual help") {
+		t.Fatalf("expected third prompt to preserve self-verification paths, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "screenshot capture") {
+		t.Fatalf("expected third prompt to preserve screenshot instrumentation, got %q", revisionPrompt)
 	}
 	if !strings.Contains(revisionPrompt, "planning-time heuristics about expected breadth and discovered risk") {
 		t.Fatalf("expected third prompt to preserve planning-time tech-debt framing, got %q", revisionPrompt)

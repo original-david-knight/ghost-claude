@@ -38,6 +38,8 @@ func realMain() error {
 		return runCommand(ctx, args[1:])
 	case "create":
 		return createCommand(ctx, args[1:])
+	case "start":
+		return createCommand(ctx, args[1:])
 	case "init":
 		return initCommand(ctx, args[1:])
 	case "restart":
@@ -186,12 +188,14 @@ func printUsage() {
 
 Usage:
   vibedrive run [-config vibedrive.yaml] [-workspace /path/to/repo] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
+  vibedrive start [-workspace DIR] [--author claude|codex] [--critic claude|codex]
   vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
   vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
   vibedrive restart [-config vibedrive.yaml] [-workspace /path/to/repo]
   vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 
 If no subcommand is provided, vibedrive behaves like "run".
+Use "start" or "create" to begin the config-free DESIGN.md authoring flow.
 
 Init notes:
   Use create when you want agents to help author DESIGN.md interactively before planning.

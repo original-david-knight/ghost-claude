@@ -104,6 +104,8 @@ Requirements for the revised plan:
 - keep tasks sized for one focused implementation iteration and one coherent commit when practical
 - keep workflow metadata and commit messages useful and specific
 - by default, keep testing, verification, and cleanup work attached to the implementation task that introduces the change instead of deferring it to a later cleanup pass
+- ensure every task has a self-verification path agents can run without manual help; if prior notes or planned work show missing coverage, add the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture to the task or an earlier dependency
+- for UI, visual, or interactive behavior, include deterministic browser automation, screenshot capture, DOM assertions, accessibility checks, or equivalent evidence wherever those artifacts are needed to verify the work
 - preserve or add a standalone implement tech-debt task only when the prior-run notes or planned work show unresolved follow-up testing, cleanup, hardening, or rollback-safety work tied to a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface
 - describe those triggers from prior-run notes as discovered risks or expected breadth, not as proof that replanning can observe actual changed-file counts or other finalize-time facts unless a note recorded them explicitly
 - when a standalone tech-debt task is justified, make the trigger explicit in the task details or acceptance criteria and scope the task to the follow-up work that the risk requires
@@ -111,6 +113,7 @@ Requirements for the revised plan:
 - do not silently drop manual, machine-specific, or external-dependency work; represent it in tasks/details so the plan remains faithful to the source requirements
 - include explicit checkpoint tasks wherever the requirements call for them
 - strengthen weak or missing verify_commands whenever a deterministic automated check exists
+- add preparatory implementation work before any verify_command that depends on newly required verification tooling, such as screenshot instrumentation or seeded test data
 - for every task, make the last acceptance item instruct the coding agent to leave short notes about what it learned in that phase, including discoveries or plan adjustments that matter if the plan is rerun from a fresh environment
 - after incorporating the prior-run learnings, do not copy stale task notes from the previous run into the plan
 - reset every task status to todo so the project can restart from a fresh environment
@@ -139,6 +142,8 @@ Perform a critical review of the restarted plan. Focus on:
 - task sequencing or missing preparatory work that would recreate the same difficulties
 - tasks that are too large, vague, or not committable
 - missing checkpoints or weak automated verification commands
+- tasks that lack a self-verification path agents can run without manual help
+- missing preparatory harnesses, fixtures, instrumentation, screenshot capture, or artifact generation needed to make verification executable
 - tasks that defer routine testing, verification, or cleanup work that should stay attached to implementation
 - missing trigger-justified standalone tech-debt tasks when prior-run notes or planned work indicate unresolved follow-up testing, cleanup, hardening, or rollback-safety work for a new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or a broad expected implementation surface
 - wording that claims replanning can observe actual changed-file counts or other finalize-time facts instead of grounding follow-up work in prior notes, expected breadth, or discovered risk

@@ -130,6 +130,8 @@ func authorPromptForStage(stage Stage) (string, error) {
 	switch stage {
 	case StageProductDefinition:
 		return ProductDefinitionAuthor, nil
+	case StageFeatureRefactor:
+		return FeatureRefactorAuthor, nil
 	case StageUXReview:
 		return UXReviewAuthor, nil
 	case StageTechnicalReview:
@@ -143,6 +145,8 @@ func criticPromptForStage(stage Stage) (string, error) {
 	switch stage {
 	case StageProductDefinition:
 		return ProductDefinitionCritic, nil
+	case StageFeatureRefactor:
+		return FeatureRefactorCritic, nil
 	case StageUXReview:
 		return UXReviewCritic, nil
 	case StageTechnicalReview:
@@ -156,6 +160,8 @@ func stageDisplayName(stage Stage) (string, error) {
 	switch stage {
 	case StageProductDefinition:
 		return "Product Definition", nil
+	case StageFeatureRefactor:
+		return "Feature/Refactor", nil
 	case StageUXReview:
 		return "UX Review", nil
 	case StageTechnicalReview:
