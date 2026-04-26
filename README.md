@@ -2,7 +2,7 @@
 
 **Run Claude Code and Codex through a plan until your project is built.**
 
-vibedrive is a CLI that orchestrates AI coding agents against a machine-readable task graph. You give it a spec document. It turns the spec into `vibedrive-plan.yaml`, then runs a loop: pick the next task, have one agent implement it, have another agent peer-review the diff, apply the review feedback, run per-task verification commands, commit — and move on. The loop stops when the plan is done.
+vibedrive is a CLI that orchestrates AI coding agents against a machine-readable task graph. You can bring your own spec document or run `vibedrive create` to have agents help author `DESIGN.md` interactively. `vibedrive init` turns that spec into `vibedrive-plan.yaml`, then `vibedrive run` loops: pick the next task, have one agent implement it, have another agent peer-review the diff, apply the review feedback, run per-task verification commands, commit — and move on. The loop stops when the plan is done.
 
 Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so you can watch the work happen. Either agent can play coder or reviewer; pick roles per run.
 
@@ -19,6 +19,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 From inside the repo you want built:
 
 ```bash
+vibedrive create              # interactively author DESIGN.md with the default Codex author and Claude critic
 vibedrive init DESIGN.md      # scaffold vibedrive.yaml + vibedrive-plan.yaml from your spec
 vibedrive run                 # run the loop: codex codes, claude reviews
 ```
@@ -49,6 +50,8 @@ go run ./cmd/vibedrive <subcommand>
 From inside the repo you want vibedrive to work on:
 
 ```bash
+vibedrive create            # menu-driven DESIGN.md authoring; defaults author=codex and critic=claude
+vibedrive create --author claude --critic codex
 vibedrive init              # writes vibedrive.yaml, resolves top-level regular files as sources by default, then runs author, critic, and author-revision bootstrap phases
 vibedrive init --author claude   # bootstrap the plan with Claude instead of the default Codex author
 vibedrive init --critic codex    # use Codex for the critic phase instead of the default Claude critic
@@ -64,6 +67,7 @@ vibedrive run --coder codex --reviewer codex    # same agent can both code and r
 Target a different repo without `cd`:
 
 ```bash
+vibedrive create --workspace /path/to/repo
 vibedrive init --workspace /path/to/repo
 vibedrive restart --workspace /path/to/repo
 vibedrive run  --workspace /path/to/repo
@@ -77,7 +81,37 @@ vibedrive init --print-sources
 vibedrive init --print-sources --source DESIGN.md --source docs/specs
 ```
 
+`vibedrive create` intentionally has no `--dry-run` mode. It also does not support `--resume` or a positional idea argument; explain the idea interactively to the Product Definition author agent.
+
 `vibedrive init` bootstraps the plan. The generated config points the runner at `vibedrive-plan.yaml`.
+
+## Create `DESIGN.md`
+
+Usage:
+
+```bash
+vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
+```
+
+`vibedrive create` starts a numbered menu with Product Definition, UX Review, Technical Review, and Stop. Planning appears in the menu only when `DESIGN.md` exists at the workspace root, and it appears whenever that file exists regardless of the last completed create stage.
+
+The three authoring stages all write or update the same root `DESIGN.md`:
+
+1. Product Definition inspects the workspace, interviews the user in the agent TUI, pushes on unclear product scope or success criteria, and writes the initial design.
+2. UX Review reads the workspace and current `DESIGN.md`, then improves user journeys, interaction design, accessibility, states, content, terminology, and related product/design tradeoffs where useful.
+3. Technical Review reads the workspace and current `DESIGN.md`, then adds architecture, data model, integration, risk, edge-case, testing, rollout, and rough implementation guidance without creating a task-by-task plan.
+
+After each successful author stage, vibedrive returns to the menu. You can rerun any stage, jump forward or backward, stop and manually edit `DESIGN.md`, or choose Planning once `DESIGN.md` exists.
+
+After each stage, vibedrive asks whether you want a second opinion. If you answer yes, it runs the critic in a fresh instance, shows the critic output in the terminal, then passes that feedback to a fresh author instance. The critic does not edit `DESIGN.md`; the author owns all document changes. Defaults are author=`codex` and critic=`claude`, and both roles can be set to either `claude` or `codex`.
+
+Choosing Planning reuses the existing init bootstrap flow exactly as if you had run:
+
+```bash
+vibedrive init --source DESIGN.md --author <same-author> --critic <same-critic>
+```
+
+`DESIGN.md` is the only init source used by the create handoff. `vibedrive create` does not support `--dry-run`, `--resume`, or a positional idea argument by design.
 
 ## How the loop works
 
@@ -111,6 +145,7 @@ During `init`, vibedrive bootstraps the plan in four steps:
 
 ```
 vibedrive run  [-config PATH] [-workspace DIR] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
+vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
 vibedrive restart [-config PATH] [-workspace DIR]
 vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
@@ -256,7 +291,7 @@ The intended use is:
 - `vibedrive init` runs fresh author, critic, and author-revision agent instances; the critic reviews without editing the plan and the author owns both plan writes
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts
-- your external planner can still generate both files if you prefer that flow
+- your external planning tool can still generate both files if you prefer that flow
 
 ### Project fields
 
@@ -276,7 +311,7 @@ The intended use is:
 | `details`         | Optional implementation notes or extra context.                                         |
 | `status`          | Required execution state. See supported values below.                                   |
 | `workflow`        | Optional workflow name from `vibedrive.yaml`. Falls back to `default_workflow`.      |
-| `kind`            | Optional planner metadata. Stored in the plan, but not interpreted by the runner today. |
+| `kind`            | Optional planning metadata. Stored in the plan, but not interpreted by the runner today. |
 | `deps`            | Optional list of task IDs that must be `done` before this task is ready.                |
 | `context_files`   | Optional repo-relative files the task should pay attention to.                          |
 | `acceptance`      | Optional acceptance criteria for the task.                                              |

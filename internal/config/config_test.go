@@ -142,6 +142,32 @@ func TestLoadSetsDefaultCodexTUIArgs(t *testing.T) {
 	}
 }
 
+func TestDefaultAgentLaunchConfigDoesNotRequireConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	cfg, err := DefaultAgentLaunchConfig(configPath)
+	if err != nil {
+		t.Fatalf("DefaultAgentLaunchConfig returned error: %v", err)
+	}
+
+	if cfg.Path != configPath {
+		t.Fatalf("expected config path %q, got %q", configPath, cfg.Path)
+	}
+	if cfg.Workspace != dir {
+		t.Fatalf("expected workspace %q, got %q", dir, cfg.Workspace)
+	}
+	if cfg.Claude.Command != "claude" || cfg.Codex.Command != "codex" {
+		t.Fatalf("expected default agent commands, got claude=%q codex=%q", cfg.Claude.Command, cfg.Codex.Command)
+	}
+	if cfg.Codex.Transport != CodexTransportTUI {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportTUI, cfg.Codex.Transport)
+	}
+	if len(cfg.Steps) != 0 || len(cfg.Workflows) != 0 {
+		t.Fatalf("expected launch-only config not to require workflow steps, got steps=%d workflows=%d", len(cfg.Steps), len(cfg.Workflows))
+	}
+}
+
 func TestLoadAppendsDefaultCodexReasoningWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")

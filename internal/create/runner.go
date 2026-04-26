@@ -11,6 +11,10 @@ import (
 
 const designFileName = "DESIGN.md"
 
+func DesignFileName() string {
+	return designFileName
+}
+
 type AgentLauncher func(agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error)
 
 type ConfirmFunc func(ctx context.Context, prompt string) (bool, error)

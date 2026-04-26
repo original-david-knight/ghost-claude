@@ -170,6 +170,26 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+func DefaultAgentLaunchConfig(path string) (*Config, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := defaultConfig()
+	cfg.Path = absPath
+	cfg.BaseDir = filepath.Dir(absPath)
+	cfg.Workspace = cfg.BaseDir
+	cfg.PlanFile = filepath.Join(cfg.Workspace, cfg.PlanFile)
+	cfg.Claude.Args = ensureDefaultClaudeArgs(cfg.Claude.Args)
+	if cfg.Codex.Transport == "" {
+		cfg.Codex.Transport = defaultCodexTransport(cfg.Codex.Args)
+	}
+	cfg.Codex.Args = ensureDefaultCodexArgs(cfg.Codex.Args, cfg.Codex.Transport)
+
+	return &cfg, nil
+}
+
 func (c *Config) Validate() error {
 	if c.MaxIterations < 0 {
 		return fmt.Errorf("max_iterations must be >= 0")

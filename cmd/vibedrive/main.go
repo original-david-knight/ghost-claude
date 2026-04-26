@@ -36,6 +36,8 @@ func realMain() error {
 	switch args[0] {
 	case "run":
 		return runCommand(ctx, args[1:])
+	case "create":
+		return createCommand(ctx, args[1:])
 	case "init":
 		return initCommand(ctx, args[1:])
 	case "restart":
@@ -184,6 +186,7 @@ func printUsage() {
 
 Usage:
   vibedrive run [-config vibedrive.yaml] [-workspace /path/to/repo] [-dry-run] [-coder claude|codex] [-reviewer claude|codex]
+  vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
   vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
   vibedrive restart [-config vibedrive.yaml] [-workspace /path/to/repo]
   vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
@@ -191,6 +194,7 @@ Usage:
 If no subcommand is provided, vibedrive behaves like "run".
 
 Init notes:
+  Use create when you want agents to help author DESIGN.md interactively before planning.
   Repeat --source to add files or directories. A single positional SOURCE adds one extra source.
   Omit sources to scan the workspace's top-level regular files. Use --print-sources to preview that resolved source set.
   Use --author claude|codex and --critic claude|codex to pick bootstrap roles. Defaults: author=codex, critic=claude.

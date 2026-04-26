@@ -121,6 +121,37 @@ func TestStageRunnerDecliningCriticUpdatesStateAndSkipsCritic(t *testing.T) {
 	}
 }
 
+func TestStageRunnerAuthorPromptWritesOrUpdatesDesign(t *testing.T) {
+	dir := t.TempDir()
+	designPath := filepath.Join(dir, designFileName)
+	if err := os.WriteFile(designPath, []byte("old design\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	launcher := &fakeStageLauncher{}
+	launcher.onRun = func(_ context.Context, role string, _ int, prompt string, _ io.Writer) error {
+		if role != "author" || prompt != ProductDefinitionAuthor {
+			return nil
+		}
+		return os.WriteFile(designPath, []byte("updated design\n"), 0o644)
+	}
+	confirm := &confirmRecorder{answer: false}
+
+	runner := NewStageRunner(dir, launcher.launch, confirm.confirm, io.Discard)
+	if err := runner.Run(context.Background(), StageProductDefinition, config.AgentCodex, config.AgentClaude); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	design, err := os.ReadFile(designPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	if string(design) != "updated design\n" {
+		t.Fatalf("expected DESIGN.md to be updated by author prompt, got %q", string(design))
+	}
+	assertLastStage(t, dir, StageProductDefinition)
+}
+
 func TestStageRunnerRerunsUseFreshAuthorInstances(t *testing.T) {
 	dir := t.TempDir()
 	launcher := &fakeStageLauncher{}
