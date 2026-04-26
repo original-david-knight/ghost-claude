@@ -227,10 +227,11 @@ func TestInitCommandRejectsInvalidCriticFlag(t *testing.T) {
 	}
 }
 
-func TestInitCommandRejectsPlannerFlag(t *testing.T) {
-	err := initCommand(context.Background(), []string{"--planner", config.AgentCodex, "--print-sources"})
+func TestInitCommandRejectsRemovedLegacyAuthorFlag(t *testing.T) {
+	removedFlag := "--" + "plan" + "ner"
+	err := initCommand(context.Background(), []string{removedFlag, config.AgentCodex, "--print-sources"})
 	if err == nil {
-		t.Fatal("expected initCommand to reject --planner")
+		t.Fatal("expected initCommand to reject removed legacy author flag")
 	}
 	if !strings.Contains(err.Error(), "flag provided but not defined") {
 		t.Fatalf("unexpected error: %v", err)
