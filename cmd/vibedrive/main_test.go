@@ -159,22 +159,65 @@ func TestResolveInitAuthorRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-func TestInitCommandAcceptsAuthorFlagWithPrintSources(t *testing.T) {
+func TestResolveInitCriticUsesClaudeDefault(t *testing.T) {
+	got, err := resolveInitCritic("")
+	if err != nil {
+		t.Fatalf("resolveInitCritic returned error: %v", err)
+	}
+	if got != config.AgentClaude {
+		t.Fatalf("expected default critic %q, got %q", config.AgentClaude, got)
+	}
+}
+
+func TestResolveInitCriticNormalizesCodex(t *testing.T) {
+	got, err := resolveInitCritic(" CoDeX ")
+	if err != nil {
+		t.Fatalf("resolveInitCritic returned error: %v", err)
+	}
+	if got != config.AgentCodex {
+		t.Fatalf("expected critic %q, got %q", config.AgentCodex, got)
+	}
+}
+
+func TestResolveInitCriticRejectsInvalidValue(t *testing.T) {
+	_, err := resolveInitCritic("cursor")
+	if err == nil {
+		t.Fatal("expected resolveInitCritic to reject an unsupported critic")
+	}
+	if !strings.Contains(err.Error(), `critic "cursor" is not supported; expected claude or codex`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestInitCommandAcceptsAuthorAndCriticFlagsWithPrintSources(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "DESIGN.md"), []byte("design\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
 	for _, author := range []string{config.AgentClaude, config.AgentCodex} {
-		err := initCommand(context.Background(), []string{
-			"--workspace", dir,
-			"--source", "DESIGN.md",
-			"--author", author,
-			"--print-sources",
-		})
-		if err != nil {
-			t.Fatalf("initCommand rejected --author %s: %v", author, err)
+		for _, critic := range []string{config.AgentClaude, config.AgentCodex} {
+			err := initCommand(context.Background(), []string{
+				"--workspace", dir,
+				"--source", "DESIGN.md",
+				"--author", author,
+				"--critic", critic,
+				"--print-sources",
+			})
+			if err != nil {
+				t.Fatalf("initCommand rejected --author %s --critic %s: %v", author, critic, err)
+			}
 		}
+	}
+}
+
+func TestInitCommandRejectsInvalidCriticFlag(t *testing.T) {
+	err := initCommand(context.Background(), []string{"--critic", "cursor", "--print-sources"})
+	if err == nil {
+		t.Fatal("expected initCommand to reject invalid --critic")
+	}
+	if !strings.Contains(err.Error(), `critic "cursor" is not supported; expected claude or codex`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

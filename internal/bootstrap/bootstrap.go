@@ -9,60 +9,24 @@ import (
 	"sort"
 	"strings"
 
+	"vibedrive/internal/agentlaunch"
 	"vibedrive/internal/config"
 	"vibedrive/internal/scaffold"
 	"vibedrive/pkg/agentcli/claude"
-	"vibedrive/pkg/agentcli/codex"
 )
 
 type Initializer struct {
 	stdout io.Writer
 	stderr io.Writer
 
-	newAuthor  func(*config.Config, string, io.Writer, io.Writer) (bootstrapAuthor, error)
-	newClient  func(*config.Config, io.Writer, io.Writer) (promptClient, error)
-	newSession func(string) (*claude.Session, error)
-}
-
-type bootstrapAuthor interface {
-	RunPrompt(ctx context.Context, prompt string) error
-	Close() error
+	launchAgent func(*config.Config, string, string, io.Writer, io.Writer) (agentlaunch.Runner, error)
+	newClient   func(*config.Config, io.Writer, io.Writer) (promptClient, error)
+	newSession  func(string) (*claude.Session, error)
 }
 
 type promptClient interface {
 	RunPrompt(ctx context.Context, session *claude.Session, prompt string) error
 	Close(session *claude.Session) error
-}
-
-type codexPromptClient interface {
-	RunPrompt(ctx context.Context, session *codex.Session, prompt string) error
-	Close(session *codex.Session) error
-}
-
-type claudeBootstrapAuthor struct {
-	client  promptClient
-	session *claude.Session
-}
-
-func (p *claudeBootstrapAuthor) RunPrompt(ctx context.Context, prompt string) error {
-	return p.client.RunPrompt(ctx, p.session, prompt)
-}
-
-func (p *claudeBootstrapAuthor) Close() error {
-	return p.client.Close(p.session)
-}
-
-type codexBootstrapAuthor struct {
-	client  codexPromptClient
-	session *codex.Session
-}
-
-func (p *codexBootstrapAuthor) RunPrompt(ctx context.Context, prompt string) error {
-	return p.client.RunPrompt(ctx, p.session, prompt)
-}
-
-func (p *codexBootstrapAuthor) Close() error {
-	return p.client.Close(p.session)
 }
 
 type sourceSpec struct {
@@ -73,9 +37,9 @@ const defaultPlanFile = "vibedrive-plan.yaml"
 
 func New(stdout, stderr io.Writer) *Initializer {
 	return &Initializer{
-		stdout:    stdout,
-		stderr:    stderr,
-		newAuthor: newBootstrapAuthor,
+		stdout:      stdout,
+		stderr:      stderr,
+		launchAgent: agentlaunch.LaunchAgent,
 		newClient: func(cfg *config.Config, stdout, stderr io.Writer) (promptClient, error) {
 			return claude.New(
 				cfg.Claude.Command,
@@ -91,59 +55,7 @@ func New(stdout, stderr io.Writer) *Initializer {
 	}
 }
 
-func newBootstrapAuthor(cfg *config.Config, author string, stdout, stderr io.Writer) (bootstrapAuthor, error) {
-	resolvedAuthor, err := config.ResolveAgent(author, config.AgentCodex, "author")
-	if err != nil {
-		return nil, err
-	}
-
-	switch resolvedAuthor {
-	case config.AgentClaude:
-		client, err := claude.New(
-			cfg.Claude.Command,
-			cfg.Claude.Args,
-			cfg.Workspace,
-			cfg.Claude.Transport,
-			cfg.Claude.StartupTimeout,
-			stdout,
-			stderr,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		session, err := claude.NewSession(config.SessionStrategySessionID)
-		if err != nil {
-			return nil, err
-		}
-
-		return &claudeBootstrapAuthor{client: client, session: session}, nil
-	case config.AgentCodex:
-		client, err := codex.New(
-			cfg.Codex.Command,
-			cfg.Codex.Args,
-			cfg.Workspace,
-			cfg.Codex.Transport,
-			cfg.Codex.StartupTimeout,
-			stdout,
-			stderr,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		session, err := codex.NewSession()
-		if err != nil {
-			return nil, err
-		}
-
-		return &codexBootstrapAuthor{client: client, session: session}, nil
-	default:
-		return nil, fmt.Errorf("author %q is not supported; expected claude or codex", author)
-	}
-}
-
-func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool, author string) error {
+func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []string, force bool, author, critic string) error {
 	if err := scaffold.Write(configPath, force); err != nil {
 		return err
 	}
@@ -175,24 +87,52 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 		return err
 	}
 
-	authorClient, err := i.newAuthor(cfg, author, i.stdout, i.stderr)
+	feedbackPath := initCriticFeedbackPath(cfg.Workspace)
+	if err := os.MkdirAll(filepath.Dir(feedbackPath), 0o755); err != nil {
+		return err
+	}
+	if err := os.Remove(feedbackPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	defer func() {
+		_ = os.Remove(feedbackPath)
+	}()
+
+	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderCreatePlanPrompt(cfg, source)); err != nil {
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, critic, "critic", renderCriticPlanPrompt(cfg, source, feedbackPath)); err != nil {
+		return err
+	}
+	if _, err := os.Stat(feedbackPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("critic phase did not write feedback artifact %s", feedbackPath)
+		}
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderRevisePlanPrompt(cfg, source, feedbackPath)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (i *Initializer) runBootstrapPhase(ctx context.Context, cfg *config.Config, agentType, role, prompt string) error {
+	runner, err := i.launchAgent(cfg, agentType, role, i.stdout, i.stderr)
 	if err != nil {
 		return err
 	}
 
-	defer func() {
-		_ = authorClient.Close()
-	}()
-
-	prompts := []string{
-		renderCreatePlanPrompt(cfg, source),
-		renderReviewPlanPrompt(cfg, source),
-	}
-
-	for _, prompt := range prompts {
-		if err := authorClient.RunPrompt(ctx, prompt); err != nil {
-			return err
+	runErr := runner.RunPrompt(ctx, prompt)
+	closeErr := runner.Close()
+	if runErr != nil {
+		if closeErr != nil {
+			return fmt.Errorf("%w; also failed to close %s phase: %v", runErr, role, closeErr)
 		}
+		return runErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 
 	return nil
@@ -276,9 +216,10 @@ After writing %s, quickly check that the YAML parses and that dependency orderin
 `, sourceRefs, planRef, planRef))
 }
 
-func renderReviewPlanPrompt(cfg *config.Config, source sourceSpec) string {
+func renderCriticPlanPrompt(cfg *config.Config, source sourceSpec, feedbackPath string) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Review the generated execution plan in %s against these source inputs:
@@ -286,7 +227,9 @@ Review the generated execution plan in %s against these source inputs:
 
 Also inspect any source docs they reference when checking plan coverage and fidelity.
 
-Perform a critical review of the plan. Focus on:
+Perform a critical review of the plan. You are the critic only: do not change %s, and do not change any source document.
+
+Focus on:
 - missing constraints or success criteria
 - incorrect or weak task decomposition
 - missing checkpoints or verification work
@@ -300,10 +243,45 @@ Perform a critical review of the plan. Focus on:
 - tasks that are too large, too vague, or not committable
 - requirements from the listed source inputs that were omitted or weakened
 
-Incorporate any actionable review feedback directly into %s.
+Write concise, actionable critic feedback to %s. Use Markdown bullets grouped by severity. Include an explicit "No actionable feedback" note if the plan already satisfies the source inputs.
+`, planRef, sourceRefs, planRef, feedbackRef))
+}
+
+func renderRevisePlanPrompt(cfg *config.Config, source sourceSpec, feedbackPath string) string {
+	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
+	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
+
+	return strings.TrimSpace(fmt.Sprintf(`
+Revise the generated execution plan in %s using the transient critic feedback at %s.
+
+Use these project source inputs as the authority when deciding which critic feedback is actionable:
+%s
+
+Read %s, %s, and every listed source input completely before making changes.
+
+Apply actionable critic feedback directly to %s. Ignore feedback that would weaken or contradict the listed source inputs.
 
 Keep the YAML valid. Keep task statuses at todo. Do not weaken or remove constraints from the source requirements.
-`, planRef, sourceRefs, planRef))
+
+When revising:
+- preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
+- keep testing, verification, and cleanup work attached to the implementation task that introduces the change by default
+- add standalone implement tech-debt tasks only when expected new abstraction, risky temporary coupling or workaround, destructive or stateful behavior, or broad expected implementation surface justifies dedicated follow-up
+- describe standalone tech-debt triggers as planning-time heuristics about expected breadth and discovered risk, not as actual changed-file counts or other finalize-time facts before execution
+- do not add standalone tech-debt tasks on a fixed schedule or as generic placeholders
+- make every standalone tech-debt trigger explicit in the task details or acceptance criteria
+- keep all generated tasks at status todo
+- keep every task's last acceptance item focused on short phase notes about what was learned, including discoveries or plan adjustments that matter if the project is re-planned and rerun in a fresh environment
+- keep verify_commands wherever there is a concrete automated check or test command
+- quote any string list item that contains a colon followed by a space so the YAML stays valid
+
+After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
+`, planRef, feedbackRef, sourceRefs, planRef, feedbackRef, planRef, planRef))
+}
+
+func initCriticFeedbackPath(workspace string) string {
+	return filepath.Join(workspace, ".vibedrive", "init-critic-feedback.md")
 }
 
 func resolvePreviewConfig(configPath string) (*config.Config, error) {
