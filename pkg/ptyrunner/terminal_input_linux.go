@@ -5,6 +5,7 @@ package ptyrunner
 import (
 	"errors"
 	"os"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -29,6 +30,7 @@ func enterTerminalInputMode(file *os.File) (terminalInputMode, error) {
 	}
 
 	updated := *state
+	updated.Iflag &^= unix.ICRNL
 	updated.Lflag &^= unix.ECHO | unix.ICANON | unix.IEXTEN
 	updated.Cc[unix.VMIN] = 1
 	updated.Cc[unix.VTIME] = 0
@@ -53,4 +55,30 @@ func (m *linuxTerminalInputMode) Restore() error {
 
 func (m *linuxTerminalInputMode) Interactive() bool {
 	return m != nil && m.state != nil
+}
+
+func waitForTerminalInput(file *os.File, timeout time.Duration) (bool, error) {
+	if file == nil {
+		return false, nil
+	}
+
+	timeoutMillis := int(timeout / time.Millisecond)
+	if timeout > 0 && timeoutMillis == 0 {
+		timeoutMillis = 1
+	}
+
+	pollFDs := []unix.PollFd{{
+		Fd:     int32(file.Fd()),
+		Events: unix.POLLIN,
+	}}
+	for {
+		n, err := unix.Poll(pollFDs, timeoutMillis)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return n > 0 && pollFDs[0].Revents&unix.POLLIN != 0, nil
+	}
 }

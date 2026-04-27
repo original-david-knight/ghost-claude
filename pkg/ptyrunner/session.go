@@ -2,7 +2,6 @@ package ptyrunner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -173,8 +172,6 @@ func (s *Session) startInputPump() {
 	}
 
 	go func() {
-		defer func() { _ = s.stdin.SetReadDeadline(time.Time{}) }()
-
 		buffer := make([]byte, 256)
 		for {
 			select {
@@ -183,9 +180,12 @@ func (s *Session) startInputPump() {
 			default:
 			}
 
-			// FDs that don't support read deadlines: exit silently rather than fail the session.
-			if err := s.stdin.SetReadDeadline(time.Now().Add(stdinPollInterval)); err != nil {
+			ready, err := waitForTerminalInput(s.stdin, stdinPollInterval)
+			if err != nil {
 				return
+			}
+			if !ready {
+				continue
 			}
 
 			n, err := s.stdin.Read(buffer)
@@ -194,13 +194,9 @@ func (s *Session) startInputPump() {
 					return
 				}
 			}
-			if err == nil {
-				continue
+			if err != nil {
+				return
 			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
-			}
-			return
 		}
 	}()
 }

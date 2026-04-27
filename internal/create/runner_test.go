@@ -71,6 +71,48 @@ func (f *fakeStagePhaseRunner) Close() error {
 	return nil
 }
 
+type fakeInteractiveStageLauncher struct {
+	nextID  int
+	events  []stageRunEvent
+	prompts []stagePrompt
+}
+
+func (f *fakeInteractiveStageLauncher) launch(agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error) {
+	f.nextID++
+	id := f.nextID
+	f.events = append(f.events, stageRunEvent{Kind: "launch", Role: role, AgentType: agentType, ID: id})
+	return &fakeInteractiveStagePhaseRunner{
+		parent:    f,
+		id:        id,
+		role:      role,
+		agentType: agentType,
+	}, nil
+}
+
+type fakeInteractiveStagePhaseRunner struct {
+	parent    *fakeInteractiveStageLauncher
+	id        int
+	role      string
+	agentType string
+}
+
+func (f *fakeInteractiveStagePhaseRunner) RunPrompt(_ context.Context, prompt string) error {
+	f.parent.events = append(f.parent.events, stageRunEvent{Kind: "prompt", Role: f.role, AgentType: f.agentType, ID: f.id})
+	f.parent.prompts = append(f.parent.prompts, stagePrompt{Role: f.role, AgentType: f.agentType, ID: f.id, Prompt: prompt})
+	return nil
+}
+
+func (f *fakeInteractiveStagePhaseRunner) RunInteractivePrompt(_ context.Context, prompt string) error {
+	f.parent.events = append(f.parent.events, stageRunEvent{Kind: "interactive_prompt", Role: f.role, AgentType: f.agentType, ID: f.id})
+	f.parent.prompts = append(f.parent.prompts, stagePrompt{Role: f.role, AgentType: f.agentType, ID: f.id, Prompt: prompt})
+	return nil
+}
+
+func (f *fakeInteractiveStagePhaseRunner) Close() error {
+	f.parent.events = append(f.parent.events, stageRunEvent{Kind: "close", Role: f.role, AgentType: f.agentType, ID: f.id})
+	return nil
+}
+
 type confirmRecorder struct {
 	answer  bool
 	calls   int
@@ -177,6 +219,65 @@ func TestStageRunnerRerunsUseFreshAuthorInstances(t *testing.T) {
 		}
 	}
 	assertLastStage(t, dir, StageUXReview)
+}
+
+func TestStageRunnerUsesInteractivePromptForInterviewStages(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage Stage
+	}{
+		{name: "product definition", stage: StageProductDefinition},
+		{name: "feature refactor", stage: StageFeatureRefactor},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			launcher := &fakeInteractiveStageLauncher{}
+			confirm := &confirmRecorder{answer: false}
+			var output bytes.Buffer
+
+			runner := NewStageRunner(dir, launcher.launch, confirm.confirm, &output)
+			if err := runner.Run(context.Background(), tt.stage, config.AgentCodex, config.AgentClaude); err != nil {
+				t.Fatalf("Run returned error: %v", err)
+			}
+
+			wantEvents := []stageRunEvent{
+				{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 1},
+				{Kind: "interactive_prompt", Role: "author", AgentType: config.AgentCodex, ID: 1},
+				{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 1},
+			}
+			assertStageEvents(t, launcher.events, wantEvents)
+			if len(launcher.prompts) != 1 {
+				t.Fatalf("expected one author prompt, got %d", len(launcher.prompts))
+			}
+			if !strings.Contains(launcher.prompts[0].Prompt, "exit the agent TUI to return to Vibedrive") {
+				t.Fatalf("expected interactive prompt to include exit instructions, got %q", launcher.prompts[0].Prompt)
+			}
+			if !strings.Contains(output.String(), "This author stage is interactive") {
+				t.Fatalf("expected user-facing interactive instructions, got %q", output.String())
+			}
+			assertLastStage(t, dir, tt.stage)
+		})
+	}
+}
+
+func TestStageRunnerUsesNormalPromptForAutonomousStages(t *testing.T) {
+	dir := t.TempDir()
+	launcher := &fakeInteractiveStageLauncher{}
+	confirm := &confirmRecorder{answer: false}
+
+	runner := NewStageRunner(dir, launcher.launch, confirm.confirm, io.Discard)
+	if err := runner.Run(context.Background(), StageUXReview, config.AgentCodex, config.AgentClaude); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	wantEvents := []stageRunEvent{
+		{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 1},
+		{Kind: "prompt", Role: "author", AgentType: config.AgentCodex, ID: 1},
+		{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 1},
+	}
+	assertStageEvents(t, launcher.events, wantEvents)
 }
 
 func TestStageRunnerAcceptingCriticRunsFreshCriticAndFollowUpAuthorWithFeedback(t *testing.T) {

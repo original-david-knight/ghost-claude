@@ -51,7 +51,7 @@ func TestAuthorPromptsInspectWorkspaceDesignAndWriteDesign(t *testing.T) {
 func TestProductDefinitionAuthorPromptCoversInterviewAndPushback(t *testing.T) {
 	assertContainsAll(t, "ProductDefinitionAuthor", ProductDefinitionAuthor,
 		"agent tui",
-		"ask questions until",
+		"ask questions one at a time until",
 		"requirements are ready for the next stage",
 		"push back",
 		"product problems",

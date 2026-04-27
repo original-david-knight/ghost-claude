@@ -79,6 +79,30 @@ func (c *Client) startTUI(ctx context.Context) (*tuiSession, error) {
 func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 	snapshot := s.monitor.snapshot()
 
+	if err := s.submitPrompt(ctx, prompt, snapshot.busyTransitions); err != nil {
+		return err
+	}
+	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
+		return fmt.Errorf("wait for claude tui to become idle: %w", err)
+	}
+
+	return nil
+}
+
+func (s *tuiSession) SendInteractivePrompt(ctx context.Context, prompt string) error {
+	snapshot := s.monitor.snapshot()
+
+	if err := s.submitPrompt(ctx, prompt, snapshot.busyTransitions); err != nil {
+		return err
+	}
+	return s.waitForExit(ctx)
+}
+
+func (s *tuiSession) Close() error {
+	return s.pty.Close(exitCommand, closeTimeout)
+}
+
+func (s *tuiSession) submitPrompt(ctx context.Context, prompt string, busyStart int) error {
 	normalized := ptyrunner.NormalizePrompt(prompt)
 	if normalized == "" {
 		return fmt.Errorf("claude tui prompt is empty after normalization")
@@ -95,33 +119,20 @@ func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 	// doesn't, the Enter likely got eaten by paste-bracketing or composer
 	// state — retry a small number of times before giving up so we never
 	// hang forever on a silently-dropped submit.
-	submitted := false
 	for range submitMaxAttempts {
 		if _, err := io.WriteString(s.pty, "\r"); err != nil {
 			return fmt.Errorf("submit prompt to claude tui: %w", err)
 		}
-		busy, err := s.waitForBusyTransition(ctx, snapshot.busyTransitions, submitRetryInterval)
+		busy, err := s.waitForBusyTransition(ctx, busyStart, submitRetryInterval)
 		if err != nil {
 			return err
 		}
 		if busy {
-			submitted = true
-			break
+			return nil
 		}
 	}
-	if !submitted {
-		return fmt.Errorf("claude tui did not start processing after %d enter presses", submitMaxAttempts)
-	}
 
-	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
-		return fmt.Errorf("wait for claude tui to become idle: %w", err)
-	}
-
-	return nil
-}
-
-func (s *tuiSession) Close() error {
-	return s.pty.Close(exitCommand, closeTimeout)
+	return fmt.Errorf("claude tui did not start processing after %d enter presses", submitMaxAttempts)
 }
 
 // waitForBusyTransition polls the title monitor until Claude transitions to a
@@ -174,6 +185,15 @@ func (s *tuiSession) waitForIdleTransition(ctx context.Context, idleStart, busyS
 			return fmt.Errorf("claude tui exited unexpectedly")
 		case <-ticker.C:
 		}
+	}
+}
+
+func (s *tuiSession) waitForExit(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.pty.Done():
+		return s.pty.ExitErr()
 	}
 }
 

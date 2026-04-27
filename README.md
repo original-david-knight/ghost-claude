@@ -104,6 +104,8 @@ The authoring stages all write or update the same root `DESIGN.md`:
 3. UX Review reads the workspace and current `DESIGN.md`, then improves user journeys, interaction design, accessibility, states, content, terminology, visual verification needs, and related product/design tradeoffs where useful.
 4. Technical Review reads the workspace and current `DESIGN.md`, then adds architecture, data model, integration, risk, edge-case, testing, self-verification instrumentation, rollout, and rough implementation guidance without creating a task-by-task plan.
 
+Product Definition and Feature/Refactor keep the author agent TUI open for the interview. When the author has updated `DESIGN.md`, exit the agent TUI to return to Vibedrive; for Codex this is usually Ctrl-D, and for Claude type `/exit`.
+
 After each successful author stage, vibedrive returns to the menu. You can rerun any stage, jump forward or backward, stop and manually edit `DESIGN.md`, or choose Planning once `DESIGN.md` exists.
 
 After each stage, vibedrive asks whether you want a second opinion. If you answer yes, it runs the critic in a fresh instance, shows the critic output in the terminal, then passes that feedback to a fresh author instance. The critic does not edit `DESIGN.md`; the author owns all document changes. Defaults are author=`codex` and critic=`claude`, and both roles can be set to either `claude` or `codex`.

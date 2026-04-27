@@ -17,11 +17,13 @@ type Runner interface {
 
 type claudeClient interface {
 	RunPrompt(ctx context.Context, session *claude.Session, prompt string) error
+	RunInteractivePrompt(ctx context.Context, session *claude.Session, prompt string) error
 	Close(session *claude.Session) error
 }
 
 type codexClient interface {
 	RunPrompt(ctx context.Context, session *codexcli.Session, prompt string) error
+	RunInteractivePrompt(ctx context.Context, session *codexcli.Session, prompt string) error
 	Close(session *codexcli.Session) error
 }
 
@@ -32,6 +34,10 @@ type claudeRunner struct {
 
 func (r *claudeRunner) RunPrompt(ctx context.Context, prompt string) error {
 	return r.client.RunPrompt(ctx, r.session, prompt)
+}
+
+func (r *claudeRunner) RunInteractivePrompt(ctx context.Context, prompt string) error {
+	return r.client.RunInteractivePrompt(ctx, r.session, prompt)
 }
 
 func (r *claudeRunner) Close() error {
@@ -45,6 +51,10 @@ type codexRunner struct {
 
 func (r *codexRunner) RunPrompt(ctx context.Context, prompt string) error {
 	return r.client.RunPrompt(ctx, r.session, prompt)
+}
+
+func (r *codexRunner) RunInteractivePrompt(ctx context.Context, prompt string) error {
+	return r.client.RunInteractivePrompt(ctx, r.session, prompt)
 }
 
 func (r *codexRunner) Close() error {

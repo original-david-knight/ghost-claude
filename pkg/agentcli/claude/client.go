@@ -93,6 +93,17 @@ func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string)
 	}
 }
 
+func (c *Client) RunInteractivePrompt(ctx context.Context, session *Session, prompt string) error {
+	switch c.transport {
+	case TransportPrint:
+		return fmt.Errorf("claude transport %q cannot run an interactive prompt; set claude.transport to %q", c.transport, TransportTUI)
+	case TransportTUI:
+		return c.runTUIInteractivePrompt(ctx, session, prompt)
+	default:
+		return fmt.Errorf("unsupported transport %q", c.transport)
+	}
+}
+
 func (c *Client) Close(session *Session) error {
 	if session == nil || session.tui == nil {
 		return nil
@@ -149,6 +160,19 @@ func (c *Client) runTUIPrompt(ctx context.Context, session *Session, prompt stri
 	}
 
 	return session.tui.SendPrompt(ctx, prompt)
+}
+
+func (c *Client) runTUIInteractivePrompt(ctx context.Context, session *Session, prompt string) error {
+	if !session.Started {
+		tui, err := c.startTUI(ctx)
+		if err != nil {
+			return err
+		}
+		session.tui = tui
+		session.Started = true
+	}
+
+	return session.tui.SendInteractivePrompt(ctx, prompt)
 }
 
 func newUUID() (string, error) {

@@ -19,6 +19,10 @@ type AgentLauncher func(agentType, role string, stdout, stderr io.Writer) (agent
 
 type ConfirmFunc func(ctx context.Context, prompt string) (bool, error)
 
+type interactivePromptRunner interface {
+	RunInteractivePrompt(ctx context.Context, prompt string) error
+}
+
 type StageRunner struct {
 	Workspace string
 	Launch    AgentLauncher
@@ -51,9 +55,10 @@ func (r StageRunner) Run(ctx context.Context, stage Stage, authorAgent, criticAg
 	if err != nil {
 		return err
 	}
+	interactiveAuthor := stageUsesInteractiveAuthor(stage)
 
 	output := r.output()
-	if err := r.runPhase(ctx, authorAgent, "author", authorPrompt, output, output); err != nil {
+	if err := r.runPhase(ctx, authorAgent, "author", authorPrompt, output, output, interactiveAuthor); err != nil {
 		return err
 	}
 	if err := Write(r.Workspace, State{LastStage: stage}); err != nil {
@@ -74,12 +79,12 @@ func (r StageRunner) Run(ctx context.Context, stage Stage, authorAgent, criticAg
 	}
 	var criticFeedback bytes.Buffer
 	criticStdout := io.MultiWriter(output, &criticFeedback)
-	if err := r.runPhase(ctx, criticAgent, "critic", criticPrompt, criticStdout, output); err != nil {
+	if err := r.runPhase(ctx, criticAgent, "critic", criticPrompt, criticStdout, output, false); err != nil {
 		return err
 	}
 
 	followUpPrompt := renderAuthorFollowUpPrompt(criticFeedback.String())
-	if err := r.runPhase(ctx, authorAgent, "author", followUpPrompt, output, output); err != nil {
+	if err := r.runPhase(ctx, authorAgent, "author", followUpPrompt, output, output, false); err != nil {
 		return err
 	}
 	return Write(r.Workspace, State{LastStage: stage})
@@ -105,13 +110,13 @@ func (r StageRunner) output() io.Writer {
 	return r.Output
 }
 
-func (r StageRunner) runPhase(ctx context.Context, agentType, role, prompt string, stdout, stderr io.Writer) error {
+func (r StageRunner) runPhase(ctx context.Context, agentType, role, prompt string, stdout, stderr io.Writer, interactive bool) error {
 	runner, err := r.Launch(agentType, role, stdout, stderr)
 	if err != nil {
 		return err
 	}
 
-	runErr := runner.RunPrompt(ctx, prompt)
+	runErr := runStagePrompt(ctx, runner, prompt, stdout, interactive)
 	closeErr := runner.Close()
 	if runErr != nil {
 		if closeErr != nil {
@@ -124,6 +129,33 @@ func (r StageRunner) runPhase(ctx context.Context, agentType, role, prompt strin
 	}
 
 	return nil
+}
+
+func runStagePrompt(ctx context.Context, runner agentlaunch.Runner, prompt string, output io.Writer, interactive bool) error {
+	if !interactive {
+		return runner.RunPrompt(ctx, prompt)
+	}
+
+	interactiveRunner, ok := runner.(interactivePromptRunner)
+	if !ok {
+		return runner.RunPrompt(ctx, prompt)
+	}
+
+	if output != nil {
+		fmt.Fprintln(output)
+		fmt.Fprintln(output, "This author stage is interactive. Exit the agent TUI after DESIGN.md is updated to return to Vibedrive.")
+		fmt.Fprintln(output, "For Codex this is usually Ctrl-D; for Claude, type /exit.")
+	}
+	return interactiveRunner.RunInteractivePrompt(ctx, promptWithInteractiveExitInstructions(prompt))
+}
+
+func stageUsesInteractiveAuthor(stage Stage) bool {
+	switch stage {
+	case StageProductDefinition, StageFeatureRefactor:
+		return true
+	default:
+		return false
+	}
 }
 
 func authorPromptForStage(stage Stage) (string, error) {
@@ -173,4 +205,11 @@ func stageDisplayName(stage Stage) (string, error) {
 
 func renderAuthorFollowUpPrompt(criticFeedback string) string {
 	return fmt.Sprintf("%s\n\nCritic feedback:\n%s", AuthorFollowUpFromCritic, criticFeedback)
+}
+
+func promptWithInteractiveExitInstructions(prompt string) string {
+	return fmt.Sprintf(`%s
+
+When DESIGN.md is updated and this stage is complete, tell the user to exit the agent TUI to return to Vibedrive. For Codex this is usually Ctrl-D; for Claude, type /exit.
+`, prompt)
 }

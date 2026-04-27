@@ -391,6 +391,16 @@ func TestCreateCommandDefaultsAuthorCodexAndCriticClaude(t *testing.T) {
 	}
 }
 
+func TestCreateStageLabelSupportsFeatureRefactorState(t *testing.T) {
+	got, err := createStageLabel(createpkg.StageFeatureRefactor)
+	if err != nil {
+		t.Fatalf("createStageLabel returned error: %v", err)
+	}
+	if got != "Feature/Refactor" {
+		t.Fatalf("expected Feature/Refactor label, got %q", got)
+	}
+}
+
 func TestCreateCommandRejectsUnsupportedFlagsAndPositionalIdea(t *testing.T) {
 	tests := []struct {
 		name string

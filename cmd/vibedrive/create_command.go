@@ -87,6 +87,7 @@ Create stages:
 
 Notes:
   The author defaults to codex. The critic defaults to claude.
+  Interactive author stages keep the agent TUI open until you exit it after DESIGN.md is updated.
   After each author stage, vibedrive can ask whether to run a fresh critic instance for a second opinion.
   --dry-run, --resume, and a positional idea argument are intentionally not supported.
 
@@ -331,6 +332,8 @@ func createStageLabel(stage createpkg.Stage) (string, error) {
 	switch stage {
 	case createpkg.StageProductDefinition:
 		return "Product Definition", nil
+	case createpkg.StageFeatureRefactor:
+		return "Feature/Refactor", nil
 	case createpkg.StageUXReview:
 		return "UX Review", nil
 	case createpkg.StageTechnicalReview:

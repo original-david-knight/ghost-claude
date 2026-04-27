@@ -93,6 +93,17 @@ func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string)
 	}
 }
 
+func (c *Client) RunInteractivePrompt(ctx context.Context, session *Session, prompt string) error {
+	switch c.transport {
+	case TransportExec:
+		return fmt.Errorf("codex transport %q cannot run an interactive prompt; set codex.transport to %q", c.transport, TransportTUI)
+	case TransportTUI:
+		return c.runTUIInteractivePrompt(ctx, session, prompt)
+	default:
+		return fmt.Errorf("unsupported transport %q", c.transport)
+	}
+}
+
 func (c *Client) Close(session *Session) error {
 	if session == nil || session.tui == nil {
 		return nil
@@ -129,6 +140,26 @@ func (c *Client) runTUIPrompt(ctx context.Context, session *Session, prompt stri
 	}
 
 	return nil
+}
+
+func (c *Client) runTUIInteractivePrompt(ctx context.Context, session *Session, prompt string) error {
+	if session == nil {
+		return fmt.Errorf("codex tui requires a session")
+	}
+	if session.ExecFallback {
+		return fmt.Errorf("codex tui session is in exec fallback mode and cannot continue interactively")
+	}
+
+	if !session.Started {
+		tui, err := c.startTUI(ctx)
+		if err != nil {
+			return err
+		}
+		session.tui = tui
+		session.Started = true
+	}
+
+	return session.tui.SendInteractivePrompt(ctx, prompt)
 }
 
 func (c *Client) runExecPrompt(ctx context.Context, prompt string) error {

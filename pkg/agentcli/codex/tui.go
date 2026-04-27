@@ -77,6 +77,30 @@ func (c *Client) startTUI(ctx context.Context) (*tuiSession, error) {
 func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 	snapshot := s.monitor.snapshot()
 
+	if err := s.submitPrompt(ctx, prompt, snapshot.busyTransitions); err != nil {
+		return err
+	}
+	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
+		return fmt.Errorf("wait for codex tui to become idle: %w", err)
+	}
+
+	return nil
+}
+
+func (s *tuiSession) SendInteractivePrompt(ctx context.Context, prompt string) error {
+	snapshot := s.monitor.snapshot()
+
+	if err := s.submitPrompt(ctx, prompt, snapshot.busyTransitions); err != nil {
+		return err
+	}
+	return s.waitForExit(ctx)
+}
+
+func (s *tuiSession) Close() error {
+	return s.pty.Close(exitByte, closeTimeout)
+}
+
+func (s *tuiSession) submitPrompt(ctx context.Context, prompt string, busyStart int) error {
 	normalized := ptyrunner.NormalizePrompt(prompt)
 	if normalized == "" {
 		return fmt.Errorf("codex tui prompt is empty after normalization")
@@ -89,33 +113,20 @@ func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 		return err
 	}
 
-	submitted := false
 	for range submitMaxAttempts {
 		if _, err := io.WriteString(s.pty, "\r"); err != nil {
 			return fmt.Errorf("submit prompt to codex tui: %w", err)
 		}
-		busy, err := s.waitForBusyTransition(ctx, snapshot.busyTransitions, submitRetryInterval)
+		busy, err := s.waitForBusyTransition(ctx, busyStart, submitRetryInterval)
 		if err != nil {
 			return err
 		}
 		if busy {
-			submitted = true
-			break
+			return nil
 		}
 	}
-	if !submitted {
-		return fmt.Errorf("%w after %d enter presses", errTUIPromptNotAccepted, submitMaxAttempts)
-	}
 
-	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
-		return fmt.Errorf("wait for codex tui to become idle: %w", err)
-	}
-
-	return nil
-}
-
-func (s *tuiSession) Close() error {
-	return s.pty.Close(exitByte, closeTimeout)
+	return fmt.Errorf("%w after %d enter presses", errTUIPromptNotAccepted, submitMaxAttempts)
 }
 
 func (s *tuiSession) waitForBusyTransition(ctx context.Context, busyStart int, timeout time.Duration) (bool, error) {
@@ -165,6 +176,15 @@ func (s *tuiSession) waitForIdleTransition(ctx context.Context, idleStart, busyS
 			return fmt.Errorf("codex tui exited unexpectedly")
 		case <-ticker.C:
 		}
+	}
+}
+
+func (s *tuiSession) waitForExit(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.pty.Done():
+		return s.pty.ExitErr()
 	}
 }
 
