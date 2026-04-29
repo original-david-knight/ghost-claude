@@ -169,16 +169,6 @@ func TestTitleMonitorWaitsForBusyThenIdleBeforeStartupReady(t *testing.T) {
 	}
 }
 
-func TestWriteBracketedPasteWrapsPayload(t *testing.T) {
-	var buf bytes.Buffer
-	if err := writeBracketedPaste(&buf, "hello world"); err != nil {
-		t.Fatalf("writeBracketedPaste returned error: %v", err)
-	}
-	if got, want := buf.String(), bracketedPasteStart+"hello world"+bracketedPasteEnd; got != want {
-		t.Fatalf("writeBracketedPaste = %q, want %q", got, want)
-	}
-}
-
 func TestExecArgsAppendsExecAndDropsNoAltScreenForTUIFallback(t *testing.T) {
 	client, err := New("codex", []string{"--dangerously-bypass-approvals-and-sandbox", "--no-alt-screen", "-c", `model_reasoning_effort="xhigh"`}, ".", TransportTUI, "", io.Discard, io.Discard)
 	if err != nil {

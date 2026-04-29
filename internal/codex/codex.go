@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"vibedrive/internal/codexargs"
 )
 
 const (
@@ -206,7 +208,7 @@ func (c *Client) shouldFilterExecOutput() bool {
 }
 
 func shouldFilterExecOutput(args []string) bool {
-	return codexSubcommand(args) == "exec" && !containsArg(args, "--json")
+	return codexargs.Subcommand(args) == "exec" && !containsArg(args, "--json")
 }
 
 func (c *Client) execArgs() []string {
@@ -215,7 +217,7 @@ func (c *Client) execArgs() []string {
 	}
 
 	args := append([]string{}, c.args...)
-	switch codexSubcommand(args) {
+	switch codexargs.Subcommand(args) {
 	case "", "exec":
 	default:
 		return nil
@@ -228,7 +230,7 @@ func (c *Client) execArgs() []string {
 		}
 		filtered = append(filtered, arg)
 	}
-	if codexSubcommand(filtered) == "" {
+	if codexargs.Subcommand(filtered) == "" {
 		filtered = append(filtered, "exec")
 	}
 	return filtered
@@ -273,12 +275,10 @@ func normalizeTransport(transport string) string {
 }
 
 func defaultTransport(args []string) string {
-	switch codexSubcommand(args) {
-	case "", "resume", "fork":
+	if codexargs.IsInteractiveSubcommand(codexargs.Subcommand(args)) {
 		return TransportTUI
-	default:
-		return TransportExec
 	}
+	return TransportExec
 }
 
 func defaultArgs(transport string) []string {
@@ -288,16 +288,6 @@ func defaultArgs(transport string) []string {
 	default:
 		return nil
 	}
-}
-
-func codexSubcommand(args []string) string {
-	for _, arg := range args {
-		switch arg {
-		case "exec", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "completion", "sandbox", "debug", "apply", "resume", "fork", "cloud", "exec-server", "features", "help":
-			return arg
-		}
-	}
-	return ""
 }
 
 type event struct {

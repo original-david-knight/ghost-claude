@@ -1,8 +1,4 @@
-//go:build !linux
-
-package codex
-
-import "os"
+package ptyrunner
 
 type terminalInputMode interface {
 	Restore() error
@@ -13,7 +9,3 @@ type noopTerminalInputMode struct{}
 
 func (noopTerminalInputMode) Restore() error    { return nil }
 func (noopTerminalInputMode) Interactive() bool { return false }
-
-func enterTerminalInputMode(_ *os.File) (terminalInputMode, error) {
-	return noopTerminalInputMode{}, nil
-}

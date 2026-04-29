@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"vibedrive/internal/codexargs"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -360,12 +362,10 @@ func defaultCodexArgs(transport string) []string {
 }
 
 func defaultCodexTransport(args []string) string {
-	switch codexSubcommand(args) {
-	case "", "resume", "fork":
+	if codexargs.IsInteractiveSubcommand(codexargs.Subcommand(args)) {
 		return CodexTransportTUI
-	default:
-		return CodexTransportExec
 	}
+	return CodexTransportExec
 }
 
 func ensureCodexYOLOArgs(args []string) []string {
@@ -376,16 +376,6 @@ func ensureCodexYOLOArgs(args []string) []string {
 
 func defaultCodexReasoningConfig() string {
 	return fmt.Sprintf(`model_reasoning_effort=%q`, defaultCodexReasoningEffort)
-}
-
-func codexSubcommand(args []string) string {
-	for _, arg := range args {
-		switch arg {
-		case "exec", "review", "login", "logout", "mcp", "plugin", "mcp-server", "app-server", "completion", "sandbox", "debug", "apply", "resume", "fork", "cloud", "exec-server", "features", "help":
-			return arg
-		}
-	}
-	return ""
 }
 
 func hasClaudeEffortArg(args []string) bool {
@@ -451,21 +441,18 @@ func stripCodexPermissionArgs(args []string) []string {
 }
 
 func validateCodexArgs(transport string, args []string) error {
+	subcommand := codexargs.Subcommand(args)
 	switch normalize(transport) {
 	case CodexTransportTUI:
-		switch codexSubcommand(args) {
-		case "", "resume", "fork":
+		if codexargs.IsInteractiveSubcommand(subcommand) {
 			return nil
-		default:
-			return fmt.Errorf("codex.transport %q does not support subcommand %q", transport, codexSubcommand(args))
 		}
+		return fmt.Errorf("codex.transport %q does not support subcommand %q", transport, subcommand)
 	case CodexTransportExec:
-		switch codexSubcommand(args) {
-		case "exec", "review":
+		if codexargs.IsNonInteractiveSubcommand(subcommand) {
 			return nil
-		default:
-			return fmt.Errorf("codex.transport %q requires a non-interactive subcommand such as exec or review", transport)
 		}
+		return fmt.Errorf("codex.transport %q requires a non-interactive subcommand such as exec or review", transport)
 	default:
 		return fmt.Errorf("unsupported codex.transport %q", transport)
 	}
