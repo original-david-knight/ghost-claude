@@ -32,6 +32,7 @@ tasks:
       verify_commands:
         - go test ./internal/bootstrap
       commit_message: 'feat: make init debt planning trigger-based'
+      notes: Init bootstrap now uses explicit risk triggers for standalone tech-debt tasks, and tests guard against reintroducing the old 5-step cadence. If replanned from a fresh environment, update restart next so init and restart stay aligned.
     - id: align-restart-with-triggered-debt-review
       title: Mirror the trigger-based debt policy in restart replanning
       details: Carry the same trigger-based debt policy through restart so replanning preserves meaningful follow-up work from prior notes without reintroducing a scheduled cleanup rhythm.
@@ -51,6 +52,7 @@ tasks:
       verify_commands:
         - go test ./internal/bootstrap
       commit_message: 'feat: apply trigger-based debt review to restart'
+      notes: Restart prompts now preserve trigger-backed debt follow-up from prior notes, reject fixed cleanup cadence, and keep future phase-learning acceptance. If rerun fresh, keep the restart tests asserting stale notes clear and standalone cleanup tasks stay trigger-justified.
     - id: clarify-init-planning-boundaries
       title: Clarify what init can predict versus what runtime can observe
       details: Make init and restart prompts describe plan-time heuristics honestly. They should talk about expected breadth and discovered risks, not claim init can know actual changed-file counts that are only observable at finalize time.
@@ -71,6 +73,7 @@ tasks:
       verify_commands:
         - go test ./internal/bootstrap ./internal/automation
       commit_message: 'docs: align init planning with current runtime limits'
+      notes: Init and restart prompts now describe debt triggers as planning-time expected breadth and discovered risk, not finalize-time file facts. README now states finalize records status and notes, runs verification, and does not auto-add follow-up tasks; keep future planning docs aligned with that runtime boundary.
     - id: support-multiple-init-sources
       title: Add repeatable init sources and a source-preview path
       details: Replace the single-source init path with repeatable --source flags while preserving the current single positional source alias. Add a preview-oriented path so users can inspect the resolved source set before bootstrap writes config or prompts a planner.
@@ -93,6 +96,7 @@ tasks:
       verify_commands:
         - go test ./cmd/vibedrive ./internal/bootstrap
       commit_message: 'feat: improve init source selection'
+      notes: Init now accepts repeated --source flags plus one positional alias, and --print-sources previews the resolved set before scaffold writes. Fresh reruns should rely on the same resolver, which sorts/dedupes sources and excludes generated vibedrive.yaml and vibedrive-plan.yaml from default workspace scans.
     - id: add-init-planner-selection
       title: Let init choose the bootstrap planner
       details: Let users choose whether bootstrap planning runs through Claude or Codex, reusing existing agent naming and validation instead of hard-coding Claude in the initializer.
@@ -115,6 +119,7 @@ tasks:
       verify_commands:
         - go test ./cmd/vibedrive ./internal/bootstrap ./internal/config
       commit_message: 'feat: add init planner selection'
+      notes: Init now accepts --planner with a Claude default, and bootstrap selects Claude or Codex through shared agent resolution without changing runtime coder/reviewer defaults. Fresh reruns need the chosen planner CLI/configured transport available because init now bootstraps through that client path.
     - id: document-init-improvements
       title: Refresh docs and help text for the new init workflow
       details: Update user-facing docs, command help, and narrative examples to match the new debt-review policy, source-selection workflow, and planner-selection behavior.
@@ -134,6 +139,7 @@ tasks:
       verify_commands:
         - go test ./cmd/vibedrive
       commit_message: 'docs: refresh init documentation'
+      notes: README, top-level help, and init help now document repeatable --source inputs, deterministic --print-sources preview, planner selection, and trigger-based debt follow-up. Review-time verification also caught that Go flag help already prints defaults, so planner flag descriptions should not hard-code their own default text on fresh reruns; keep smoke-checking `help`, `init -h`, and temp-workspace `init --print-sources` because the main drift risk is help text, not behavior.
     - id: verify-init-improvements
       title: Verify the init improvements end to end
       details: Run the targeted and broad verification needed to catch regressions in the init, bootstrap, restart, and plan-handling paths after the new behavior lands.
@@ -156,3 +162,4 @@ tasks:
         - go test ./cmd/vibedrive ./internal/bootstrap ./internal/plan ./internal/automation
         - go test ./...
       commit_message: 'chore: verify init improvements'
+      notes: Targeted `go test ./cmd/vibedrive ./internal/bootstrap ./internal/plan ./internal/automation` and full `go test ./...` passed. `help`, `init -h`, and a temp-workspace `init --print-sources --source DESIGN.md --source docs/specs DESIGN.md` smoke check matched the README/help text, confirmed deduped sorted source resolution, and confirmed no config or plan files are written; on fresh reruns, keep that smoke check because help/docs drift is still the main risk.

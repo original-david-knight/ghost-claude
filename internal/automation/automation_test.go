@@ -58,15 +58,8 @@ tasks:
 	if task.Status != plan.StatusDone {
 		t.Fatalf("expected task status %q, got %q", plan.StatusDone, task.Status)
 	}
-	if task.Notes != "" {
-		t.Fatalf("expected task notes to stay out of the plan, got %q", task.Notes)
-	}
-	notes, err := LoadNotes(dir, "scaffold")
-	if err != nil {
-		t.Fatalf("LoadNotes returned error: %v", err)
-	}
-	if notes != "finished work" {
-		t.Fatalf("expected task notes to be saved separately, got %q", notes)
+	if task.Notes != "finished work" {
+		t.Fatalf("expected task notes to round-trip, got %q", task.Notes)
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
@@ -128,15 +121,8 @@ tasks:
 	if task.Status != plan.StatusInProgress {
 		t.Fatalf("expected task status %q, got %q", plan.StatusInProgress, task.Status)
 	}
-	if task.Notes != "" {
-		t.Fatalf("expected task notes to stay out of the plan, got %q", task.Notes)
-	}
-	notes, err := LoadNotes(dir, "scaffold")
-	if err != nil {
-		t.Fatalf("LoadNotes returned error: %v", err)
-	}
-	if !strings.Contains(notes, "Verification failed while running") {
-		t.Fatalf("expected verification failure notes, got %q", notes)
+	if !strings.Contains(task.Notes, "Verification failed while running") {
+		t.Fatalf("expected verification failure notes, got %q", task.Notes)
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
@@ -146,56 +132,6 @@ tasks:
 	}
 	if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err == nil {
 		t.Fatal("expected no commit to be created when verification fails")
-	}
-}
-
-func TestFinalizeRejectsEmptyNotes(t *testing.T) {
-	dir := t.TempDir()
-	initGitRepo(t, dir)
-
-	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
-	writeFile(t, filepath.Join(dir, "README.md"), "hello\n")
-	writeFile(t, planPath, `project:
-  name: demo
-tasks:
-  - id: scaffold
-    title: Scaffold repo
-    status: todo
-`)
-
-	resultPath := ResultPath(dir, "scaffold")
-	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll returned error: %v", err)
-	}
-	writeFile(t, resultPath, `{"status":"done","notes":" "}`)
-
-	err := Finalize(context.Background(), FinalizeOptions{
-		Workspace:     dir,
-		PlanFile:      planPath,
-		TaskID:        "scaffold",
-		ResultPath:    resultPath,
-		CommitMessage: "feat: finish scaffold",
-	}, os.Stdout, os.Stderr)
-	if err == nil {
-		t.Fatal("expected Finalize to reject empty notes")
-	}
-	if !strings.Contains(err.Error(), `task "scaffold" notes must not be empty`) {
-		t.Fatalf("expected empty notes error, got %q", err)
-	}
-
-	loaded, loadErr := plan.Load(planPath)
-	if loadErr != nil {
-		t.Fatalf("Load returned error: %v", loadErr)
-	}
-	task, ok := loaded.FindTask("scaffold")
-	if !ok {
-		t.Fatal("expected task scaffold to exist")
-	}
-	if task.Status != plan.StatusTodo {
-		t.Fatalf("expected task status to remain %q, got %q", plan.StatusTodo, task.Status)
-	}
-	if _, err := os.Stat(resultPath); err != nil {
-		t.Fatalf("expected result file to remain for correction, stat err=%v", err)
 	}
 }
 

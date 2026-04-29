@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"vibedrive/internal/automation"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
 )
@@ -46,18 +45,9 @@ func (i *Initializer) Restart(ctx context.Context, configPath string) error {
 		_ = client.Close(session)
 	}()
 
-	planPrompt, err := renderRestartPlanPrompt(cfg, currentPlan, source)
-	if err != nil {
-		return err
-	}
-	reviewPrompt, err := renderRestartReviewPrompt(cfg, currentPlan, source)
-	if err != nil {
-		return err
-	}
-
 	prompts := []string{
-		planPrompt,
-		reviewPrompt,
+		renderRestartPlanPrompt(cfg, currentPlan, source),
+		renderRestartReviewPrompt(cfg, currentPlan, source),
 	}
 
 	for _, prompt := range prompts {
@@ -74,21 +64,15 @@ func (i *Initializer) Restart(ctx context.Context, configPath string) error {
 	if err := restartedPlan.Save(); err != nil {
 		return err
 	}
-	if err := automation.ClearNotes(cfg.Workspace); err != nil {
-		return err
-	}
 
 	fmt.Fprintf(i.stdout, "Prepared %s for a fresh restart\n", cfg.PlanFile)
 	return nil
 }
 
-func renderRestartPlanPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) (string, error) {
+func renderRestartPlanPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	sourceRefs := renderRestartSourceRefs(cfg.Workspace, source.Files)
-	notesSummary, err := renderRestartNotesSummary(cfg.Workspace, currentPlan)
-	if err != nil {
-		return "", err
-	}
+	notesSummary := renderRestartNotesSummary(currentPlan)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Restart this project from scratch by revising the existing execution plan.
@@ -124,16 +108,13 @@ Requirements for the revised plan:
 - keep valid YAML and quote any string list item that contains a colon followed by a space
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
-`, planRef, sourceRefs, notesSummary, planRef, planRef)), nil
+`, planRef, sourceRefs, notesSummary, planRef, planRef))
 }
 
-func renderRestartReviewPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) (string, error) {
+func renderRestartReviewPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	sourceRefs := renderRestartSourceRefs(cfg.Workspace, source.Files)
-	notesSummary, err := renderRestartNotesSummary(cfg.Workspace, currentPlan)
-	if err != nil {
-		return "", err
-	}
+	notesSummary := renderRestartNotesSummary(currentPlan)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Review the restarted execution plan in %s.
@@ -161,7 +142,7 @@ Perform a critical review of the restarted plan. Focus on:
 Incorporate any actionable review feedback directly into %s.
 
 Keep the YAML valid. Keep every task status at todo and leave task notes empty for the fresh restart.
-`, planRef, sourceRefs, notesSummary, planRef)), nil
+`, planRef, sourceRefs, notesSummary, planRef))
 }
 
 func resolveRestartSources(workspace string, project plan.Project) (sourceSpec, error) {
@@ -218,17 +199,10 @@ func renderRestartSourceRefs(workspace string, files []string) string {
 	return renderSourceRefs(workspace, files)
 }
 
-func renderRestartNotesSummary(workspace string, currentPlan *plan.File) (string, error) {
+func renderRestartNotesSummary(currentPlan *plan.File) string {
 	lines := make([]string, 0, len(currentPlan.Tasks))
 	for _, task := range currentPlan.Tasks {
-		note, err := automation.LoadNotes(workspace, task.ID)
-		if err != nil {
-			return "", fmt.Errorf("load task notes for %q: %w", task.ID, err)
-		}
-		if strings.TrimSpace(note) == "" {
-			note = task.Notes
-		}
-		note = strings.TrimSpace(note)
+		note := strings.TrimSpace(task.Notes)
 		if note == "" {
 			continue
 		}
@@ -236,8 +210,8 @@ func renderRestartNotesSummary(workspace string, currentPlan *plan.File) (string
 	}
 
 	if len(lines) == 0 {
-		return "- No previous task notes are recorded for the current plan.", nil
+		return "- No previous task notes are recorded in the current plan."
 	}
 
-	return strings.Join(lines, "\n"), nil
+	return strings.Join(lines, "\n")
 }

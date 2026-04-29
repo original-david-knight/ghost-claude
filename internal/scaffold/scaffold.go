@@ -76,7 +76,6 @@ workflows:
           Set status to in_progress when meaningful progress was made but more work is still required.
           Set status to blocked when an external dependency, human decision, or missing prerequisite prevents completion.
           Use notes to capture what was learned in this phase, especially discoveries, follow-up risks, or plan adjustments that matter if the project is re-planned and rerun in a fresh environment.
-          Finalize saves those notes in {{ .TaskNotesPath }} instead of embedding them in {{ .PlanFile }}.
           Keep notes short and specific.
         required_outputs:
           - "{{ .TaskResultPath }}"
@@ -111,7 +110,6 @@ workflows:
           - change it to in_progress if review issues remain or more work is needed
           - change it to blocked if an external dependency or human decision prevents completion
           - keep the notes focused on what this phase taught you that should inform replanning in a fresh environment
-          - finalize saves notes in {{ .TaskNotesPath }} instead of embedding them in {{ .PlanFile }}
 
           Do not edit {{ .PlanFile }} directly.
         required_outputs:
@@ -171,7 +169,6 @@ workflows:
           Set status to in_progress when meaningful progress was made but more work is still required.
           Set status to blocked when an external dependency, human decision, or missing prerequisite prevents completion.
           Use notes to capture what was learned in this phase, especially discoveries, follow-up risks, or plan adjustments that matter if the project is re-planned and rerun in a fresh environment.
-          Finalize saves those notes in {{ .TaskNotesPath }} instead of embedding them in {{ .PlanFile }}.
           Keep notes short and specific.
         required_outputs:
           - "{{ .TaskResultPath }}"
@@ -206,7 +203,6 @@ workflows:
           - change it to in_progress if review issues remain or more work is needed
           - change it to blocked if an external dependency or human decision prevents completion
           - keep the notes focused on what this phase taught you that should inform replanning in a fresh environment
-          - finalize saves notes in {{ .TaskNotesPath }} instead of embedding them in {{ .PlanFile }}
 
           Do not edit {{ .PlanFile }} directly.
         required_outputs:

@@ -16,7 +16,6 @@ import (
 
 const resultDir = ".vibedrive/task-results"
 const reviewDir = ".vibedrive/reviews"
-const notesDir = ".vibedrive/notes"
 
 type TaskResult struct {
 	Status string `json:"status"`
@@ -37,14 +36,6 @@ func ResultPath(workspace, taskID string) string {
 
 func ReviewPath(workspace, taskID string) string {
 	return artifactPath(workspace, reviewDir, taskID, ".json")
-}
-
-func NotesPath(workspace, taskID string) string {
-	return artifactPath(workspace, notesDir, taskID, ".md")
-}
-
-func NotesDir(workspace string) string {
-	return filepath.Join(workspace, notesDir)
 }
 
 func artifactPath(workspace, dir, taskID, ext string) string {
@@ -76,9 +67,6 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 		if failedCommand, verifyErr := runVerifyCommands(ctx, opts.Workspace, task.VerifyCommands, stdout, stderr); verifyErr != nil {
 			result.Status = plan.StatusInProgress
 			result.Notes = appendFailureNote(result.Notes, failedCommand)
-			if err := saveNotes(opts.Workspace, opts.TaskID, result.Notes); err != nil {
-				return err
-			}
 			if err := applyResult(file, opts.TaskID, result); err != nil {
 				return err
 			}
@@ -98,9 +86,6 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 		return fmt.Errorf("task result %s has unsupported status %q", opts.ResultPath, result.Status)
 	}
 
-	if err := saveNotes(opts.Workspace, opts.TaskID, result.Notes); err != nil {
-		return err
-	}
 	if err := applyResult(file, opts.TaskID, result); err != nil {
 		return err
 	}
@@ -149,41 +134,13 @@ func loadResult(path string) (TaskResult, error) {
 	return result, nil
 }
 
-func LoadNotes(workspace, taskID string) (string, error) {
-	data, err := os.ReadFile(NotesPath(workspace, taskID))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-func ClearNotes(workspace string) error {
-	return os.RemoveAll(NotesDir(workspace))
-}
-
-func saveNotes(workspace, taskID, notes string) error {
-	notes = strings.TrimSpace(notes)
-	if notes == "" {
-		return fmt.Errorf("task %q notes must not be empty", taskID)
-	}
-
-	path := NotesPath(workspace, taskID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(notes+"\n"), 0o644)
-}
-
 func applyResult(file *plan.File, taskID string, result TaskResult) error {
 	for i := range file.Tasks {
 		if file.Tasks[i].ID != taskID {
 			continue
 		}
 		file.Tasks[i].Status = normalizeStatus(result.Status)
-		file.Tasks[i].Notes = ""
+		file.Tasks[i].Notes = strings.TrimSpace(result.Notes)
 		return nil
 	}
 

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"vibedrive/internal/automation"
 	"vibedrive/internal/claude"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
@@ -38,14 +37,14 @@ tasks:
   - id: seed-fixtures
     title: Seed fixtures
     status: done
+    notes: Tests were flaky because fixture setup happened too late.
   - id: checkpoint-e2e
     title: End-to-end checkpoint
     status: blocked
+    notes: Split browser verification into a dedicated checkpoint before packaging.
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
-	writeRestartTestFile(t, automation.NotesPath(dir, "seed-fixtures"), "Tests were flaky because fixture setup happened too late.\n")
-	writeRestartTestFile(t, automation.NotesPath(dir, "checkpoint-e2e"), "Split browser verification into a dedicated checkpoint before packaging.\n")
 
 	client := &fakeClient{}
 	init := New(io.Discard, io.Discard)
@@ -126,19 +125,5 @@ tasks:
 		if task.Notes != "" {
 			t.Fatalf("expected task %q notes to be cleared, got %q", task.ID, task.Notes)
 		}
-	}
-	if _, err := os.Stat(automation.NotesDir(dir)); !os.IsNotExist(err) {
-		t.Fatalf("expected restart to clear external notes, stat err=%v", err)
-	}
-}
-
-func writeRestartTestFile(t *testing.T, path, content string) {
-	t.Helper()
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("MkdirAll returned error: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile returned error: %v", err)
 	}
 }

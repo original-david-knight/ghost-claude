@@ -5,7 +5,6 @@ import (
 	"context"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,9 +31,6 @@ func (f *fakeAgent) RunPrompt(_ context.Context, session *claude.Session, prompt
 
 	if strings.HasPrefix(prompt, "write ") {
 		return writeOutput(strings.TrimPrefix(prompt, "write "))
-	}
-	if strings.HasPrefix(prompt, "write-result ") {
-		return writeTaskResult(strings.TrimPrefix(prompt, "write-result "), plan.StatusDone, "saved phase notes")
 	}
 	if strings.HasPrefix(prompt, "finish task ") {
 		taskID := strings.TrimPrefix(prompt, "finish task ")
@@ -77,9 +73,6 @@ func (f *fakeCodex) RunPrompt(_ context.Context, session *codexcli.Session, prom
 
 	if strings.HasPrefix(prompt, "write ") {
 		return writeOutput(strings.TrimPrefix(prompt, "write "))
-	}
-	if strings.HasPrefix(prompt, "write-result ") {
-		return writeTaskResult(strings.TrimPrefix(prompt, "write-result "), plan.StatusDone, "saved phase notes")
 	}
 	if strings.HasPrefix(prompt, "finish task ") {
 		taskID := strings.TrimPrefix(prompt, "finish task ")
@@ -407,87 +400,6 @@ tasks:
 	reviewPath := automation.ReviewPath(dir, "scaffold")
 	if _, err := os.Stat(reviewPath); err != nil {
 		t.Fatalf("expected review artifact %s to exist, stat err=%v", reviewPath, err)
-	}
-}
-
-func TestRunFinalizesTaskResultLeftByWorkflow(t *testing.T) {
-	dir := t.TempDir()
-	initRunnerGitRepo(t, dir)
-	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
-
-	content := `project:
-  name: demo
-tasks:
-  - id: scaffold
-    title: Scaffold repo
-    workflow: implement
-    status: todo
-    verify_commands:
-      - git rev-parse --is-inside-work-tree
-`
-	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("WriteFile returned error: %v", err)
-	}
-
-	cfg := &config.Config{
-		Path:                 filepath.Join(dir, "vibedrive.yaml"),
-		Workspace:            dir,
-		PlanFile:             planPath,
-		Coder:                config.AgentCodex,
-		Reviewer:             config.AgentCodex,
-		MaxStalledIterations: 1,
-		DefaultWorkflow:      "implement",
-		Workflows: map[string]config.Workflow{
-			"implement": {
-				Steps: []config.Step{
-					{
-						Name:            "execute",
-						Type:            config.StepTypeAgent,
-						Actor:           config.StepActorCoder,
-						Prompt:          "write-result {{ .TaskResultPath }}",
-						RequiredOutputs: []string{"{{ .TaskResultPath }}"},
-					},
-				},
-			},
-		},
-	}
-
-	r := &Runner{
-		cfg:    cfg,
-		stdout: io.Discard,
-		stderr: io.Discard,
-		codex:  &fakeCodex{planPath: planPath},
-	}
-
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-
-	loaded, err := plan.Load(planPath)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-	task, ok := loaded.FindTask("scaffold")
-	if !ok {
-		t.Fatal("expected task scaffold to exist")
-	}
-	if task.Status != plan.StatusDone {
-		t.Fatalf("expected task status %q, got %q", plan.StatusDone, task.Status)
-	}
-	if task.Notes != "" {
-		t.Fatalf("expected task notes to stay out of the plan, got %q", task.Notes)
-	}
-	notes, err := automation.LoadNotes(dir, "scaffold")
-	if err != nil {
-		t.Fatalf("LoadNotes returned error: %v", err)
-	}
-	if notes != "saved phase notes" {
-		t.Fatalf("expected task notes to be finalized into a notes file, got %q", notes)
-	}
-
-	resultPath := automation.ResultPath(dir, "scaffold")
-	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
-		t.Fatalf("expected result artifact to be removed after finalize, stat err=%v", err)
 	}
 }
 
@@ -914,28 +826,4 @@ func updateTask(path, taskID, status, notes string) error {
 
 func writeOutput(path string) error {
 	return os.WriteFile(path, []byte("{}\n"), 0o644)
-}
-
-func writeTaskResult(path, status, notes string) error {
-	return os.WriteFile(path, []byte(`{"status":"`+status+`","notes":"`+notes+`"}`+"\n"), 0o644)
-}
-
-func initRunnerGitRepo(t *testing.T, dir string) {
-	t.Helper()
-
-	runRunnerCmd(t, dir, "git", "-C", dir, "init")
-	runRunnerCmd(t, dir, "git", "-C", dir, "config", "user.email", "test@example.com")
-	runRunnerCmd(t, dir, "git", "-C", dir, "config", "user.name", "Test User")
-}
-
-func runRunnerCmd(t *testing.T, dir string, name string, args ...string) string {
-	t.Helper()
-
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, output)
-	}
-	return string(output)
 }
