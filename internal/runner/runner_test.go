@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -551,10 +552,10 @@ func TestCleanupTaskExecutionPathsRemovesOnlyOwnedChildren(t *testing.T) {
 	}
 }
 
-func TestRunExecutesIndependentReadyBatchInParallelWithIsolatedPaths(t *testing.T) {
+func TestRunIntegratesIndependentParallelTasksInDeterministicOrder(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
-	trackDir := filepath.Join(dir, "parallel-track")
+	trackDir := filepath.Join(t.TempDir(), "parallel-track")
 
 	content := `project:
   name: demo
@@ -564,17 +565,24 @@ tasks:
     workflow: implement
     status: todo
     owns_paths:
-      - internal/api/**
+      - api.txt
+    verify_commands:
+      - test -f api.txt
+    commit_message: "feat: finish api"
   - id: ui
     title: UI
     workflow: implement
     status: todo
     owns_paths:
-      - web/ui/**
+      - ui.txt
+    verify_commands:
+      - test -f ui.txt
+    commit_message: "feat: finish ui"
 `
 	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+	initRunnerGitRepo(t, dir)
 
 	script := `set -eu
 track_dir=` + strconv.Quote(trackDir) + `
@@ -583,9 +591,8 @@ touch "$track_dir/{{ .Task.ID }}.started"
 while [ ! -f "$track_dir/api.started" ] || [ ! -f "$track_dir/ui.started" ]; do
   sleep 0.01
 done
+printf '{{ .Task.ID }}\n' > "{{ .Task.ID }}.txt"
 printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
-printf 'workspace={{ .Workspace }}\nplan={{ .PlanFile }}\nnotes={{ .TaskNotesPath }}\nreview={{ .ReviewPath }}\n' > "{{ .ReviewPath }}"
-printf 'tasks:\n  - id: {{ .Task.ID }}\n    status: done\n    notes: isolated note\n' > "{{ .TaskNotesPath }}"
 `
 
 	cfg := &config.Config{
@@ -607,7 +614,7 @@ printf 'tasks:\n  - id: {{ .Task.ID }}\n    status: done\n    notes: isolated no
 						Name:            "execute",
 						Type:            config.StepTypeExec,
 						Command:         []string{"sh", "-c", script},
-						RequiredOutputs: []string{"{{ .TaskResultPath }}", "{{ .ReviewPath }}"},
+						RequiredOutputs: []string{"{{ .TaskResultPath }}"},
 						Timeout:         "2s",
 					},
 				},
@@ -625,59 +632,49 @@ printf 'tasks:\n  - id: {{ .Task.ID }}\n    status: done\n    notes: isolated no
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	apiPaths := taskExecutionPaths(cfg, "api", 1, true)
-	uiPaths := taskExecutionPaths(cfg, "ui", 1, true)
-	if apiPaths.Workspace == uiPaths.Workspace {
-		t.Fatalf("expected distinct worker workspaces, both were %q", apiPaths.Workspace)
-	}
-	if apiPaths.TaskResultPath == uiPaths.TaskResultPath {
-		t.Fatalf("expected distinct result paths, both were %q", apiPaths.TaskResultPath)
-	}
-	if apiPaths.TaskNotesPath == uiPaths.TaskNotesPath {
-		t.Fatalf("expected distinct task notes paths, both were %q", apiPaths.TaskNotesPath)
-	}
-
-	for _, paths := range []TaskExecutionPaths{apiPaths, uiPaths} {
-		if _, err := os.Stat(paths.Workspace); err != nil {
-			t.Fatalf("expected workspace %s to exist, stat err=%v", paths.Workspace, err)
-		}
-		if _, err := os.Stat(paths.PlanFile); err != nil {
-			t.Fatalf("expected isolated plan %s to exist, stat err=%v", paths.PlanFile, err)
-		}
-		if _, err := os.Stat(paths.TaskResultPath); err != nil {
-			t.Fatalf("expected result %s to exist, stat err=%v", paths.TaskResultPath, err)
-		}
-		if _, err := os.Stat(paths.TaskNotesPath); err != nil {
-			t.Fatalf("expected task notes %s to exist, stat err=%v", paths.TaskNotesPath, err)
-		}
-		review, err := os.ReadFile(paths.ReviewPath)
-		if err != nil {
-			t.Fatalf("ReadFile review returned error: %v", err)
-		}
-		for _, want := range []string{
-			"workspace=" + paths.Workspace,
-			"plan=" + paths.PlanFile,
-			"notes=" + paths.TaskNotesPath,
-			"review=" + paths.ReviewPath,
-		} {
-			if !strings.Contains(string(review), want) {
-				t.Fatalf("expected review %s to contain %q, got:\n%s", paths.ReviewPath, want, review)
-			}
-		}
-	}
-
 	loaded, err := plan.Load(planPath)
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
 	for _, task := range loaded.Tasks {
-		if task.Status != plan.StatusTodo {
-			t.Fatalf("expected root task %q to remain todo before merge/finalize, got %q", task.ID, task.Status)
+		if task.Status != plan.StatusDone {
+			t.Fatalf("expected root task %q to be done after integration, got %q", task.ID, task.Status)
+		}
+	}
+
+	notesFile, err := tasknotes.Load(tasknotes.Path(dir))
+	if err != nil {
+		t.Fatalf("Load task notes returned error: %v", err)
+	}
+	for _, taskID := range []string{"api", "ui"} {
+		note, ok := notesFile.Find(taskID)
+		if !ok {
+			t.Fatalf("expected task notes for %s", taskID)
+		}
+		if note.Status != plan.StatusDone || note.Notes != taskID+" complete" {
+			t.Fatalf("unexpected note for %s: %#v", taskID, note)
+		}
+	}
+
+	log := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "log", "--reverse", "--pretty=%s"))
+	wantLog := strings.Join([]string{"initial", "feat: finish api", "feat: finish ui"}, "\n")
+	if log != wantLog {
+		t.Fatalf("unexpected commit order:\n%s", log)
+	}
+	tree := runRunnerCmd(t, dir, "git", "-C", dir, "ls-tree", "-r", "HEAD", "--name-only")
+	for _, transient := range []string{
+		".vibedrive/task-results",
+		".vibedrive/reviews",
+		".vibedrive/task-runs",
+		".vibedrive/worktrees",
+	} {
+		if strings.Contains(tree, transient) {
+			t.Fatalf("expected commit tree not to contain transient %s; tree:\n%s", transient, tree)
 		}
 	}
 }
 
-func TestRunReportsParallelWorkerFailureWithoutRootPlanCorruption(t *testing.T) {
+func TestRunIntegratesSuccessfulSiblingWhenParallelWorkerFails(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
 
@@ -689,22 +686,27 @@ tasks:
     workflow: implement
     status: todo
     owns_paths:
-      - internal/api/**
+      - api.txt
+    verify_commands:
+      - test -f api.txt
+    commit_message: "feat: finish api"
   - id: ui
     title: UI
     workflow: implement
     status: todo
     owns_paths:
-      - web/ui/**
+      - ui.txt
 `
 	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+	initRunnerGitRepo(t, dir)
 
 	script := `set -eu
 if [ "{{ .Task.ID }}" = "ui" ]; then
   exit 23
 fi
+printf 'api\n' > api.txt
 printf '{"status":"done","notes":"api complete"}' > "{{ .TaskResultPath }}"
 `
 
@@ -743,19 +745,183 @@ printf '{"status":"done","notes":"api complete"}' > "{{ .TaskResultPath }}"
 		t.Fatalf("expected worker error to name ui, got %v", err)
 	}
 
-	apiPaths := taskExecutionPaths(cfg, "api", 1, true)
-	if _, statErr := os.Stat(apiPaths.TaskResultPath); statErr != nil {
-		t.Fatalf("expected successful sibling result to remain at %s, stat err=%v", apiPaths.TaskResultPath, statErr)
+	loaded, loadErr := plan.Load(planPath)
+	if loadErr != nil {
+		t.Fatalf("Load returned error: %v", loadErr)
+	}
+	api, _ := loaded.FindTask("api")
+	ui, _ := loaded.FindTask("ui")
+	if api.Status != plan.StatusDone {
+		t.Fatalf("expected api to be done, got %q", api.Status)
+	}
+	if ui.Status != plan.StatusInProgress {
+		t.Fatalf("expected ui to be marked for follow-up, got %q", ui.Status)
+	}
+
+	notesFile, notesErr := tasknotes.Load(tasknotes.Path(dir))
+	if notesErr != nil {
+		t.Fatalf("Load task notes returned error: %v", notesErr)
+	}
+	uiNote, ok := notesFile.Find("ui")
+	if !ok {
+		t.Fatal("expected ui task note")
+	}
+	if !strings.Contains(uiNote.Notes, "Parallel worker failed") {
+		t.Fatalf("expected worker failure note, got %q", uiNote.Notes)
+	}
+}
+
+func TestRunMarksOnlyConflictedParallelTaskForFollowUp(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: first
+    title: First
+    workflow: implement
+    status: todo
+    owns_paths:
+      - first.txt
+    verify_commands:
+      - grep -q first shared.txt
+    commit_message: "feat: first shared change"
+  - id: second
+    title: Second
+    workflow: implement
+    status: todo
+    owns_paths:
+      - second.txt
+    verify_commands:
+      - grep -q second shared.txt
+    commit_message: "feat: second shared change"
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile shared returned error: %v", err)
+	}
+	initRunnerGitRepo(t, dir)
+
+	script := `set -eu
+printf '{{ .Task.ID }}\n' > shared.txt
+printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
+`
+	cfg := parallelRunnerConfig(dir, planPath, script)
+	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected Run to report the conflicted worker")
+	}
+	if !strings.Contains(err.Error(), "second") {
+		t.Fatalf("expected error to name second, got %v", err)
 	}
 
 	loaded, loadErr := plan.Load(planPath)
 	if loadErr != nil {
 		t.Fatalf("Load returned error: %v", loadErr)
 	}
-	for _, task := range loaded.Tasks {
-		if task.Status != plan.StatusTodo {
-			t.Fatalf("expected root task %q to remain todo after worker failure, got %q", task.ID, task.Status)
-		}
+	first, _ := loaded.FindTask("first")
+	second, _ := loaded.FindTask("second")
+	if first.Status != plan.StatusDone {
+		t.Fatalf("expected first to be done, got %q", first.Status)
+	}
+	if second.Status != plan.StatusInProgress {
+		t.Fatalf("expected second to be in progress, got %q", second.Status)
+	}
+	if got := strings.TrimSpace(mustReadRunnerFile(t, filepath.Join(dir, "shared.txt"))); got != "first" {
+		t.Fatalf("expected first change to be preserved, got %q", got)
+	}
+	notesFile, notesErr := tasknotes.Load(tasknotes.Path(dir))
+	if notesErr != nil {
+		t.Fatalf("Load task notes returned error: %v", notesErr)
+	}
+	secondNote, ok := notesFile.Find("second")
+	if !ok {
+		t.Fatal("expected second task note")
+	}
+	if !strings.Contains(secondNote.Notes, "did not apply cleanly") {
+		t.Fatalf("expected merge conflict note, got %q", secondNote.Notes)
+	}
+}
+
+func TestRunMarksOnlyVerificationFailureForFollowUp(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: todo
+    owns_paths:
+      - api.txt
+    verify_commands:
+      - test -f api.txt
+    commit_message: "feat: finish api"
+  - id: bad
+    title: Bad
+    workflow: implement
+    status: todo
+    owns_paths:
+      - bad.txt
+    verify_commands:
+      - test ! -f bad.txt
+    commit_message: "feat: finish bad"
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	initRunnerGitRepo(t, dir)
+
+	script := `set -eu
+printf '{{ .Task.ID }}\n' > "{{ .Task.ID }}.txt"
+printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
+`
+	cfg := parallelRunnerConfig(dir, planPath, script)
+	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected Run to report verification failure")
+	}
+	if !strings.Contains(err.Error(), "bad") {
+		t.Fatalf("expected error to name bad, got %v", err)
+	}
+
+	loaded, loadErr := plan.Load(planPath)
+	if loadErr != nil {
+		t.Fatalf("Load returned error: %v", loadErr)
+	}
+	api, _ := loaded.FindTask("api")
+	bad, _ := loaded.FindTask("bad")
+	if api.Status != plan.StatusDone {
+		t.Fatalf("expected api to be done, got %q", api.Status)
+	}
+	if bad.Status != plan.StatusInProgress {
+		t.Fatalf("expected bad to be in progress, got %q", bad.Status)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "api.txt")); statErr != nil {
+		t.Fatalf("expected api.txt to remain, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "bad.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected failed task changes to be rolled back, stat err=%v", statErr)
+	}
+	notesFile, notesErr := tasknotes.Load(tasknotes.Path(dir))
+	if notesErr != nil {
+		t.Fatalf("Load task notes returned error: %v", notesErr)
+	}
+	badNote, ok := notesFile.Find("bad")
+	if !ok {
+		t.Fatal("expected bad task note")
+	}
+	if !strings.Contains(badNote.Notes, "Verification failed while running") {
+		t.Fatalf("expected verification failure note, got %q", badNote.Notes)
 	}
 }
 
@@ -1331,6 +1497,67 @@ tasks:
 	if strings.Join(claudeAgent.closedSessionID, ",") != strings.Join(wantClosedSessions, ",") {
 		t.Fatalf("expected closed session IDs %v, got %v", wantClosedSessions, claudeAgent.closedSessionID)
 	}
+}
+
+func parallelRunnerConfig(dir, planPath, script string) *config.Config {
+	return &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 2,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "execute",
+						Type:            config.StepTypeExec,
+						Command:         []string{"sh", "-c", script},
+						RequiredOutputs: []string{"{{ .TaskResultPath }}"},
+						Timeout:         "2s",
+					},
+				},
+			},
+		},
+	}
+}
+
+func initRunnerGitRepo(t *testing.T, dir string) {
+	t.Helper()
+
+	runRunnerCmd(t, dir, "git", "-C", dir, "init")
+	runRunnerCmd(t, dir, "git", "-C", dir, "config", "user.email", "test@example.com")
+	runRunnerCmd(t, dir, "git", "-C", dir, "config", "user.name", "Test User")
+	runRunnerCmd(t, dir, "git", "-C", dir, "add", "-A")
+	runRunnerCmd(t, dir, "git", "-C", dir, "commit", "-m", "initial")
+}
+
+func runRunnerCmd(t *testing.T, dir string, name string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, output)
+	}
+	return string(output)
+}
+
+func mustReadRunnerFile(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", path, err)
+	}
+	return string(data)
 }
 
 func updateTask(path, taskID, status, notes string) error {

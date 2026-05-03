@@ -270,7 +270,13 @@ func shellCommand(ctx context.Context, command string) *exec.Cmd {
 }
 
 func commitIfNeeded(ctx context.Context, workspace, message string, stdout, stderr io.Writer) error {
-	if err := runGit(ctx, workspace, stdout, stderr, "add", "-A"); err != nil {
+	return CommitIfNeeded(ctx, workspace, message, stdout, stderr)
+}
+
+func CommitIfNeeded(ctx context.Context, workspace, message string, stdout, stderr io.Writer) error {
+	args := []string{"add", "-A", "--", "."}
+	args = append(args, transientArtifactExcludes()...)
+	if err := runGit(ctx, workspace, stdout, stderr, args...); err != nil {
 		return err
 	}
 
@@ -281,6 +287,15 @@ func commitIfNeeded(ctx context.Context, workspace, message string, stdout, stde
 		return runGit(ctx, workspace, stdout, stderr, "commit", "-m", message)
 	} else {
 		return fmt.Errorf("git diff --cached --quiet: %w", err)
+	}
+}
+
+func transientArtifactExcludes() []string {
+	return []string{
+		":(exclude).vibedrive/task-results/**",
+		":(exclude).vibedrive/reviews/**",
+		":(exclude).vibedrive/task-runs/**",
+		":(exclude).vibedrive/worktrees/**",
 	}
 }
 

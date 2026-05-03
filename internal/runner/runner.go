@@ -246,11 +246,13 @@ func (r *Runner) runParallelPlan(ctx context.Context) error {
 				fmt.Fprintf(r.stdout, "parallel task %s completed in %s with status %q\n", result.Task.ID, result.Paths.Workspace, result.Status)
 			}
 		}
+		integrateErr := r.integrateParallelBatch(ctx, results)
+		if integrateErr != nil {
+			return integrateErr
+		}
 		if err != nil {
 			return err
 		}
-
-		return nil
 	}
 }
 
@@ -338,11 +340,12 @@ func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File,
 }
 
 type parallelTaskResult struct {
-	Task   plan.Task
-	Paths  TaskExecutionPaths
-	Status string
-	Notes  string
-	Err    error
+	Task         plan.Task
+	Paths        TaskExecutionPaths
+	BaseRevision string
+	Status       string
+	Notes        string
+	Err          error
 }
 
 type preparedParallelTask struct {
@@ -352,6 +355,7 @@ type preparedParallelTask struct {
 	IsolatedPlan     *plan.File
 	IsolatedTask     plan.Task
 	InitialSignature string
+	BaseRevision     string
 }
 
 func (r *Runner) runParallelBatch(ctx context.Context, currentPlan *plan.File, tasks []plan.Task, iteration int) ([]parallelTaskResult, error) {
@@ -427,6 +431,11 @@ func (r *Runner) prepareParallelTask(ctx context.Context, currentPlan *plan.File
 		return preparedParallelTask{}, err
 	}
 
+	baseRevision, err := gitRevision(ctx, r.cfg.Workspace, "HEAD")
+	if err != nil {
+		baseRevision = ""
+	}
+
 	return preparedParallelTask{
 		Task:             task,
 		Paths:            paths,
@@ -434,11 +443,12 @@ func (r *Runner) prepareParallelTask(ctx context.Context, currentPlan *plan.File
 		IsolatedPlan:     isolatedPlan,
 		IsolatedTask:     isolatedTask,
 		InitialSignature: taskProgressSignature(isolatedTask, currentNotes),
+		BaseRevision:     baseRevision,
 	}, nil
 }
 
 func (r *Runner) runPreparedParallelTask(ctx context.Context, work preparedParallelTask, iteration int) parallelTaskResult {
-	result := parallelTaskResult{Task: work.Task, Paths: work.Paths}
+	result := parallelTaskResult{Task: work.Task, Paths: work.Paths, BaseRevision: work.BaseRevision}
 
 	data := TemplateData{
 		ConfigPath:     r.cfg.Path,
@@ -473,6 +483,177 @@ func (r *Runner) runPreparedParallelTask(ctx context.Context, work preparedParal
 	result.Status = status
 	result.Notes = notes
 	return result
+}
+
+func (r *Runner) integrateParallelBatch(ctx context.Context, results []parallelTaskResult) error {
+	errs := make([]error, 0)
+	for _, result := range results {
+		if err := r.integrateParallelResult(ctx, result); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.Task.ID, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTaskResult) error {
+	if result.Paths.Isolated {
+		defer r.cleanupIntegratedParallelTask(ctx, result.Paths)
+	}
+
+	if result.Err != nil {
+		notes := appendIntegrationNote(result.Notes, "Parallel worker failed: "+shortError(result.Err)+".")
+		if err := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); err != nil {
+			return fmt.Errorf("record worker failure: %w", err)
+		}
+		return result.Err
+	}
+
+	status := normalizeCollectedTaskStatus(result.Status)
+	if status == "" {
+		err := fmt.Errorf("unsupported parallel task status %q", result.Status)
+		notes := appendIntegrationNote(result.Notes, "Parallel worker returned an unsupported status.")
+		if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
+			return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
+		}
+		return err
+	}
+
+	switch status {
+	case plan.StatusBlocked, plan.StatusManual:
+		if err := r.recordParallelTaskStatus(ctx, result.Task, status, result.Notes); err != nil {
+			return err
+		}
+		return fmt.Errorf("parallel task reported %s", status)
+	case plan.StatusDone, plan.StatusInProgress:
+	default:
+		return fmt.Errorf("unsupported parallel task status %q", status)
+	}
+
+	patch, err := r.parallelWorkerPatch(ctx, result)
+	if err != nil {
+		notes := appendIntegrationNote(result.Notes, "Parallel worker changes could not be collected: "+shortError(err)+".")
+		if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
+			return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
+		}
+		return err
+	}
+
+	applied := false
+	if len(bytes.TrimSpace(patch)) > 0 {
+		if err := gitApplyPatch(ctx, r.cfg.Workspace, patch, true, false); err != nil {
+			notes := appendIntegrationNote(result.Notes, "Parallel worker changes did not apply cleanly: "+shortError(err)+".")
+			if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
+				return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
+			}
+			return err
+		}
+		if err := gitApplyPatch(ctx, r.cfg.Workspace, patch, false, false); err != nil {
+			notes := appendIntegrationNote(result.Notes, "Parallel worker changes did not apply cleanly: "+shortError(err)+".")
+			if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
+				return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
+			}
+			return err
+		}
+		applied = true
+	}
+
+	resultPath, err := writeRootParallelTaskResult(r.cfg.Workspace, result.Task.ID, status, result.Notes)
+	if err != nil {
+		return err
+	}
+
+	err = automation.Finalize(ctx, automation.FinalizeOptions{
+		Workspace:     r.cfg.Workspace,
+		PlanFile:      r.cfg.PlanFile,
+		TaskID:        result.Task.ID,
+		ResultPath:    resultPath,
+		CommitMessage: taskCommitMessage(result.Task),
+	}, r.stdout, r.stderr)
+	if err == nil {
+		return nil
+	}
+
+	if applied && status == plan.StatusDone {
+		if reverseErr := gitApplyPatch(ctx, r.cfg.Workspace, patch, false, true); reverseErr != nil {
+			return fmt.Errorf("%w; also failed to roll back unverified worker changes: %v", err, reverseErr)
+		}
+	}
+	if status == plan.StatusDone {
+		if commitErr := automation.CommitIfNeeded(ctx, r.cfg.Workspace, parallelFollowUpCommitMessage(result.Task.ID), r.stdout, r.stderr); commitErr != nil {
+			return fmt.Errorf("%w; also failed to commit verification follow-up: %v", err, commitErr)
+		}
+	}
+	return err
+}
+
+func (r *Runner) parallelWorkerPatch(ctx context.Context, result parallelTaskResult) ([]byte, error) {
+	if strings.TrimSpace(result.BaseRevision) == "" {
+		return nil, fmt.Errorf("parallel integration requires a git base revision for task %s", result.Task.ID)
+	}
+	if strings.TrimSpace(result.Paths.Workspace) == "" {
+		return nil, fmt.Errorf("parallel worker workspace is required for task %s", result.Task.ID)
+	}
+
+	excludes := workerIntegrationExcludes(result.Paths)
+	args := []string{"add", "-A", "--", "."}
+	args = append(args, excludes...)
+	if err := runGitInWorkspace(ctx, result.Paths.Workspace, args...); err != nil {
+		return nil, err
+	}
+
+	diffArgs := []string{"-C", result.Paths.Workspace, "diff", "--binary", result.BaseRevision, "--", "."}
+	diffArgs = append(diffArgs, excludes...)
+	cmd := exec.CommandContext(ctx, "git", diffArgs...)
+	patch, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff worker changes: %w", err)
+	}
+	return patch, nil
+}
+
+func (r *Runner) recordParallelTaskStatus(ctx context.Context, task plan.Task, status, notes string) error {
+	currentPlan, err := plan.Load(r.cfg.PlanFile)
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for i := range currentPlan.Tasks {
+		if currentPlan.Tasks[i].ID != task.ID {
+			continue
+		}
+		currentPlan.Tasks[i].Status = status
+		currentPlan.Tasks[i].Notes = ""
+		found = true
+		break
+	}
+	if !found {
+		return fmt.Errorf("task %q not found in %s", task.ID, r.cfg.PlanFile)
+	}
+
+	notesFile, err := tasknotes.Load(tasknotes.Path(r.cfg.Workspace))
+	if err != nil {
+		return err
+	}
+	if err := notesFile.Upsert(task.ID, status, notes); err != nil {
+		return err
+	}
+	if err := notesFile.Save(); err != nil {
+		return err
+	}
+	if err := currentPlan.Save(); err != nil {
+		return err
+	}
+	return automation.CommitIfNeeded(ctx, r.cfg.Workspace, parallelFollowUpCommitMessage(task.ID), r.stdout, r.stderr)
+}
+
+func (r *Runner) cleanupIntegratedParallelTask(ctx context.Context, paths TaskExecutionPaths) {
+	if err := removeExistingIsolatedWorkspace(ctx, r.cfg.Workspace, paths); err != nil && r.shouldLogProgress() {
+		fmt.Fprintf(r.stderr, "warning: failed to clean isolated workspace for task %s: %v\n", paths.TaskID, err)
+	}
 }
 
 func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (*Runner, error) {
@@ -628,6 +809,131 @@ func addGitWorktree(ctx context.Context, rootWorkspace, workspace string) error 
 		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func gitRevision(ctx context.Context, workspace, revision string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--verify", revision)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse %s: %w: %s", revision, err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func runGitInWorkspace(ctx context.Context, workspace string, args ...string) error {
+	cmdArgs := append([]string{"-C", workspace}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func gitApplyPatch(ctx context.Context, workspace string, patch []byte, check, reverse bool) error {
+	if len(bytes.TrimSpace(patch)) == 0 {
+		return nil
+	}
+
+	args := []string{"-C", workspace, "apply"}
+	if check {
+		args = append(args, "--check")
+	}
+	if reverse {
+		args = append(args, "--reverse")
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Stdin = bytes.NewReader(patch)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git apply: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func workerIntegrationExcludes(paths TaskExecutionPaths) []string {
+	excludes := []string{
+		":(exclude).vibedrive/task-notes.yaml",
+		":(exclude).vibedrive/task-results/**",
+		":(exclude).vibedrive/reviews/**",
+		":(exclude).vibedrive/task-runs/**",
+		":(exclude).vibedrive/worktrees/**",
+	}
+	if rel, ok := workspaceRelativeGitPath(paths.Workspace, paths.PlanFile); ok {
+		excludes = append(excludes, ":(exclude)"+rel)
+	}
+	return excludes
+}
+
+func workspaceRelativeGitPath(workspace, path string) (string, bool) {
+	rel, err := filepath.Rel(filepath.Clean(workspace), filepath.Clean(path))
+	if err != nil || !isLocalRelativePath(rel) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func writeRootParallelTaskResult(workspace, taskID, status, notes string) (string, error) {
+	resultPath := automation.ResultPath(workspace, taskID)
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		return "", err
+	}
+
+	data, err := json.Marshal(automation.TaskResult{
+		Status: status,
+		Notes:  strings.TrimSpace(notes),
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(resultPath, append(data, '\n'), 0o644); err != nil {
+		return "", err
+	}
+	return resultPath, nil
+}
+
+func taskCommitMessage(task plan.Task) string {
+	if message := strings.TrimSpace(task.CommitMessage); message != "" {
+		return message
+	}
+	if title := strings.TrimSpace(task.Title); title != "" {
+		return title
+	}
+	return "task " + strings.TrimSpace(task.ID)
+}
+
+func parallelFollowUpCommitMessage(taskID string) string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		taskID = "task"
+	}
+	return "chore: record parallel follow-up for " + taskID
+}
+
+func appendIntegrationNote(notes, suffix string) string {
+	notes = strings.TrimSpace(notes)
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		return notes
+	}
+	if notes == "" {
+		return suffix
+	}
+	return notes + " " + suffix
+}
+
+func shortError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.TrimSpace(err.Error())
+	message = strings.Join(strings.Fields(message), " ")
+	const max = 240
+	if len(message) > max {
+		return strings.TrimSpace(message[:max]) + "..."
+	}
+	return message
 }
 
 func copyWorkspace(sourceRoot, destRoot string, excludedRoots ...string) error {

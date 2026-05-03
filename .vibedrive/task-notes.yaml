@@ -14,3 +14,6 @@ tasks:
     - id: parallel-batch-execution
       status: done
       notes: Implemented isolated parallel ready-batch execution with per-task workspaces/artifacts, worker failure reporting, serial fallback for unsafe batches, and tests. Merge/finalize remains the next integration phase.
+    - id: parallel-merge-and-finalize
+      status: done
+      notes: Parallel worker outputs now integrate through root-side patch apply and finalize in plan order. Fresh reruns should keep worker artifacts isolated and let root verification decide done status per task.

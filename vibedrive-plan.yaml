@@ -129,7 +129,7 @@ tasks:
     - id: parallel-merge-and-finalize
       title: Merge parallel worker results back through deterministic finalization
       details: Complete the integration path for parallel task results. The root runner should merge or apply each successful worker result in a deterministic order, run that task's configured verification, update the canonical plan and task notes, and commit each completed task. Merge conflicts or failed verification should mark only the affected task for follow-up while preserving completed sibling work.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - parallel-batch-execution
