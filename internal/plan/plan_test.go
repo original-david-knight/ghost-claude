@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -264,6 +265,184 @@ func TestFindNextReadyReturnsNoReadyWhenBlockedByDeps(t *testing.T) {
 	}
 }
 
+func TestAnalyzeReadyBatchSelectsIndependentTasksUpToLimit(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "api", Title: "API", Status: StatusTodo, OwnsPaths: StringList{"internal/api/**"}},
+			{ID: "ui", Title: "UI", Status: StatusTodo, OwnsPaths: StringList{"web/ui/**"}},
+			{ID: "docs", Title: "Docs", Status: StatusTodo, OwnsPaths: StringList{"docs/**"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"api", "ui"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "docs")
+	if exclusion.Reason != ReadyBatchReasonLimitReached {
+		t.Fatalf("expected docs reason %q, got %#v", ReadyBatchReasonLimitReached, exclusion)
+	}
+}
+
+func TestSelectReadyBatchReturnsSelectedTasks(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "api", Title: "API", Status: StatusTodo, OwnsPaths: StringList{"internal/api/**"}},
+			{ID: "ui", Title: "UI", Status: StatusTodo, OwnsPaths: StringList{"web/ui/**"}},
+		},
+	}
+
+	selected, err := file.SelectReadyBatch(4)
+	if err != nil {
+		t.Fatalf("SelectReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(selected), []string{"api", "ui"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+}
+
+func TestAnalyzeReadyBatchExplainsDependencyBlockedTasks(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "setup", Title: "Setup", Status: StatusTodo, OwnsPaths: StringList{"internal/setup/**"}},
+			{ID: "feature", Title: "Feature", Status: StatusTodo, Deps: StringList{"setup"}, OwnsPaths: StringList{"internal/feature/**"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"setup"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "feature")
+	if exclusion.Reason != ReadyBatchReasonUnmetDependencies {
+		t.Fatalf("expected feature reason %q, got %#v", ReadyBatchReasonUnmetDependencies, exclusion)
+	}
+	if got, want := exclusion.UnmetDependencies, []string{"setup"}; !slices.Equal(got, want) {
+		t.Fatalf("expected unmet dependencies %v, got %v", want, got)
+	}
+}
+
+func TestAnalyzeReadyBatchRejectsOverlappingOwnership(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "api", Title: "API", Status: StatusTodo, OwnsPaths: StringList{"internal/api/**"}},
+			{ID: "handler", Title: "Handler", Status: StatusTodo, OwnsPaths: StringList{"internal/api/handler.go"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"api"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "handler")
+	if exclusion.Reason != ReadyBatchReasonOwnershipConflict || exclusion.ConflictsWith != "api" {
+		t.Fatalf("expected ownership conflict with api, got %#v", exclusion)
+	}
+}
+
+func TestAnalyzeReadyBatchRejectsExplicitConflicts(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "api", Title: "API", Status: StatusTodo, OwnsPaths: StringList{"internal/api/**"}, ConflictsWith: StringList{"docs"}},
+			{ID: "docs", Title: "Docs", Status: StatusTodo, OwnsPaths: StringList{"docs/**"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"api"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "docs")
+	if exclusion.Reason != ReadyBatchReasonExplicitConflict || exclusion.ConflictsWith != "api" {
+		t.Fatalf("expected explicit conflict with api, got %#v", exclusion)
+	}
+}
+
+func TestAnalyzeReadyBatchRejectsSharedContractWriters(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "server", Title: "Server", Status: StatusTodo, OwnsPaths: StringList{"internal/server/**"}, ProvidesContracts: StringList{"docs/api.md"}},
+			{ID: "client", Title: "Client", Status: StatusTodo, OwnsPaths: StringList{"internal/client/**"}, ProvidesContracts: StringList{"docs/api.md"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"server"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "client")
+	if exclusion.Reason != ReadyBatchReasonContractWriterConflict || exclusion.ConflictsWith != "server" {
+		t.Fatalf("expected contract writer conflict with server, got %#v", exclusion)
+	}
+}
+
+func TestAnalyzeReadyBatchKeepsMissingOwnershipMetadataSerial(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "legacy", Title: "Legacy", Status: StatusTodo},
+			{ID: "bounded", Title: "Bounded", Status: StatusTodo, OwnsPaths: StringList{"internal/bounded/**"}},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"legacy"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "bounded")
+	if exclusion.Reason != ReadyBatchReasonMissingOwnershipMetadata || exclusion.ConflictsWith != "legacy" {
+		t.Fatalf("expected missing metadata conflict with legacy, got %#v", exclusion)
+	}
+}
+
+func TestAnalyzeReadyBatchUsesComponentOwnershipFallback(t *testing.T) {
+	file := &File{
+		Project: Project{
+			Components: []Component{
+				{ID: "api", OwnedPaths: StringList{"internal/api/**"}},
+				{ID: "docs", OwnedPaths: StringList{"docs/**"}},
+			},
+		},
+		Tasks: []Task{
+			{ID: "api-task", Title: "API", Status: StatusTodo, Component: "api"},
+			{ID: "docs-task", Title: "Docs", Status: StatusTodo, Component: "docs"},
+		},
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(2)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+
+	if got, want := taskIDs(analysis.Selected), []string{"api-task", "docs-task"}; !slices.Equal(got, want) {
+		t.Fatalf("expected selected tasks %v, got %v", want, got)
+	}
+}
+
 func TestSavePersistsUpdatedStatusWithoutTaskNotes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vibedrive-plan.yaml")
@@ -346,6 +525,25 @@ tasks:
 	if got := file.Tasks[0].Acceptance[1]; got != want {
 		t.Fatalf("expected acceptance item %q, got %q", want, got)
 	}
+}
+
+func taskIDs(tasks []Task) []string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	return ids
+}
+
+func requireReadyBatchExclusion(t *testing.T, analysis ReadyBatchAnalysis, taskID string) ReadyBatchExclusion {
+	t.Helper()
+	for _, exclusion := range analysis.NotSelected {
+		if exclusion.Task.ID == taskID {
+			return exclusion
+		}
+	}
+	t.Fatalf("expected exclusion for task %q, got %#v", taskID, analysis.NotSelected)
+	return ReadyBatchExclusion{}
 }
 
 func writePlanFile(t *testing.T, content string) string {

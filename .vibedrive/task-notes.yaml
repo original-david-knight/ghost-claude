@@ -5,3 +5,6 @@ tasks:
     - id: boundary-aware-plan-prompts
       status: done
       notes: Init/restart prompts now require component, ownership, contract, context-reduction, and integration-boundary planning. Scaffold prompts surface owns_paths and contract metadata as edit authority. go test ./... passes.
+    - id: plan-parallel-readiness-analysis
+      status: done
+      notes: Added deterministic plan-level ready-batch analysis plus CLI inspection. Missing task owns_paths/component ownership forces serial fallback; component owned_paths can supply ownership. Verified go test ./internal/plan ./cmd/vibedrive and go test ./... pass.

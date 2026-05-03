@@ -54,7 +54,7 @@ tasks:
     - id: plan-parallel-readiness-analysis
       title: Add plan analysis for safe parallel task batches
       details: Add pure plan-level analysis that reports which ready tasks can run in the same batch and why other ready tasks must remain serial. Conflict checks should account for dependency status, overlapping owns_paths, explicit conflicts_with, shared contract writers, and tasks that lack enough ownership metadata. Keep this independent from agent execution so it can be tested deterministically before any runner concurrency is introduced.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - schema-component-contract-metadata

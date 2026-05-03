@@ -105,6 +105,96 @@ func TestResolveConfigPathKeepsAbsoluteConfigPath(t *testing.T) {
 	}
 }
 
+func TestReadyBatchCommandPrintsAnalysisWithoutAgents(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	if err := os.WriteFile(planPath, []byte(`project:
+  name: demo
+tasks:
+  - id: api
+    title: API work
+    status: todo
+    owns_paths:
+      - internal/api/**
+  - id: handler
+    title: Handler work
+    status: todo
+    owns_paths:
+      - internal/api/handler.go
+  - id: docs
+    title: Docs work
+    status: todo
+    owns_paths:
+      - docs/**
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := readyBatchCommand([]string{"--workspace", dir, "--plan", "vibedrive-plan.yaml", "--limit", "3"}, &out)
+	if err != nil {
+		t.Fatalf("readyBatchCommand returned error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Ready batch (2/3):",
+		"  - api: API work",
+		"  - docs: Docs work",
+		"  - handler: ownership_conflict with api",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected ready-batch output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func TestReadyBatchCommandLoadsPlanFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive.yaml"), []byte(`workspace: .
+plan_file: vibedrive-plan.yaml
+steps:
+  - name: inspect
+    type: exec
+    command:
+      - echo
+      - inspect
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive-plan.yaml"), []byte(`project:
+  name: demo
+tasks:
+  - id: api
+    title: API work
+    status: todo
+    owns_paths:
+      - internal/api/**
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile plan returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := readyBatchCommand([]string{"--workspace", dir}, &out)
+	if err != nil {
+		t.Fatalf("readyBatchCommand returned error: %v", err)
+	}
+	if output := out.String(); !strings.Contains(output, "  - api: API work") {
+		t.Fatalf("expected ready-batch output to include selected task, got %q", output)
+	}
+}
+
+func TestReadyBatchCommandRejectsPositionalArguments(t *testing.T) {
+	var out bytes.Buffer
+	err := readyBatchCommand([]string{"unexpected"}, &out)
+	if err == nil {
+		t.Fatal("expected readyBatchCommand to reject positional arguments")
+	}
+	if !strings.Contains(err.Error(), "does not accept positional arguments") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestApplyRuntimeAgentRolesUsesDefaults(t *testing.T) {
 	cfg := newRuntimeRoleConfig()
 

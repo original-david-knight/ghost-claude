@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"vibedrive/internal/automation"
 	"vibedrive/internal/bootstrap"
 	"vibedrive/internal/config"
+	"vibedrive/internal/plan"
 	"vibedrive/internal/runner"
 )
 
@@ -44,6 +46,8 @@ func realMain() error {
 		return initCommand(ctx, args[1:])
 	case "restart":
 		return restartCommand(ctx, args[1:])
+	case "plan":
+		return planCommand(args[1:])
 	case "task":
 		return taskCommand(ctx, args[1:])
 	case "-h", "--help", "help":
@@ -192,6 +196,7 @@ Usage:
   vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
   vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
   vibedrive restart [-config vibedrive.yaml] [-workspace /path/to/repo]
+  vibedrive plan ready-batch [-config vibedrive.yaml] [-workspace /path/to/repo] [-plan vibedrive-plan.yaml] [-limit N]
   vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 
 If no subcommand is provided, vibedrive behaves like "run".
@@ -204,6 +209,125 @@ Init notes:
   Use --author claude|codex and --critic claude|codex to pick bootstrap roles. Defaults: author=codex, critic=claude.
   Init uses fresh instances for author create-plan, critic review without edits, and author revision from critic feedback.
   Bootstrap planning keeps routine testing and cleanup inline by default and only adds standalone tech-debt follow-up when risk triggers justify it.`)
+}
+
+func planCommand(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("plan requires a subcommand")
+	}
+
+	switch args[0] {
+	case "ready-batch":
+		return readyBatchCommand(args[1:], os.Stdout)
+	default:
+		return fmt.Errorf("unsupported plan subcommand %q", args[0])
+	}
+}
+
+func readyBatchCommand(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("plan ready-batch", flag.ContinueOnError)
+	fs.SetOutput(os.Stdout)
+
+	configPath := fs.String("config", "vibedrive.yaml", "Path to the workflow config file")
+	workspace := fs.String("workspace", "", "Workspace directory containing the workflow config or plan")
+	planPath := fs.String("plan", "", "Path to vibedrive-plan.yaml; when set, config loading is skipped")
+	limit := fs.Int("limit", 4, "Maximum number of ready tasks to include in the batch")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	if len(fs.Args()) != 0 {
+		return fmt.Errorf("plan ready-batch does not accept positional arguments")
+	}
+
+	resolvedPlanPath, err := resolveReadyBatchPlanPath(*planPath, *configPath, *workspace)
+	if err != nil {
+		return err
+	}
+
+	file, err := plan.Load(resolvedPlanPath)
+	if err != nil {
+		return err
+	}
+
+	analysis, err := file.AnalyzeReadyBatch(*limit)
+	if err != nil {
+		return err
+	}
+
+	renderReadyBatchAnalysis(stdout, resolvedPlanPath, analysis)
+	return nil
+}
+
+func resolveReadyBatchPlanPath(planPath, configPath, workspace string) (string, error) {
+	trimmedPlanPath := strings.TrimSpace(planPath)
+	if trimmedPlanPath != "" {
+		return resolveWorkspaceRelativePath(trimmedPlanPath, workspace)
+	}
+
+	resolvedConfigPath, err := resolveConfigPath(configPath, workspace)
+	if err != nil {
+		return "", err
+	}
+
+	cfg, err := config.Load(resolvedConfigPath)
+	if err != nil {
+		return "", err
+	}
+	return cfg.PlanFile, nil
+}
+
+func resolveWorkspaceRelativePath(pathValue, workspace string) (string, error) {
+	if filepath.IsAbs(pathValue) {
+		return filepath.Clean(pathValue), nil
+	}
+	if strings.TrimSpace(workspace) == "" {
+		return filepath.Abs(pathValue)
+	}
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(absWorkspace, pathValue), nil
+}
+
+func renderReadyBatchAnalysis(stdout io.Writer, planPath string, analysis plan.ReadyBatchAnalysis) {
+	fmt.Fprintf(stdout, "Plan: %s\n", planPath)
+	fmt.Fprintf(stdout, "Ready batch (%d/%d):\n", len(analysis.Selected), analysis.Limit)
+	if len(analysis.Selected) == 0 {
+		fmt.Fprintln(stdout, "  none")
+	} else {
+		for _, task := range analysis.Selected {
+			fmt.Fprintf(stdout, "  - %s: %s\n", task.ID, task.Title)
+		}
+	}
+
+	if len(analysis.NotSelected) == 0 {
+		return
+	}
+
+	fmt.Fprintln(stdout, "Not selected:")
+	for _, exclusion := range analysis.NotSelected {
+		renderReadyBatchExclusion(stdout, exclusion)
+	}
+}
+
+func renderReadyBatchExclusion(stdout io.Writer, exclusion plan.ReadyBatchExclusion) {
+	fmt.Fprintf(stdout, "  - %s: %s", exclusion.Task.ID, exclusion.Reason)
+	if exclusion.ConflictsWith != "" {
+		fmt.Fprintf(stdout, " with %s", exclusion.ConflictsWith)
+	}
+	if len(exclusion.UnmetDependencies) > 0 {
+		fmt.Fprintf(stdout, " deps=%s", strings.Join(exclusion.UnmetDependencies, ","))
+	}
+	if exclusion.Detail != "" {
+		fmt.Fprintf(stdout, " (%s)", exclusion.Detail)
+	}
+	fmt.Fprintln(stdout)
 }
 
 func restartCommand(ctx context.Context, args []string) error {
