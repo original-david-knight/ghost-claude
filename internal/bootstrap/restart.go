@@ -99,6 +99,13 @@ Rewrite %s in place so the next run avoids the difficulties surfaced above.
 Requirements for the revised plan:
 - preserve the hard constraints, success criteria, and source coverage from the existing plan and source inputs
 - do not weaken or remove requirements from the source inputs
+- preserve useful prior task notes by turning observed learnings into better tasks, details, dependencies, acceptance criteria, verification, ownership metadata, or checkpoints rather than copying stale notes
+- regenerate component, ownership, contract, and integration-boundary metadata from the current source docs, the current plan, and the observed learnings from prior task notes; do not blindly keep stale boundaries from the old plan
+- before finalizing tasks, identify the repository components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need
+- optimize the restarted plan for context reduction, not merely speed; tasks should be assignable with narrow read context and explicit edit authority
+- populate or revise project.components and each task's component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata whenever that information is known or needed for bounded work
+- keep context_files to the smallest source, contract, and local implementation references needed for the task; avoid requiring agents to read broad areas of the repository to infer ownership or interfaces
+- split work by component and contract boundary when practical; any cross-cutting implementation task must depend on a preceding contract or foundation task that establishes the shared interface, ownership model, or integration checkpoint
 - incorporate the prior-run notes into better task decomposition, dependency ordering, context_files, acceptance criteria, verify_commands, and checkpoint placement
 - add, split, reorder, or remove tasks when the previous run shows the old plan would repeat avoidable difficulty
 - keep tasks sized for one focused implementation iteration and one coherent commit when practical
@@ -139,6 +146,12 @@ Previous-run notes that must already be reflected in the new plan:
 
 Perform a critical review of the restarted plan. Focus on:
 - prior-run notes that were ignored or only copied into notes instead of being turned into better tasks, dependencies, details, acceptance criteria, or verification
+- useful prior task notes that were not preserved as concrete plan changes after regenerating boundaries from current source docs and observed learnings
+- missing or stale component, ownership, contract, or integration-boundary analysis
+- weak decomposition that requires excessive context, broad context_files, or repository-wide reading because ownership and interfaces are ambiguous
+- missing interfaces, shared contracts, component metadata, owns_paths, reads_contracts, provides_contracts, or conflicts_with entries needed to make edit authority explicit
+- ambiguous ownership or unsafe parallel assumptions, including tasks that touch shared paths/contracts without dependency or conflict metadata
+- reject tasks that are cross-cutting without a preceding contract or foundation task that establishes the shared interface, ownership model, or integration checkpoint
 - task sequencing or missing preparatory work that would recreate the same difficulties
 - tasks that are too large, vague, or not committable
 - missing checkpoints or weak automated verification commands

@@ -57,6 +57,37 @@ workflows:
           - {{ . }}
           {{- end }}
           {{- end }}
+          {{- if or .Task.Component .Task.OwnsPaths .Task.ReadsContracts .Task.ProvidesContracts .Task.ConflictsWith }}
+
+          Boundary metadata:
+          {{- if .Task.Component }}
+          - component: {{ .Task.Component }}
+          {{- end }}
+          {{- if .Task.OwnsPaths }}
+          - owns_paths:
+          {{- range .Task.OwnsPaths }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ReadsContracts }}
+          - reads_contracts:
+          {{- range .Task.ReadsContracts }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ProvidesContracts }}
+          - provides_contracts:
+          {{- range .Task.ProvidesContracts }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ConflictsWith }}
+          - conflicts_with:
+          {{- range .Task.ConflictsWith }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
           {{- if .Task.Acceptance }}
 
           Acceptance criteria:
@@ -66,6 +97,9 @@ workflows:
           {{- end }}
 
           Make the necessary code changes in {{ .Workspace }}.
+          Respect declared component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata when present.
+          Treat owns_paths as explicit edit authority; consult or modify contract files according to reads_contracts and provides_contracts unless the task requirements force a narrowly documented exception.
+          If you must edit outside owns_paths or alter an undeclared contract, record why in the task notes.
           When the task depends on new verification tooling, build or update the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture as part of the task.
           For UI, visual, or interactive work, make sure agents can verify the result without manual help using deterministic evidence such as scripted screenshots, DOM assertions, accessibility checks, or equivalent artifacts.
           Consult additional repository files only when they are needed to complete this task correctly.
@@ -88,7 +122,7 @@ workflows:
         actor: reviewer
         prompt: |
           Review the current uncommitted changes for task {{ .Task.ID }} from {{ .PlanFile }}.
-          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, and mismatches with the task requirements.
+          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, violations of declared owns_paths or contract metadata, and mismatches with the task requirements.
           Do not make code changes in this step.
 
           Write {{ .ReviewPath }} as JSON with this schema:
@@ -161,8 +195,42 @@ workflows:
           - {{ . }}
           {{- end }}
           {{- end }}
+          {{- if or .Task.Component .Task.OwnsPaths .Task.ReadsContracts .Task.ProvidesContracts .Task.ConflictsWith }}
+
+          Boundary metadata:
+          {{- if .Task.Component }}
+          - component: {{ .Task.Component }}
+          {{- end }}
+          {{- if .Task.OwnsPaths }}
+          - owns_paths:
+          {{- range .Task.OwnsPaths }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ReadsContracts }}
+          - reads_contracts:
+          {{- range .Task.ReadsContracts }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ProvidesContracts }}
+          - provides_contracts:
+          {{- range .Task.ProvidesContracts }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- if .Task.ConflictsWith }}
+          - conflicts_with:
+          {{- range .Task.ConflictsWith }}
+            - {{ . }}
+          {{- end }}
+          {{- end }}
+          {{- end }}
 
           Run the full required verification for this checkpoint, fix any regressions you find, and leave the repository green before moving on.
+          Respect declared component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata when present.
+          Treat owns_paths as explicit edit authority; consult or modify contract files according to reads_contracts and provides_contracts unless the checkpoint requirements force a narrowly documented exception.
+          If you must edit outside owns_paths or alter an undeclared contract, record why in the task notes.
           When the checkpoint depends on new verification tooling, build or update the needed automated checks, harnesses, fixtures, instrumentation, or artifact capture as part of the checkpoint.
           For UI, visual, or interactive work, make sure agents can verify the result without manual help using deterministic evidence such as scripted screenshots, DOM assertions, accessibility checks, or equivalent artifacts.
           Consult additional repository files only when they are needed to complete this checkpoint correctly.
@@ -185,7 +253,7 @@ workflows:
         actor: reviewer
         prompt: |
           Review the current uncommitted changes for checkpoint task {{ .Task.ID }} from {{ .PlanFile }}.
-          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, and mismatches with the checkpoint requirements.
+          Focus on correctness issues, regressions, missing tests, missing self-verification instrumentation, violations of declared owns_paths or contract metadata, and mismatches with the checkpoint requirements.
           Do not make code changes in this step.
 
           Write {{ .ReviewPath }} as JSON with this schema:

@@ -161,6 +161,23 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(createPrompt, "agents can verify their own work without manual help") {
 		t.Fatalf("expected first prompt to require self-verifying tasks, got %q", createPrompt)
 	}
+	if !strings.Contains(createPrompt, "before generating tasks, first identify the repository components") {
+		t.Fatalf("expected first prompt to require boundary analysis before task generation, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "context reduction, not merely speed") {
+		t.Fatalf("expected first prompt to optimize for context reduction, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "explicit edit authority") {
+		t.Fatalf("expected first prompt to require explicit edit authority, got %q", createPrompt)
+	}
+	for _, want := range []string{"project.components", "component:", "owns_paths:", "reads_contracts:", "provides_contracts:", "conflicts_with:"} {
+		if !strings.Contains(createPrompt, want) {
+			t.Fatalf("expected first prompt to include boundary metadata %q, got %q", want, createPrompt)
+		}
+	}
+	if !strings.Contains(createPrompt, "cross-cutting implementation task must depend on a preceding contract or foundation task") {
+		t.Fatalf("expected first prompt to require foundation tasks before cross-cutting work, got %q", createPrompt)
+	}
 	if !strings.Contains(createPrompt, "screenshot instrumentation or seeded test data") {
 		t.Fatalf("expected first prompt to include preparatory verification tooling, got %q", createPrompt)
 	}
@@ -193,6 +210,21 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(criticPrompt, "self-verification path agents can run without manual help") {
 		t.Fatalf("expected second prompt to review self-verification paths, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "missing component, ownership, contract, or integration-boundary analysis") {
+		t.Fatalf("expected second prompt to review missing boundary analysis, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "excessive context requirements") {
+		t.Fatalf("expected second prompt to review excessive context requirements, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "missing interfaces, shared contracts") {
+		t.Fatalf("expected second prompt to review missing interfaces and contracts, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "ambiguous ownership or unsafe parallel assumptions") {
+		t.Fatalf("expected second prompt to review ambiguous ownership and unsafe parallel assumptions, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "reject tasks that are cross-cutting without a preceding contract or foundation task") {
+		t.Fatalf("expected second prompt to reject cross-cutting tasks without foundation tasks, got %q", criticPrompt)
 	}
 	if !strings.Contains(criticPrompt, "screenshot capture") {
 		t.Fatalf("expected second prompt to review screenshot instrumentation, got %q", criticPrompt)
@@ -235,6 +267,18 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(revisionPrompt, "self-verification path agents can run without manual help") {
 		t.Fatalf("expected third prompt to preserve self-verification paths, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "components, public interfaces, shared contracts, owned paths, integration checkpoints") {
+		t.Fatalf("expected third prompt to preserve boundary analysis requirements, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "context reduction, not merely speed") {
+		t.Fatalf("expected third prompt to preserve context-reduction requirements, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata") {
+		t.Fatalf("expected third prompt to preserve ownership and contract metadata requirements, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "cross-cutting implementation task that lacks a preceding contract or foundation task") {
+		t.Fatalf("expected third prompt to reject cross-cutting tasks without foundation tasks, got %q", revisionPrompt)
 	}
 	if !strings.Contains(revisionPrompt, "screenshot capture") {
 		t.Fatalf("expected third prompt to preserve screenshot instrumentation, got %q", revisionPrompt)

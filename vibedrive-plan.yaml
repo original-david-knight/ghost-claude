@@ -29,7 +29,7 @@ tasks:
     - id: boundary-aware-plan-prompts
       title: Make init and restart planning prompt for bounded parallel work
       details: Update bootstrap and restart planning prompts so authors first identify components, interfaces, owned paths, shared contracts, and integration checkpoints before writing executable tasks. The objective is context reduction, not merely speed. Prompts should ask for tasks that can be assigned with narrow read context and explicit edit authority. Critic prompts should reject tasks that are cross-cutting without a preceding contract or foundation task.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - schema-component-contract-metadata

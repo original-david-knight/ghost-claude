@@ -176,6 +176,15 @@ project:
     - <repo-relative path>
   constraint_files:
     - <repo-relative path>
+  components:
+    - id: <stable-kebab-component-id>
+      name: <human-readable component name>
+      owned_paths:
+        - <repo-relative path or glob owned by this component>
+      reads_contracts:
+        - <repo-relative contract/interface doc this component consumes>
+      provides_contracts:
+        - <repo-relative contract/interface doc this component provides or owns>
 
 tasks:
   - id: <stable-kebab-id>
@@ -187,6 +196,15 @@ tasks:
       - <task id>
     context_files:
       - <repo-relative path>
+    component: <component id from project.components>
+    owns_paths:
+      - <repo-relative path or glob this task is allowed to edit>
+    reads_contracts:
+      - <repo-relative contract/interface doc this task consumes>
+    provides_contracts:
+      - <repo-relative contract/interface doc this task creates, updates, or owns>
+    conflicts_with:
+      - <task id that should not run in parallel with this task>
     acceptance:
       - <acceptance criterion>
     verify_commands:
@@ -197,6 +215,12 @@ Requirements for the plan:
 - source_docs must include every listed source input and any repo docs referenced from them that are necessary to execute the project correctly
 - constraint_files must include the subset of source_docs that define hard requirements, constraints, checkpoints, or success criteria
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
+- before generating tasks, first identify the repository components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need
+- optimize decomposition for context reduction, not merely speed; tasks should be assignable with narrow read context and explicit edit authority
+- populate project.components whenever useful component boundaries can be identified, using repo-relative owned_paths and reads_contracts/provides_contracts metadata to document ownership and interfaces
+- for each task, declare component, owns_paths, reads_contracts, provides_contracts, and conflicts_with whenever that metadata is known or needed to keep edit authority and integration boundaries explicit
+- keep context_files to the smallest source, contract, and local implementation references needed for the task; avoid making agents read broad areas of the repository just to infer ownership or interfaces
+- split work by component and contract boundary when practical; any cross-cutting implementation task must depend on a preceding contract or foundation task that establishes the shared interface, ownership model, or integration checkpoint
 - decompose the project into executable tasks that are sized for one focused implementation iteration and one coherent commit when practical
 - use workflow implement for coding work and workflow checkpoint for explicit full-suite or milestone verification gates
 - by default, keep testing, verification, and cleanup work attached to the implementation task that introduces the change instead of deferring it to a later cleanup pass
@@ -234,7 +258,12 @@ Perform a critical review of the plan. You are the critic only: do not change %s
 
 Focus on:
 - missing constraints or success criteria
+- missing component, ownership, contract, or integration-boundary analysis before task generation
 - incorrect or weak task decomposition
+- tasks with excessive context requirements, unclear read scope, or context_files that are broad because interfaces or ownership were not declared
+- missing interfaces, shared contracts, component metadata, owns_paths, reads_contracts, provides_contracts, or conflicts_with entries needed to make edit authority explicit
+- ambiguous ownership or unsafe parallel assumptions, including tasks that touch shared paths/contracts without dependency or conflict metadata
+- reject tasks that are cross-cutting without a preceding contract or foundation task that establishes the shared interface, ownership model, or integration checkpoint
 - missing checkpoints or verification work
 - missing or weak automated verification commands
 - tasks that lack a self-verification path agents can run without manual help
@@ -271,6 +300,11 @@ Keep the YAML valid. Keep task statuses at todo. Do not weaken or remove constra
 
 When revising:
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
+- ensure the plan first analyzes components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need before finalizing task generation
+- optimize revised tasks for context reduction, not merely speed; tasks should be assignable with narrow read context and explicit edit authority
+- populate or correct project.components, task component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata wherever that information is known or needed for safe bounded work
+- keep context_files narrow and contract-oriented so agents do not need broad repository context to infer interfaces or ownership
+- split work by component and contract boundary when practical; reject or rewrite any cross-cutting implementation task that lacks a preceding contract or foundation task establishing the shared interface, ownership model, or integration checkpoint
 - keep testing, verification, and cleanup work attached to the implementation task that introduces the change by default
 - ensure every task has a self-verification path agents can run without manual help; add automated checks, harnesses, fixtures, instrumentation, or artifact capture where existing checks are insufficient
 - include deterministic screenshot capture, browser automation, DOM assertions, accessibility checks, or equivalent evidence for UI, visual, or interactive behavior when needed

@@ -295,6 +295,9 @@ The intended use is:
 - `vibedrive restart` re-reads the current plan, source docs, and prior task notes, then rewrites `vibedrive-plan.yaml` for a fresh rerun with every task back at `todo` and clears stale task notes
 - `vibedrive init` can generate the initial plan from one or more `--source` inputs, the single positional source alias, or the workspace's top-level regular files when you omit sources
 - `vibedrive init` runs fresh author, critic, and author-revision agent instances; the critic reviews without editing the plan and the author owns both plan writes
+- generated `init` and `restart` plans should identify components, owned paths, interfaces/contracts, and integration checkpoints before generating executable tasks
+- boundary metadata such as `component`, `owns_paths`, `reads_contracts`, and `provides_contracts` is meant to reduce the context each agent needs, not merely to make parallel work faster
+- cross-cutting implementation tasks should be split by component or depend on an earlier contract/foundation task that establishes the shared interface or ownership model
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
 - generated plans should give agents a self-verification path for each task, including preparatory checks, fixtures, harnesses, screenshot capture, or other instrumentation when existing commands are not enough
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts

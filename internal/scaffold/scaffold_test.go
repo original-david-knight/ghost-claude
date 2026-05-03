@@ -55,6 +55,23 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 	if !strings.Contains(string(configContent), "scripted screenshots") {
 		t.Fatalf("expected scaffolded config to mention screenshot-based verification artifacts, got %q", string(configContent))
 	}
+	if !strings.Contains(string(configContent), "Boundary metadata:") {
+		t.Fatalf("expected scaffolded config to render task boundary metadata when present, got %q", string(configContent))
+	}
+	for _, want := range []string{"owns_paths:", "reads_contracts:", "provides_contracts:", "conflicts_with:"} {
+		if !strings.Contains(string(configContent), want) {
+			t.Fatalf("expected scaffolded config to include boundary field %q, got %q", want, string(configContent))
+		}
+	}
+	if !strings.Contains(string(configContent), "Treat owns_paths as explicit edit authority") {
+		t.Fatalf("expected scaffolded config to enforce owns_paths edit authority, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "contract files according to reads_contracts and provides_contracts") {
+		t.Fatalf("expected scaffolded config to enforce contract metadata, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "violations of declared owns_paths or contract metadata") {
+		t.Fatalf("expected scaffolded review to check ownership and contract violations, got %q", string(configContent))
+	}
 	if !strings.Contains(string(configContent), "{{ .TaskNotesPath }}") {
 		t.Fatalf("expected scaffolded config to explain external notes path, got %q", string(configContent))
 	}
@@ -123,6 +140,18 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	}
 	if !strings.Contains(string(configContent), "scripted screenshots") {
 		t.Fatalf("expected scaffolded config to mention screenshot-based verification artifacts, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "Boundary metadata:") {
+		t.Fatalf("expected scaffolded config to render task boundary metadata when present, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "Treat owns_paths as explicit edit authority") {
+		t.Fatalf("expected scaffolded config to enforce owns_paths edit authority, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "contract files according to reads_contracts and provides_contracts") {
+		t.Fatalf("expected scaffolded config to enforce contract metadata, got %q", string(configContent))
+	}
+	if !strings.Contains(string(configContent), "violations of declared owns_paths or contract metadata") {
+		t.Fatalf("expected scaffolded review to check ownership and contract violations, got %q", string(configContent))
 	}
 	if !strings.Contains(string(configContent), "{{ .TaskNotesPath }}") {
 		t.Fatalf("expected scaffolded config to explain external notes path, got %q", string(configContent))

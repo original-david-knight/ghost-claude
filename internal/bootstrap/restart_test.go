@@ -90,6 +90,24 @@ tasks:
 	if !strings.Contains(client.prompts[0], "self-verification path agents can run without manual help") {
 		t.Fatalf("expected first prompt to require self-verifying tasks, got %q", client.prompts[0])
 	}
+	if !strings.Contains(client.prompts[0], "preserve useful prior task notes") {
+		t.Fatalf("expected first prompt to preserve useful prior notes as plan changes, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "regenerate component, ownership, contract, and integration-boundary metadata from the current source docs") {
+		t.Fatalf("expected first prompt to regenerate boundaries from current docs and learnings, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "before finalizing tasks, identify the repository components") {
+		t.Fatalf("expected first prompt to require boundary analysis before restarted task generation, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "context reduction, not merely speed") {
+		t.Fatalf("expected first prompt to optimize restarted tasks for context reduction, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "explicit edit authority") {
+		t.Fatalf("expected first prompt to require explicit edit authority, got %q", client.prompts[0])
+	}
+	if !strings.Contains(client.prompts[0], "cross-cutting implementation task must depend on a preceding contract or foundation task") {
+		t.Fatalf("expected first prompt to require foundation tasks before cross-cutting work, got %q", client.prompts[0])
+	}
 	if !strings.Contains(client.prompts[0], "screenshot instrumentation or seeded test data") {
 		t.Fatalf("expected first prompt to include preparatory verification tooling, got %q", client.prompts[0])
 	}
@@ -116,6 +134,21 @@ tasks:
 	}
 	if !strings.Contains(client.prompts[1], "self-verification path agents can run without manual help") {
 		t.Fatalf("expected second prompt to review self-verification paths, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "missing or stale component, ownership, contract, or integration-boundary analysis") {
+		t.Fatalf("expected second prompt to review stale boundary analysis, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "excessive context") {
+		t.Fatalf("expected second prompt to review excessive context requirements, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "missing interfaces, shared contracts") {
+		t.Fatalf("expected second prompt to review missing interfaces and contracts, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "ambiguous ownership or unsafe parallel assumptions") {
+		t.Fatalf("expected second prompt to review ambiguous ownership and unsafe parallel assumptions, got %q", client.prompts[1])
+	}
+	if !strings.Contains(client.prompts[1], "reject tasks that are cross-cutting without a preceding contract or foundation task") {
+		t.Fatalf("expected second prompt to reject cross-cutting tasks without foundation tasks, got %q", client.prompts[1])
 	}
 	if !strings.Contains(client.prompts[1], "screenshot capture") {
 		t.Fatalf("expected second prompt to review screenshot instrumentation, got %q", client.prompts[1])
