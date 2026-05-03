@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"vibedrive/internal/plan"
+	"vibedrive/internal/tasknotes"
 )
 
 const resultDir = ".vibedrive/task-results"
@@ -61,6 +62,12 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 	if status == "" {
 		return fmt.Errorf("task result %s has unsupported status %q", opts.ResultPath, result.Status)
 	}
+	result.Status = status
+
+	notesFile, err := loadTaskNotes(opts.Workspace, file)
+	if err != nil {
+		return err
+	}
 
 	switch status {
 	case plan.StatusDone:
@@ -70,10 +77,16 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 			if err := applyResult(file, opts.TaskID, result); err != nil {
 				return err
 			}
+			if err := notesFile.Upsert(opts.TaskID, result.Status, result.Notes); err != nil {
+				return err
+			}
 			if err := removeResultFile(opts.ResultPath); err != nil {
 				return err
 			}
 			if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
+				return err
+			}
+			if err := notesFile.Save(); err != nil {
 				return err
 			}
 			if err := file.Save(); err != nil {
@@ -89,10 +102,16 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 	if err := applyResult(file, opts.TaskID, result); err != nil {
 		return err
 	}
+	if err := notesFile.Upsert(opts.TaskID, result.Status, result.Notes); err != nil {
+		return err
+	}
 	if err := removeResultFile(opts.ResultPath); err != nil {
 		return err
 	}
 	if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
+		return err
+	}
+	if err := notesFile.Save(); err != nil {
 		return err
 	}
 	if err := file.Save(); err != nil {
@@ -140,11 +159,33 @@ func applyResult(file *plan.File, taskID string, result TaskResult) error {
 			continue
 		}
 		file.Tasks[i].Status = normalizeStatus(result.Status)
-		file.Tasks[i].Notes = strings.TrimSpace(result.Notes)
+		file.Tasks[i].Notes = ""
 		return nil
 	}
 
 	return fmt.Errorf("task %q not found in %s", taskID, file.Path)
+}
+
+func loadTaskNotes(workspace string, file *plan.File) (*tasknotes.File, error) {
+	notesFile, err := tasknotes.Load(tasknotes.Path(workspace))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, task := range file.Tasks {
+		note := strings.TrimSpace(task.Notes)
+		if note == "" {
+			continue
+		}
+		if existing, ok := notesFile.Find(task.ID); ok && strings.TrimSpace(existing.Notes) != "" {
+			continue
+		}
+		if err := notesFile.Upsert(task.ID, task.Status, note); err != nil {
+			return nil, err
+		}
+	}
+
+	return notesFile, nil
 }
 
 func runVerifyCommands(ctx context.Context, workspace string, commands []string, stdout, stderr io.Writer) (string, error) {

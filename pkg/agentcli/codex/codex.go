@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"vibedrive/internal/codexargs"
 )
 
 const (
@@ -208,7 +206,7 @@ func (c *Client) shouldFilterExecOutput() bool {
 }
 
 func shouldFilterExecOutput(args []string) bool {
-	return codexargs.Subcommand(args) == "exec" && !containsArg(args, "--json")
+	return Subcommand(args) == "exec" && !containsArg(args, "--json")
 }
 
 func (c *Client) execArgs() []string {
@@ -217,7 +215,7 @@ func (c *Client) execArgs() []string {
 	}
 
 	args := append([]string{}, c.args...)
-	switch codexargs.Subcommand(args) {
+	switch Subcommand(args) {
 	case "", "exec":
 	default:
 		return nil
@@ -230,7 +228,7 @@ func (c *Client) execArgs() []string {
 		}
 		filtered = append(filtered, arg)
 	}
-	if codexargs.Subcommand(filtered) == "" {
+	if Subcommand(filtered) == "" {
 		filtered = append(filtered, "exec")
 	}
 	return filtered
@@ -275,7 +273,7 @@ func normalizeTransport(transport string) string {
 }
 
 func defaultTransport(args []string) string {
-	if codexargs.IsInteractiveSubcommand(codexargs.Subcommand(args)) {
+	if IsInteractiveSubcommand(Subcommand(args)) {
 		return TransportTUI
 	}
 	return TransportExec

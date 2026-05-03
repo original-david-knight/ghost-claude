@@ -1,4 +1,4 @@
-package codexargs
+package codex
 
 import "testing"
 

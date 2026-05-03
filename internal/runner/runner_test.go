@@ -10,10 +10,11 @@ import (
 	"testing"
 
 	"vibedrive/internal/automation"
-	"vibedrive/internal/claude"
-	codexcli "vibedrive/internal/codex"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
+	"vibedrive/internal/tasknotes"
+	"vibedrive/pkg/agentcli/claude"
+	"vibedrive/pkg/agentcli/codex"
 )
 
 type fakeAgent struct {
@@ -68,7 +69,7 @@ type fakeCodex struct {
 	closeLabel      string
 }
 
-func (f *fakeCodex) RunPrompt(_ context.Context, session *codexcli.Session, prompt string) error {
+func (f *fakeCodex) RunPrompt(_ context.Context, session *codex.Session, prompt string) error {
 	f.prompts = append(f.prompts, prompt)
 
 	if strings.HasPrefix(prompt, "write ") {
@@ -86,7 +87,7 @@ func (f *fakeCodex) RunPrompt(_ context.Context, session *codexcli.Session, prom
 	return nil
 }
 
-func (f *fakeCodex) Close(_ *codexcli.Session) error {
+func (f *fakeCodex) Close(_ *codex.Session) error {
 	f.closedSessionID = append(f.closedSessionID, "closed")
 	if f.closeEvents != nil {
 		label := f.closeLabel
@@ -585,8 +586,8 @@ tasks:
 				ID:       "session-1",
 			}, nil
 		},
-		newCodexSession: func() (*codexcli.Session, error) {
-			return &codexcli.Session{}, nil
+		newCodexSession: func() (*codex.Session, error) {
+			return &codex.Session{}, nil
 		},
 	}
 
@@ -817,7 +818,18 @@ func updateTask(path, taskID, status, notes string) error {
 		if file.Tasks[i].ID == taskID {
 			file.Tasks[i].Status = status
 			file.Tasks[i].Notes = notes
-			return file.Save()
+			if err := file.Save(); err != nil {
+				return err
+			}
+
+			notesFile, err := tasknotes.Load(tasknotes.Path(filepath.Dir(path)))
+			if err != nil {
+				return err
+			}
+			if err := notesFile.Upsert(taskID, status, notes); err != nil {
+				return err
+			}
+			return notesFile.Save()
 		}
 	}
 

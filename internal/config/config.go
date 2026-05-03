@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"vibedrive/internal/codexargs"
+	"vibedrive/pkg/agentcli/codex"
 
 	"gopkg.in/yaml.v3"
 )
@@ -362,7 +362,7 @@ func defaultCodexArgs(transport string) []string {
 }
 
 func defaultCodexTransport(args []string) string {
-	if codexargs.IsInteractiveSubcommand(codexargs.Subcommand(args)) {
+	if codex.IsInteractiveSubcommand(codex.Subcommand(args)) {
 		return CodexTransportTUI
 	}
 	return CodexTransportExec
@@ -441,15 +441,15 @@ func stripCodexPermissionArgs(args []string) []string {
 }
 
 func validateCodexArgs(transport string, args []string) error {
-	subcommand := codexargs.Subcommand(args)
+	subcommand := codex.Subcommand(args)
 	switch normalize(transport) {
 	case CodexTransportTUI:
-		if codexargs.IsInteractiveSubcommand(subcommand) {
+		if codex.IsInteractiveSubcommand(subcommand) {
 			return nil
 		}
 		return fmt.Errorf("codex.transport %q does not support subcommand %q", transport, subcommand)
 	case CodexTransportExec:
-		if codexargs.IsNonInteractiveSubcommand(subcommand) {
+		if codex.IsNonInteractiveSubcommand(subcommand) {
 			return nil
 		}
 		return fmt.Errorf("codex.transport %q requires a non-interactive subcommand such as exec or review", transport)

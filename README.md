@@ -10,7 +10,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 
 - **Unattended loops.** The runner picks the next ready task, dispatches it to the agents, stages, verifies, and commits — no babysitting.
 - **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
-- **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status and short phase notes, so the run is resumable and the plan stays honest about what actually shipped.
+- **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
 - **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). A task only stays `done` when those commands pass; otherwise it drops back to `in_progress` with a failure note.
 - **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
 
@@ -95,7 +95,7 @@ The default workflow scaffolded by `vibedrive init` uses `vibedrive-plan.yaml` a
 1. Execute the selected task with the current coder while preserving the plan's hard constraints.
 2. Ask the current reviewer to review the changes and write a structured review artifact.
 3. Run a second coder step that reads the review artifact and fixes any actionable findings.
-4. Run the task's configured `verify_commands`, apply the JSON task result to `vibedrive-plan.yaml`, and commit the iteration with an exec step.
+4. Run the task's configured `verify_commands`, apply the JSON task status to `vibedrive-plan.yaml`, write notes to `.vibedrive/task-notes.yaml`, and commit the iteration with an exec step.
 
 During `init`, vibedrive bootstraps the plan in two phases:
 
@@ -244,9 +244,9 @@ tasks:
 The intended use is:
 
 - `vibedrive-plan.yaml` is machine-owned execution state
-- the runner advances by updating task status and notes in `vibedrive-plan.yaml`
+- the runner advances by updating task status in `vibedrive-plan.yaml` and task notes in `.vibedrive/task-notes.yaml`
 - each task should end by leaving short notes about what it learned in that phase so the plan can be revised and rerun from a fresh environment
-- `vibedrive restart` re-reads the current plan, source docs, and prior task notes, then rewrites `vibedrive-plan.yaml` for a fresh rerun with every task back at `todo`
+- `vibedrive restart` re-reads the current plan, source docs, and prior task notes, then rewrites `vibedrive-plan.yaml` for a fresh rerun with every task back at `todo` and clears stale task notes
 - `vibedrive init` can generate the initial plan from one or more `--source` inputs, the single positional source alias, or the workspace's top-level regular files when you omit sources
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts
@@ -276,7 +276,6 @@ The intended use is:
 | `acceptance`      | Optional acceptance criteria for the task.                                              |
 | `verify_commands` | Optional shell commands run by `task finalize` before a `done` task stays `done`.       |
 | `commit_message`  | Optional commit message used by the default finalizer workflow.                          |
-| `notes`           | Optional execution notes and phase learnings. Plan-mode progress is tracked from `status` plus `notes`. |
 
 ### Task statuses
 
@@ -355,6 +354,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `{{ .Iteration }}`
 - `{{ .SessionID }}`
 - `{{ .TaskResultPath }}`
+- `{{ .TaskNotesPath }}`
 - `{{ .ReviewPath }}`
 - `{{ .Plan }}` — parsed `vibedrive-plan.yaml`
 - `{{ .Task }}` — selected plan task
@@ -362,13 +362,13 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 
 ## Notes & gotchas
 
-- The runner advances when the selected task changes status or notes in `vibedrive-plan.yaml`.
+- The runner advances when the selected task changes status in `vibedrive-plan.yaml` or notes in `.vibedrive/task-notes.yaml`.
 - `vibedrive-plan.yaml` is intended to be machine-owned state. The default workflow updates it through `vibedrive task finalize`.
-- `vibedrive task finalize` currently writes task status and notes back into `vibedrive-plan.yaml`, runs `verify_commands`, removes task artifacts, and commits staged changes when needed. It does not auto-insert follow-up tasks or enforce changed-file-count triggers.
+- `vibedrive task finalize` writes task status back into `vibedrive-plan.yaml`, writes task notes to `.vibedrive/task-notes.yaml`, runs `verify_commands`, removes task artifacts, and commits staged changes when needed. It does not auto-insert follow-up tasks or enforce changed-file-count triggers.
 - In the default scaffold, task-result notes are intended to capture what the coder learned in that phase so you can revise the plan and rerun it from a fresh environment.
 - `vibedrive task finalize` accepts `done`, `in_progress`, `blocked`, and `manual` task results. The scaffolded prompts only instruct the implementation steps to emit the first three.
 - `verify_commands` lets plan tasks declare deterministic checks for the exec finalizer to run before a task can stay `done`.
-- If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note, removes the result file, and returns an error without committing.
+- If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing.
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.
 - The finalizer stages changes with `git add -A` and only creates a commit when something is actually staged.

@@ -8,10 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"vibedrive/internal/claude"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/scaffold"
+	"vibedrive/internal/tasknotes"
+	"vibedrive/pkg/agentcli/claude"
 )
 
 func TestInitializerRestartReplansFromNotesAndResetsProgress(t *testing.T) {
@@ -37,13 +38,25 @@ tasks:
   - id: seed-fixtures
     title: Seed fixtures
     status: done
-    notes: Tests were flaky because fixture setup happened too late.
   - id: checkpoint-e2e
     title: End-to-end checkpoint
     status: blocked
-    notes: Split browser verification into a dedicated checkpoint before packaging.
 `), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	notesPath := tasknotes.Path(dir)
+	notesFile, err := tasknotes.Load(notesPath)
+	if err != nil {
+		t.Fatalf("Load task notes returned error: %v", err)
+	}
+	if err := notesFile.Upsert("seed-fixtures", plan.StatusDone, "Tests were flaky because fixture setup happened too late."); err != nil {
+		t.Fatalf("Upsert returned error: %v", err)
+	}
+	if err := notesFile.Upsert("checkpoint-e2e", plan.StatusBlocked, "Split browser verification into a dedicated checkpoint before packaging."); err != nil {
+		t.Fatalf("Upsert returned error: %v", err)
+	}
+	if err := notesFile.Save(); err != nil {
+		t.Fatalf("Save task notes returned error: %v", err)
 	}
 
 	client := &fakeClient{}
@@ -107,7 +120,7 @@ tasks:
 	if strings.Contains(client.prompts[1], "after each block of 5 significant dev steps") {
 		t.Fatalf("expected second prompt to remove the old tech-debt cadence review, got %q", client.prompts[1])
 	}
-	if !strings.Contains(client.prompts[1], "leftover task notes from the old run") {
+	if !strings.Contains(client.prompts[1], "leftover task notes copied into the plan") {
 		t.Fatalf("expected second prompt to review stale notes, got %q", client.prompts[1])
 	}
 	if !client.closed {
@@ -125,5 +138,8 @@ tasks:
 		if task.Notes != "" {
 			t.Fatalf("expected task %q notes to be cleared, got %q", task.ID, task.Notes)
 		}
+	}
+	if _, err := os.Stat(notesPath); !os.IsNotExist(err) {
+		t.Fatalf("expected task notes file to be cleared after restart, stat err=%v", err)
 	}
 }

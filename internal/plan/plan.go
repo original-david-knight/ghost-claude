@@ -93,7 +93,13 @@ func (f *File) Save() error {
 		return err
 	}
 
-	data, err := yaml.Marshal(f)
+	fileForSave := *f
+	fileForSave.Tasks = append([]Task(nil), f.Tasks...)
+	for i := range fileForSave.Tasks {
+		fileForSave.Tasks[i].Notes = ""
+	}
+
+	data, err := yaml.Marshal(&fileForSave)
 	if err != nil {
 		return err
 	}
@@ -162,7 +168,7 @@ func (f *File) FindTask(id string) (Task, bool) {
 }
 
 func (t Task) ProgressSignature() string {
-	return fmt.Sprintf("%s:%s:%s", t.ID, normalizeStatus(t.Status), strings.TrimSpace(t.Notes))
+	return fmt.Sprintf("%s:%s", t.ID, normalizeStatus(t.Status))
 }
 
 func (t Task) IsTerminal() bool {

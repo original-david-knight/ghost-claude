@@ -9,6 +9,7 @@ import (
 
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
+	"vibedrive/internal/tasknotes"
 )
 
 func (i *Initializer) Restart(ctx context.Context, configPath string) error {
@@ -22,6 +23,11 @@ func (i *Initializer) Restart(ctx context.Context, configPath string) error {
 	}
 
 	currentPlan, err := plan.Load(cfg.PlanFile)
+	if err != nil {
+		return err
+	}
+
+	notesFile, err := tasknotes.Load(tasknotes.Path(cfg.Workspace))
 	if err != nil {
 		return err
 	}
@@ -46,8 +52,8 @@ func (i *Initializer) Restart(ctx context.Context, configPath string) error {
 	}()
 
 	prompts := []string{
-		renderRestartPlanPrompt(cfg, currentPlan, source),
-		renderRestartReviewPrompt(cfg, currentPlan, source),
+		renderRestartPlanPrompt(cfg, currentPlan, notesFile, source),
+		renderRestartReviewPrompt(cfg, currentPlan, notesFile, source),
 	}
 
 	for _, prompt := range prompts {
@@ -64,15 +70,18 @@ func (i *Initializer) Restart(ctx context.Context, configPath string) error {
 	if err := restartedPlan.Save(); err != nil {
 		return err
 	}
+	if err := tasknotes.Remove(tasknotes.Path(cfg.Workspace)); err != nil {
+		return err
+	}
 
 	fmt.Fprintf(i.stdout, "Prepared %s for a fresh restart\n", cfg.PlanFile)
 	return nil
 }
 
-func renderRestartPlanPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) string {
+func renderRestartPlanPrompt(cfg *config.Config, currentPlan *plan.File, notesFile *tasknotes.File, source sourceSpec) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	sourceRefs := renderRestartSourceRefs(cfg.Workspace, source.Files)
-	notesSummary := renderRestartNotesSummary(currentPlan)
+	notesSummary := renderRestartNotesSummary(currentPlan, notesFile)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Restart this project from scratch by revising the existing execution plan.
@@ -103,7 +112,7 @@ Requirements for the revised plan:
 - include explicit checkpoint tasks wherever the requirements call for them
 - strengthen weak or missing verify_commands whenever a deterministic automated check exists
 - for every task, make the last acceptance item instruct the coding agent to leave short notes about what it learned in that phase, including discoveries or plan adjustments that matter if the plan is rerun from a fresh environment
-- after incorporating the prior-run learnings, clear stale task notes from the previous run
+- after incorporating the prior-run learnings, do not copy stale task notes from the previous run into the plan
 - reset every task status to todo so the project can restart from a fresh environment
 - keep valid YAML and quote any string list item that contains a colon followed by a space
 
@@ -111,10 +120,10 @@ After writing %s, quickly check that the YAML parses and that dependency orderin
 `, planRef, sourceRefs, notesSummary, planRef, planRef))
 }
 
-func renderRestartReviewPrompt(cfg *config.Config, currentPlan *plan.File, source sourceSpec) string {
+func renderRestartReviewPrompt(cfg *config.Config, currentPlan *plan.File, notesFile *tasknotes.File, source sourceSpec) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	sourceRefs := renderRestartSourceRefs(cfg.Workspace, source.Files)
-	notesSummary := renderRestartNotesSummary(currentPlan)
+	notesSummary := renderRestartNotesSummary(currentPlan, notesFile)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Review the restarted execution plan in %s.
@@ -136,12 +145,12 @@ Perform a critical review of the restarted plan. Focus on:
 - standalone tech-debt tasks, especially standalone cleanup or test-coverage tasks, that lack an explicit trigger, duplicate routine inline work, or still assume a fixed cadence instead of a risk-based follow-up
 - tasks that do not end by capturing phase learnings for future replanning and fresh reruns
 - statuses that were not reset to todo
-- leftover task notes from the old run that should have been cleared for the fresh restart
+- leftover task notes copied into the plan from the old run
 - omitted or weakened requirements from the source inputs
 
 Incorporate any actionable review feedback directly into %s.
 
-Keep the YAML valid. Keep every task status at todo and leave task notes empty for the fresh restart.
+Keep the YAML valid. Keep every task status at todo and do not write task notes into the plan.
 `, planRef, sourceRefs, notesSummary, planRef))
 }
 
@@ -199,18 +208,42 @@ func renderRestartSourceRefs(workspace string, files []string) string {
 	return renderSourceRefs(workspace, files)
 }
 
-func renderRestartNotesSummary(currentPlan *plan.File) string {
+func renderRestartNotesSummary(currentPlan *plan.File, notesFile *tasknotes.File) string {
 	lines := make([]string, 0, len(currentPlan.Tasks))
+	seen := make(map[string]struct{}, len(currentPlan.Tasks))
 	for _, task := range currentPlan.Tasks {
+		seen[task.ID] = struct{}{}
 		note := strings.TrimSpace(task.Notes)
+		status := task.Status
+		if noteEntry, ok := notesFile.Find(task.ID); ok {
+			note = strings.TrimSpace(noteEntry.Notes)
+			if strings.TrimSpace(noteEntry.Status) != "" {
+				status = noteEntry.Status
+			}
+		}
 		if note == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- %s [%s]: %s", task.ID, task.Status, note))
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s", task.ID, status, note))
+	}
+
+	for _, noteEntry := range notesFile.Tasks {
+		if _, ok := seen[noteEntry.ID]; ok {
+			continue
+		}
+		note := strings.TrimSpace(noteEntry.Notes)
+		if note == "" {
+			continue
+		}
+		status := strings.TrimSpace(noteEntry.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		lines = append(lines, fmt.Sprintf("- %s [%s]: %s", noteEntry.ID, status, note))
 	}
 
 	if len(lines) == 0 {
-		return "- No previous task notes are recorded in the current plan."
+		return "- No previous task notes are recorded."
 	}
 
 	return strings.Join(lines, "\n")

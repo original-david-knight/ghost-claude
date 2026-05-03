@@ -81,7 +81,7 @@ func TestFindNextReadyReturnsNoReadyWhenBlockedByDeps(t *testing.T) {
 	}
 }
 
-func TestSavePersistsUpdatedStatus(t *testing.T) {
+func TestSavePersistsUpdatedStatusWithoutTaskNotes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vibedrive-plan.yaml")
 
@@ -105,8 +105,34 @@ func TestSavePersistsUpdatedStatus(t *testing.T) {
 	if got := loaded.Tasks[0].Status; got != StatusDone {
 		t.Fatalf("expected status %q, got %q", StatusDone, got)
 	}
+	if got := loaded.Tasks[0].Notes; got != "" {
+		t.Fatalf("expected notes to stay out of the plan file, got %q", got)
+	}
+}
+
+func TestLoadReadsLegacyTaskNotes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: first
+    title: First task
+    status: done
+    notes: finished
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
 	if got := loaded.Tasks[0].Notes; got != "finished" {
-		t.Fatalf("expected notes to round-trip, got %q", got)
+		t.Fatalf("expected legacy notes to load, got %q", got)
 	}
 }
 

@@ -1,4 +1,4 @@
-package codexargs
+package codex
 
 func Subcommand(args []string) string {
 	for _, arg := range args {

@@ -12,11 +12,12 @@ import (
 	"time"
 
 	"vibedrive/internal/automation"
-	"vibedrive/internal/claude"
-	codexcli "vibedrive/internal/codex"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/render"
+	"vibedrive/internal/tasknotes"
+	"vibedrive/pkg/agentcli/claude"
+	"vibedrive/pkg/agentcli/codex"
 )
 
 type Runner struct {
@@ -28,7 +29,7 @@ type Runner struct {
 
 	executablePath  string
 	newSession      func(string) (*claude.Session, error)
-	newCodexSession func() (*codexcli.Session, error)
+	newCodexSession func() (*codex.Session, error)
 }
 
 type TemplateData struct {
@@ -37,6 +38,7 @@ type TemplateData struct {
 	Iteration      int
 	SessionID      string
 	TaskResultPath string
+	TaskNotesPath  string
 	ReviewPath     string
 	Workspace      string
 	PlanFile       string
@@ -52,8 +54,8 @@ type claudeClient interface {
 }
 
 type codexClient interface {
-	RunPrompt(ctx context.Context, session *codexcli.Session, prompt string) error
-	Close(session *codexcli.Session) error
+	RunPrompt(ctx context.Context, session *codex.Session, prompt string) error
+	Close(session *codex.Session) error
 	IsFullscreenTUI() bool
 }
 
@@ -71,7 +73,7 @@ func New(cfg *config.Config, stdout, stderr io.Writer) (*Runner, error) {
 		return nil, err
 	}
 
-	codexAgent, err := codexcli.New(
+	codexAgent, err := codex.New(
 		cfg.Codex.Command,
 		cfg.Codex.Args,
 		cfg.Workspace,
@@ -104,8 +106,8 @@ func New(cfg *config.Config, stdout, stderr io.Writer) (*Runner, error) {
 		newSession: func(strategy string) (*claude.Session, error) {
 			return claude.NewSession(strategy)
 		},
-		newCodexSession: func() (*codexcli.Session, error) {
-			return codexcli.NewSession()
+		newCodexSession: func() (*codex.Session, error) {
+			return codex.NewSession()
 		},
 	}, nil
 }
@@ -160,6 +162,7 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			ExecutablePath: r.executablePath,
 			Iteration:      iteration,
 			TaskResultPath: automation.ResultPath(r.cfg.Workspace, task.ID),
+			TaskNotesPath:  tasknotes.Path(r.cfg.Workspace),
 			ReviewPath:     automation.ReviewPath(r.cfg.Workspace, task.ID),
 			Workspace:      r.cfg.Workspace,
 			PlanFile:       r.cfg.PlanFile,
@@ -171,6 +174,12 @@ func (r *Runner) runPlan(ctx context.Context) error {
 		if err := ensurePlanArtifactDirectories(data); err != nil {
 			return err
 		}
+
+		currentNotes, err := tasknotes.Load(data.TaskNotesPath)
+		if err != nil {
+			return err
+		}
+		currentSignature := taskProgressSignature(task, currentNotes)
 
 		if err := r.runSteps(ctx, steps, data); err != nil {
 			return err
@@ -191,12 +200,17 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			return fmt.Errorf("task %q disappeared from %s during iteration %d", task.ID, r.cfg.PlanFile, iteration)
 		}
 
-		if updatedTask.ProgressSignature() == task.ProgressSignature() {
+		nextNotes, err := tasknotes.Load(data.TaskNotesPath)
+		if err != nil {
+			return err
+		}
+
+		if taskProgressSignature(updatedTask, nextNotes) == currentSignature {
 			stalled++
 			if stalled >= r.cfg.MaxStalledIterations {
 				return fmt.Errorf(
 					"iteration %d made no task progress; %q (%s) still has status %q in %s. "+
-						"The workflow must update the selected task's status or notes when work progresses",
+						"The workflow must update the selected task's status or task notes when work progresses",
 					iteration,
 					updatedTask.Title,
 					updatedTask.ID,
@@ -220,16 +234,16 @@ func (r *Runner) createSession() (*claude.Session, error) {
 	return claude.NewSession(r.cfg.Claude.SessionStrategy)
 }
 
-func (r *Runner) createCodexSession() (*codexcli.Session, error) {
+func (r *Runner) createCodexSession() (*codex.Session, error) {
 	if r.newCodexSession != nil {
 		return r.newCodexSession()
 	}
-	return codexcli.NewSession()
+	return codex.NewSession()
 }
 
 func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data TemplateData) error {
 	var sharedSession *claude.Session
-	var sharedCodexSession *codexcli.Session
+	var sharedCodexSession *codex.Session
 	type sessionCloser struct {
 		label string
 		close func() error
@@ -261,7 +275,7 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 			var (
 				target           string
 				session          *claude.Session
-				codexSession     *codexcli.Session
+				codexSession     *codex.Session
 				closeStepSession bool
 				closeCodexStep   bool
 				err              error
@@ -369,7 +383,7 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 	return closeSharedSession(nil)
 }
 
-func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSession *codexcli.Session, step config.Step, data TemplateData) error {
+func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSession *codex.Session, step config.Step, data TemplateData) error {
 	stepCtx := ctx
 	var cancel context.CancelFunc
 	if step.Timeout != "" {
@@ -505,6 +519,14 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 
 func ensurePlanArtifactDirectories(data TemplateData) error {
 	return prepareOutputDirectories([]string{data.TaskResultPath, data.ReviewPath})
+}
+
+func taskProgressSignature(task plan.Task, notesFile *tasknotes.File) string {
+	note := strings.TrimSpace(task.Notes)
+	if noteEntry, ok := notesFile.Find(task.ID); ok {
+		note = strings.TrimSpace(noteEntry.Notes)
+	}
+	return fmt.Sprintf("%s:%s:%s", task.ID, strings.TrimSpace(task.Status), note)
 }
 
 func renderRequiredOutputs(outputs []string, data TemplateData, workspace string) ([]string, error) {

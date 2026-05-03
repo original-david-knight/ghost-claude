@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"vibedrive/internal/claude"
 	"vibedrive/internal/config"
+	"vibedrive/pkg/agentcli/claude"
 )
 
 type fakeClient struct {

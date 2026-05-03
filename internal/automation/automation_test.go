@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"vibedrive/internal/plan"
+	"vibedrive/internal/tasknotes"
 )
 
 func TestFinalizeMarksTaskDoneAndCommitsChanges(t *testing.T) {
@@ -58,8 +59,22 @@ tasks:
 	if task.Status != plan.StatusDone {
 		t.Fatalf("expected task status %q, got %q", plan.StatusDone, task.Status)
 	}
-	if task.Notes != "finished work" {
-		t.Fatalf("expected task notes to round-trip, got %q", task.Notes)
+	if task.Notes != "" {
+		t.Fatalf("expected task notes to stay out of the plan, got %q", task.Notes)
+	}
+	notesFile, err := tasknotes.Load(tasknotes.Path(dir))
+	if err != nil {
+		t.Fatalf("Load task notes returned error: %v", err)
+	}
+	note, ok := notesFile.Find("scaffold")
+	if !ok {
+		t.Fatal("expected task notes entry for scaffold")
+	}
+	if note.Status != plan.StatusDone {
+		t.Fatalf("expected task notes status %q, got %q", plan.StatusDone, note.Status)
+	}
+	if note.Notes != "finished work" {
+		t.Fatalf("expected task notes to round-trip, got %q", note.Notes)
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
@@ -121,8 +136,22 @@ tasks:
 	if task.Status != plan.StatusInProgress {
 		t.Fatalf("expected task status %q, got %q", plan.StatusInProgress, task.Status)
 	}
-	if !strings.Contains(task.Notes, "Verification failed while running") {
-		t.Fatalf("expected verification failure notes, got %q", task.Notes)
+	if task.Notes != "" {
+		t.Fatalf("expected verification failure notes to stay out of the plan, got %q", task.Notes)
+	}
+	notesFile, err := tasknotes.Load(tasknotes.Path(dir))
+	if err != nil {
+		t.Fatalf("Load task notes returned error: %v", err)
+	}
+	note, ok := notesFile.Find("scaffold")
+	if !ok {
+		t.Fatal("expected task notes entry for scaffold")
+	}
+	if note.Status != plan.StatusInProgress {
+		t.Fatalf("expected task notes status %q, got %q", plan.StatusInProgress, note.Status)
+	}
+	if !strings.Contains(note.Notes, "Verification failed while running") {
+		t.Fatalf("expected verification failure notes, got %q", note.Notes)
 	}
 	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
 		t.Fatalf("expected result file to be removed, stat err=%v", err)
@@ -132,6 +161,71 @@ tasks:
 	}
 	if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err == nil {
 		t.Fatal("expected no commit to be created when verification fails")
+	}
+}
+
+func TestFinalizeMigratesLegacyPlanNotesToTaskNotesFile(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	writeFile(t, filepath.Join(dir, "README.md"), "hello\n")
+	writeFile(t, planPath, `project:
+  name: demo
+tasks:
+  - id: old-task
+    title: Old task
+    status: done
+    notes: keep this prior note
+  - id: current-task
+    title: Current task
+    status: todo
+`)
+
+	resultPath := ResultPath(dir, "current-task")
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	writeFile(t, resultPath, `{"status":"in_progress","notes":"current note"}`)
+
+	err := Finalize(context.Background(), FinalizeOptions{
+		Workspace:     dir,
+		PlanFile:      planPath,
+		TaskID:        "current-task",
+		ResultPath:    resultPath,
+		CommitMessage: "chore: record progress",
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("Finalize returned error: %v", err)
+	}
+
+	loaded, err := plan.Load(planPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	for _, task := range loaded.Tasks {
+		if task.Notes != "" {
+			t.Fatalf("expected task %q notes to stay out of the plan, got %q", task.ID, task.Notes)
+		}
+	}
+
+	notesFile, err := tasknotes.Load(tasknotes.Path(dir))
+	if err != nil {
+		t.Fatalf("Load task notes returned error: %v", err)
+	}
+	oldNote, ok := notesFile.Find("old-task")
+	if !ok {
+		t.Fatal("expected legacy note entry for old-task")
+	}
+	if oldNote.Notes != "keep this prior note" {
+		t.Fatalf("expected legacy note to be migrated, got %q", oldNote.Notes)
+	}
+	currentNote, ok := notesFile.Find("current-task")
+	if !ok {
+		t.Fatal("expected note entry for current-task")
+	}
+	if currentNote.Notes != "current note" {
+		t.Fatalf("expected current note, got %q", currentNote.Notes)
 	}
 }
 

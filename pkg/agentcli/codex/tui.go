@@ -1,19 +1,20 @@
-package claude
+package codex
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"vibedrive/internal/ptyrunner"
+	"vibedrive/pkg/ptyrunner"
 )
 
 const (
-	exitCommand         = "/exit\r"
-	visibleTextMaxBytes = 1024
+	exitByte            = "\x04"
 	closeTimeout        = 5 * time.Second
 	statePollInterval   = 50 * time.Millisecond
 	submitKeyDelay      = 100 * time.Millisecond
@@ -21,35 +22,32 @@ const (
 	submitMaxAttempts   = 3
 )
 
+var errTUIPromptNotAccepted = errors.New("codex tui did not start processing")
+
 type tuiSession struct {
 	pty     *ptyrunner.Session
 	monitor *titleMonitor
 }
 
 type titleMonitor struct {
-	mu                  sync.Mutex
-	parser              ptyrunner.TitleParser
-	text                visibleTextParser
-	idleTransitions     int
-	busyTransitions     int
-	trustPrompts        int
-	trustPromptDetected bool
+	mu              sync.Mutex
+	idleTitle       string
+	parser          ptyrunner.TitleParser
+	idleTransitions int
+	busyTransitions int
+	currentState    string
 }
 
 type titleSnapshot struct {
 	idleTransitions int
 	busyTransitions int
-	trustPrompts    int
-}
-
-type visibleTextParser struct {
-	recent string
+	currentState    string
 }
 
 func (c *Client) startTUI(ctx context.Context) (*tuiSession, error) {
-	monitor := &titleMonitor{}
+	monitor := newTitleMonitor(c.workdir)
 	ptySession, err := ptyrunner.Start(ctx, ptyrunner.Config{
-		Label:   "claude tui",
+		Label:   "codex tui",
 		Command: c.command,
 		Args:    c.args,
 		Workdir: c.workdir,
@@ -81,24 +79,20 @@ func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 
 	normalized := ptyrunner.NormalizePrompt(prompt)
 	if normalized == "" {
-		return fmt.Errorf("claude tui prompt is empty after normalization")
+		return fmt.Errorf("codex tui prompt is empty after normalization")
 	}
 
-	if _, err := io.WriteString(s.pty, normalized); err != nil {
-		return fmt.Errorf("write prompt to claude tui: %w", err)
+	if err := ptyrunner.WriteBracketedPaste(s.pty, normalized); err != nil {
+		return fmt.Errorf("write prompt to codex tui: %w", err)
 	}
 	if err := ptyrunner.Sleep(ctx, submitKeyDelay); err != nil {
 		return err
 	}
 
-	// Press Enter and wait briefly for Claude to start processing. If it
-	// doesn't, the Enter likely got eaten by paste-bracketing or composer
-	// state — retry a small number of times before giving up so we never
-	// hang forever on a silently-dropped submit.
 	submitted := false
 	for range submitMaxAttempts {
 		if _, err := io.WriteString(s.pty, "\r"); err != nil {
-			return fmt.Errorf("submit prompt to claude tui: %w", err)
+			return fmt.Errorf("submit prompt to codex tui: %w", err)
 		}
 		busy, err := s.waitForBusyTransition(ctx, snapshot.busyTransitions, submitRetryInterval)
 		if err != nil {
@@ -110,23 +104,20 @@ func (s *tuiSession) SendPrompt(ctx context.Context, prompt string) error {
 		}
 	}
 	if !submitted {
-		return fmt.Errorf("claude tui did not start processing after %d enter presses", submitMaxAttempts)
+		return fmt.Errorf("%w after %d enter presses", errTUIPromptNotAccepted, submitMaxAttempts)
 	}
 
 	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
-		return fmt.Errorf("wait for claude tui to become idle: %w", err)
+		return fmt.Errorf("wait for codex tui to become idle: %w", err)
 	}
 
 	return nil
 }
 
 func (s *tuiSession) Close() error {
-	return s.pty.Close(exitCommand, closeTimeout)
+	return s.pty.Close(exitByte, closeTimeout)
 }
 
-// waitForBusyTransition polls the title monitor until Claude transitions to a
-// busy state (indicating it accepted our submit) or the timeout elapses.
-// Returns (false, nil) on timeout — the caller decides whether to retry.
 func (s *tuiSession) waitForBusyTransition(ctx context.Context, busyStart int, timeout time.Duration) (bool, error) {
 	deadline := time.Now().Add(timeout)
 	ticker := time.NewTicker(statePollInterval)
@@ -146,9 +137,9 @@ func (s *tuiSession) waitForBusyTransition(ctx context.Context, busyStart int, t
 			return false, ctx.Err()
 		case <-s.pty.Done():
 			if err := s.pty.ExitErr(); err != nil {
-				return false, fmt.Errorf("claude tui exited: %w", err)
+				return false, fmt.Errorf("codex tui exited: %w", err)
 			}
-			return false, fmt.Errorf("claude tui exited unexpectedly")
+			return false, fmt.Errorf("codex tui exited unexpectedly")
 		case <-ticker.C:
 		}
 	}
@@ -169,9 +160,9 @@ func (s *tuiSession) waitForIdleTransition(ctx context.Context, idleStart, busyS
 			return ctx.Err()
 		case <-s.pty.Done():
 			if err := s.pty.ExitErr(); err != nil {
-				return fmt.Errorf("claude tui exited: %w", err)
+				return fmt.Errorf("codex tui exited: %w", err)
 			}
-			return fmt.Errorf("claude tui exited unexpectedly")
+			return fmt.Errorf("codex tui exited unexpectedly")
 		case <-ticker.C:
 		}
 	}
@@ -181,18 +172,10 @@ func (s *tuiSession) completeStartup(ctx context.Context) error {
 	ticker := time.NewTicker(statePollInterval)
 	defer ticker.Stop()
 
-	handledTrustPrompts := 0
-
 	for {
 		snapshot := s.monitor.snapshot()
-		if snapshot.idleTransitions > 0 {
+		if snapshot.readyForPrompt() {
 			return nil
-		}
-		if snapshot.trustPrompts > handledTrustPrompts {
-			if _, err := io.WriteString(s.pty, "\r"); err != nil {
-				return fmt.Errorf("confirm claude trust dialog: %w", err)
-			}
-			handledTrustPrompts = snapshot.trustPrompts
 		}
 
 		select {
@@ -200,36 +183,43 @@ func (s *tuiSession) completeStartup(ctx context.Context) error {
 			return ctx.Err()
 		case <-s.pty.Done():
 			if err := s.pty.ExitErr(); err != nil {
-				return fmt.Errorf("claude tui exited: %w", err)
+				return fmt.Errorf("codex tui exited: %w", err)
 			}
-			return fmt.Errorf("claude tui exited unexpectedly")
+			return fmt.Errorf("codex tui exited unexpectedly")
 		case <-ticker.C:
 		}
 	}
 }
 
+func newTitleMonitor(workdir string) *titleMonitor {
+	idleTitle := filepath.Base(filepath.Clean(workdir))
+	if idleTitle == "." || idleTitle == string(filepath.Separator) || idleTitle == "" {
+		idleTitle = "codex"
+	}
+
+	return &titleMonitor{idleTitle: idleTitle}
+}
+
 func (m *titleMonitor) Consume(chunk []byte) {
+	m.consume(chunk)
+}
+
+func (m *titleMonitor) consume(chunk []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, title := range m.parser.Consume(chunk) {
-		state, ok := classifyTitle(title)
+		state, ok := m.classifyTitle(title)
 		if !ok {
 			continue
 		}
+		m.currentState = state
 		if state == "idle" {
 			m.idleTransitions++
 		} else {
 			m.busyTransitions++
 		}
 	}
-
-	recentVisible := m.text.consume(chunk)
-	trustDetected := strings.Contains(recentVisible, "yesitrustthisfolder")
-	if trustDetected && !m.trustPromptDetected {
-		m.trustPrompts++
-	}
-	m.trustPromptDetected = trustDetected
 }
 
 func (m *titleMonitor) snapshot() titleSnapshot {
@@ -239,25 +229,21 @@ func (m *titleMonitor) snapshot() titleSnapshot {
 	return titleSnapshot{
 		idleTransitions: m.idleTransitions,
 		busyTransitions: m.busyTransitions,
-		trustPrompts:    m.trustPrompts,
+		currentState:    m.currentState,
 	}
 }
 
-func classifyTitle(title string) (string, bool) {
+func (s titleSnapshot) readyForPrompt() bool {
+	return s.currentState == "idle" && s.busyTransitions > 0
+}
+
+func (m *titleMonitor) classifyTitle(title string) (string, bool) {
 	trimmed := strings.TrimSpace(title)
 	if trimmed == "" {
 		return "", false
 	}
-	if strings.HasPrefix(trimmed, "✳ ") {
+	if trimmed == m.idleTitle {
 		return "idle", true
 	}
 	return "busy", true
-}
-
-func (p *visibleTextParser) consume(chunk []byte) string {
-	p.recent += ptyrunner.CompactVisibleText(chunk)
-	if len(p.recent) > visibleTextMaxBytes {
-		p.recent = p.recent[len(p.recent)-visibleTextMaxBytes:]
-	}
-	return p.recent
 }

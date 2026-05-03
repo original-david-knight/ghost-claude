@@ -9,10 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	"vibedrive/internal/claude"
-	codexcli "vibedrive/internal/codex"
 	"vibedrive/internal/config"
 	"vibedrive/internal/scaffold"
+	"vibedrive/pkg/agentcli/claude"
+	"vibedrive/pkg/agentcli/codex"
 )
 
 type Initializer struct {
@@ -35,8 +35,8 @@ type promptClient interface {
 }
 
 type codexPromptClient interface {
-	RunPrompt(ctx context.Context, session *codexcli.Session, prompt string) error
-	Close(session *codexcli.Session) error
+	RunPrompt(ctx context.Context, session *codex.Session, prompt string) error
+	Close(session *codex.Session) error
 }
 
 type claudeBootstrapPlanner struct {
@@ -54,7 +54,7 @@ func (p *claudeBootstrapPlanner) Close() error {
 
 type codexBootstrapPlanner struct {
 	client  codexPromptClient
-	session *codexcli.Session
+	session *codex.Session
 }
 
 func (p *codexBootstrapPlanner) RunPrompt(ctx context.Context, prompt string) error {
@@ -119,7 +119,7 @@ func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.W
 
 		return &claudeBootstrapPlanner{client: client, session: session}, nil
 	case config.AgentCodex:
-		client, err := codexcli.New(
+		client, err := codex.New(
 			cfg.Codex.Command,
 			cfg.Codex.Args,
 			cfg.Workspace,
@@ -132,7 +132,7 @@ func newBootstrapPlanner(cfg *config.Config, planner string, stdout, stderr io.W
 			return nil, err
 		}
 
-		session, err := codexcli.NewSession()
+		session, err := codex.NewSession()
 		if err != nil {
 			return nil, err
 		}
