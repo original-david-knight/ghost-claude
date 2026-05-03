@@ -1,0 +1,1 @@
+Added internal/create with hidden workspace state persisted at .vibedrive/create-state.json and seven compiled create prompts. State writes only last_stage, missing reads return empty state, and prompt tests encode the stage-specific design constraints. go build ./... and go test ./... pass.

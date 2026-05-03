@@ -6,12 +6,37 @@ project:
     - TEST_PLAN.md
   constraint_files:
     - DESIGN.md
+  components:
+    - id: plan-schema
+      name: Plan schema and validation
+      owned_paths:
+        - internal/plan/**
+      reads_contracts:
+        - README.md
+      provides_contracts:
+        - internal/plan/plan.go
+    - id: docs
+      name: User-facing documentation and examples
+      owned_paths:
+        - README.md
+        - vibedrive-plan.example.yaml
+      reads_contracts:
+        - internal/plan/plan.go
 
 tasks:
   - id: bootstrap
     title: Replace this sample task with a real project task
     workflow: implement
     status: todo
+    component: plan-schema
+    owns_paths:
+      - internal/plan/**
+    reads_contracts:
+      - README.md
+    provides_contracts:
+      - internal/plan/plan.go
+    conflicts_with:
+      - checkpoint-1
     details: >-
       Describe the goal, relevant files, and any important constraints the agent
       should keep in mind while implementing this task. Keep routine testing and
@@ -24,7 +49,7 @@ tasks:
       - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
     verify_commands:
       - go test ./...
-    commit_message: feat: replace the sample bootstrap task
+    commit_message: "feat: replace the sample bootstrap task"
 
   - id: checkpoint-1
     title: Replace this sample checkpoint with a real verification gate
@@ -32,9 +57,15 @@ tasks:
     status: todo
     deps:
       - bootstrap
+    component: docs
+    owns_paths:
+      - README.md
+      - vibedrive-plan.example.yaml
+    reads_contracts:
+      - internal/plan/plan.go
     acceptance:
       - Define the full-suite or milestone gate here.
       - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
     verify_commands:
       - go test ./...
-    commit_message: chore: record the first project checkpoint
+    commit_message: "chore: record the first project checkpoint"

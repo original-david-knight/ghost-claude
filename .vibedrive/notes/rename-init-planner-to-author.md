@@ -1,0 +1,1 @@
+Renamed init planner terminology to author with codex as the default; --planner is intentionally unregistered and rejected. Source selection behavior was left unchanged. Verified go build ./... and go test ./... pass, and help/README omit --planner.

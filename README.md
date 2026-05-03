@@ -308,6 +308,17 @@ The intended use is:
 | `objective`        | One-sentence statement of what the repository is trying to ship.        |
 | `source_docs`      | Requirements/design inputs the plan was derived from.                   |
 | `constraint_files` | Subset of source docs that define hard requirements, gates, or limits.  |
+| `components`       | Optional component catalog with repo-relative ownership and contract metadata. |
+
+### Component fields
+
+| Field                 | Meaning                                                                 |
+| --------------------- | ----------------------------------------------------------------------- |
+| `id`                  | Required stable component ID. Tasks may refer to this value.            |
+| `name`                | Optional human-readable component name.                                 |
+| `owned_paths`         | Optional repo-relative path globs owned by this component.              |
+| `reads_contracts`     | Optional repo-relative contract files this component consumes.          |
+| `provides_contracts`  | Optional repo-relative contract files this component provides or owns.  |
 
 ### Task fields
 
@@ -321,6 +332,11 @@ The intended use is:
 | `kind`            | Optional planning metadata. Stored in the plan, but not interpreted by the runner today. |
 | `deps`            | Optional list of task IDs that must be `done` before this task is ready.                |
 | `context_files`   | Optional repo-relative files the task should pay attention to.                          |
+| `component`       | Optional component ID for this task. If a component catalog exists, the ID must be declared there. |
+| `owns_paths`      | Optional repo-relative path globs the task is allowed to edit.                          |
+| `reads_contracts` | Optional repo-relative contract files the task consumes.                                |
+| `provides_contracts` | Optional repo-relative contract files the task creates, updates, or owns.            |
+| `conflicts_with`  | Optional task IDs that explicitly conflict with this task for parallel execution. The serial runner does not use this field for ready-task selection. |
 | `acceptance`      | Optional acceptance criteria for the task.                                              |
 | `verify_commands` | Optional shell commands run by `task finalize` before a `done` task stays `done`; if those commands need new tooling, the plan should include that instrumentation work first. |
 | `commit_message`  | Optional commit message used by the default finalizer workflow.                          |

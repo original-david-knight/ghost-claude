@@ -1,0 +1,199 @@
+project:
+    name: parallel-boundary-planning
+    objective: Teach Vibedrive to decompose projects into loosely coupled, interface-bound components so independent agents can work with smaller, well-defined context.
+    source_docs:
+        - README.md
+        - vibedrive-plan.example.yaml
+    constraint_files:
+        - README.md
+tasks:
+    - id: schema-component-contract-metadata
+      title: Add component and interface metadata to the plan schema
+      details: Extend the plan model so generated plans can describe component ownership, editable path boundaries, provided contracts, consumed contracts, and explicit task conflicts without relying on free-form details text. Keep the initial fields backward compatible with existing plans, and make sure unknown or omitted metadata does not break current serial execution. Focus on internal/plan first, then update examples only as needed for the new fields to be discoverable.
+      status: done
+      workflow: implement
+      context_files:
+        - internal/plan/plan.go
+        - internal/plan/plan_test.go
+        - vibedrive-plan.example.yaml
+        - README.md
+      acceptance:
+        - Plan YAML can declare project components with owned path globs and provided or consumed contract files.
+        - Tasks can declare component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata.
+        - Existing minimal plans and current example plans still load, validate, and save correctly.
+        - Unit tests cover backward compatibility, duplicate component IDs, unknown task dependencies, and malformed ownership metadata.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/plan
+      commit_message: 'feat: add plan boundary metadata'
+    - id: boundary-aware-plan-prompts
+      title: Make init and restart planning prompt for bounded parallel work
+      details: Update bootstrap and restart planning prompts so authors first identify components, interfaces, owned paths, shared contracts, and integration checkpoints before writing executable tasks. The objective is context reduction, not merely speed. Prompts should ask for tasks that can be assigned with narrow read context and explicit edit authority. Critic prompts should reject tasks that are cross-cutting without a preceding contract or foundation task.
+      status: todo
+      workflow: implement
+      deps:
+        - schema-component-contract-metadata
+      context_files:
+        - internal/bootstrap/bootstrap.go
+        - internal/bootstrap/bootstrap_test.go
+        - internal/plan/restart.go
+        - internal/plan/restart_test.go
+        - internal/scaffold/scaffold.go
+        - internal/scaffold/scaffold_test.go
+        - README.md
+      acceptance:
+        - Init plan authoring prompts require component, ownership, contract, and integration-boundary analysis before task generation.
+        - Critic prompts check for weak decomposition, excessive context requirements, missing interfaces, ambiguous ownership, and unsafe parallel assumptions.
+        - Restart prompts preserve useful prior task notes while regenerating boundaries from current source docs and observed learnings.
+        - Scaffolded task prompts tell agents to respect declared owns_paths and contract metadata when present.
+        - Tests assert that generated prompts include the new boundary and context-reduction requirements.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/bootstrap ./internal/plan ./internal/scaffold
+      commit_message: 'feat: prompt for bounded parallel task decomposition'
+    - id: plan-parallel-readiness-analysis
+      title: Add plan analysis for safe parallel task batches
+      details: Add pure plan-level analysis that reports which ready tasks can run in the same batch and why other ready tasks must remain serial. Conflict checks should account for dependency status, overlapping owns_paths, explicit conflicts_with, shared contract writers, and tasks that lack enough ownership metadata. Keep this independent from agent execution so it can be tested deterministically before any runner concurrency is introduced.
+      status: todo
+      workflow: implement
+      deps:
+        - schema-component-contract-metadata
+      context_files:
+        - internal/plan/plan.go
+        - internal/plan/plan_test.go
+        - cmd/vibedrive/main.go
+        - cmd/vibedrive/main_test.go
+        - README.md
+      acceptance:
+        - Plan code exposes a deterministic ready-batch selection API that can return up to a requested limit.
+        - Batch selection never groups tasks with overlapping edit ownership, contract writer conflicts, explicit conflicts, or unmet dependencies.
+        - Analysis can explain non-selected ready tasks with short machine-readable or human-readable reasons.
+        - A lightweight CLI surface or dry-run output lets users inspect parallel readiness without launching agents.
+        - Unit tests cover independent tasks, dependency-blocked tasks, ownership conflicts, contract conflicts, and missing metadata fallback behavior.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/plan ./cmd/vibedrive
+      commit_message: 'feat: analyze parallel-ready plan tasks'
+    - id: parallel-runner-isolation-design
+      title: Introduce isolated worktree execution design in config and runner scaffolding
+      details: Add the configuration and runner structure needed for parallel task execution while keeping default behavior serial. Parallel execution should be opt-in, bounded by a max parallelism setting, and designed around isolated git worktrees or equivalent separate working directories. This task should establish the config model, validation, worktree naming, artifact path strategy, and tests without needing to complete full concurrent agent orchestration yet.
+      status: todo
+      workflow: implement
+      deps:
+        - plan-parallel-readiness-analysis
+      context_files:
+        - internal/config/config.go
+        - internal/config/config_test.go
+        - internal/runner/runner.go
+        - internal/runner/runner_test.go
+        - internal/automation/automation.go
+        - internal/automation/automation_test.go
+        - README.md
+      acceptance:
+        - Config supports an opt-in parallelism setting while preserving the current default serial run behavior.
+        - Runner code has a tested abstraction for per-task isolated workspace paths and artifact paths.
+        - Worktree or workspace naming is deterministic, collision-resistant enough for repeated runs, and cleaned up only when safe.
+        - Tests cover default serial config, invalid parallelism values, and isolated artifact path generation.
+        - No concurrent agent execution is enabled until merge and finalize behavior is implemented.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/config ./internal/runner ./internal/automation
+      commit_message: 'feat: scaffold isolated parallel runner configuration'
+    - id: parallel-batch-execution
+      title: Execute independent ready tasks in isolated parallel workers
+      details: Implement the first working parallel execution path. When parallelism is enabled, the runner should select a safe ready batch, prepare isolated workspaces, run each task's workflow independently, and collect task results without letting workers share a mutable plan file, task notes file, git index, or uncommitted worktree. Preserve serial execution as the default and fallback path.
+      status: todo
+      workflow: implement
+      deps:
+        - boundary-aware-plan-prompts
+        - parallel-runner-isolation-design
+      context_files:
+        - internal/runner/runner.go
+        - internal/runner/runner_test.go
+        - internal/tasknotes/tasknotes.go
+        - internal/tasknotes/tasknotes_test.go
+        - internal/automation/automation.go
+        - internal/config/config.go
+        - pkg/agentcli/codex/codex.go
+        - pkg/agentcli/claude/client.go
+      acceptance:
+        - With parallelism disabled or set to one, runner behavior remains equivalent to the current serial loop.
+        - With parallelism greater than one, only tasks selected by the ready-batch analysis can run concurrently.
+        - Each parallel task receives a workspace, result path, review path, and task notes path that cannot conflict with sibling tasks.
+        - Worker failures are reported without corrupting the root plan file or sibling task results.
+        - Tests use fake agents or exec steps to prove concurrent independent tasks run and conflicting tasks remain serial.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/runner ./internal/plan ./internal/tasknotes ./internal/automation
+      commit_message: 'feat: run safe task batches in parallel'
+    - id: parallel-merge-and-finalize
+      title: Merge parallel worker results back through deterministic finalization
+      details: Complete the integration path for parallel task results. The root runner should merge or apply each successful worker result in a deterministic order, run that task's configured verification, update the canonical plan and task notes, and commit each completed task. Merge conflicts or failed verification should mark only the affected task for follow-up while preserving completed sibling work.
+      status: todo
+      workflow: implement
+      deps:
+        - parallel-batch-execution
+      context_files:
+        - internal/runner/runner.go
+        - internal/runner/runner_test.go
+        - internal/tasknotes/tasknotes.go
+        - internal/tasknotes/tasknotes_test.go
+        - cmd/vibedrive/main.go
+        - cmd/vibedrive/main_test.go
+        - README.md
+      acceptance:
+        - Successful parallel workers are integrated into the root workspace in a deterministic order.
+        - Each integrated task runs its own verify_commands before the canonical plan records it as done.
+        - Merge conflicts, verification failures, and blocked worker results affect only the relevant task status and notes.
+        - The runner avoids staging transient review artifacts or isolated workspace internals.
+        - Tests cover successful multi-task integration, one worker failure, one merge conflict, and one verification failure.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/runner ./internal/tasknotes ./cmd/vibedrive
+      commit_message: 'feat: finalize parallel worker results deterministically'
+    - id: docs-and-examples-parallel-boundaries
+      title: Document boundary-first planning and parallel execution
+      details: Update user-facing docs and examples to explain how Vibedrive uses components, contracts, owned paths, and conflicts to reduce per-agent context. Documentation should make clear that parallel execution is an outcome of explicit boundaries, not a blanket speed setting. Include examples for serial fallback, boundary analysis, safe parallel batches, and checkpoint placement after integration.
+      status: todo
+      workflow: implement
+      deps:
+        - parallel-merge-and-finalize
+      context_files:
+        - README.md
+        - vibedrive.example.yaml
+        - vibedrive-plan.example.yaml
+        - internal/scaffold/scaffold.go
+        - internal/scaffold/scaffold_test.go
+      acceptance:
+        - README documents the new plan metadata fields and the parallelism configuration.
+        - Examples show component ownership, contract files, task-owned paths, and an integration checkpoint.
+        - Documentation explains how to inspect why tasks are or are not parallel-ready.
+        - Scaffold output reflects the new defaults and keeps serial execution as the default.
+        - Tests verify scaffolded config and example plan content where existing test patterns support it.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./internal/scaffold ./internal/config ./internal/plan
+      commit_message: 'docs: explain boundary-first parallel planning'
+    - id: parallel-boundary-checkpoint
+      title: Run full checkpoint for boundary-first parallel planning
+      details: Run the full repository verification after the schema, prompts, analysis, parallel execution, merge/finalize, docs, and examples are complete. Fix any regressions found by the full suite. Pay particular attention to preserving existing serial behavior for users who do not opt into parallel execution.
+      status: todo
+      workflow: checkpoint
+      deps:
+        - docs-and-examples-parallel-boundaries
+      context_files:
+        - README.md
+        - internal/plan/plan.go
+        - internal/runner/runner.go
+        - internal/config/config.go
+        - internal/bootstrap/bootstrap.go
+        - internal/scaffold/scaffold.go
+      acceptance:
+        - Full repository tests pass.
+        - Existing documented serial workflow still works with old plans.
+        - New parallel-readiness analysis and opt-in parallel execution are covered by focused tests.
+        - Documentation and examples match the implemented schema and config names.
+        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+      verify_commands:
+        - go test ./...
+      commit_message: 'chore: verify boundary-first parallel planning'

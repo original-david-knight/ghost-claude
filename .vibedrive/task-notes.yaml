@@ -1,0 +1,4 @@
+tasks:
+    - id: schema-component-contract-metadata
+      status: done
+      notes: Added project.components plus task boundary metadata with validation that preserves serial readiness. The example plan needed quoted colon-containing commit messages to load in tests; keep that fix if regenerating from scratch.
