@@ -20,3 +20,6 @@ tasks:
     - id: docs-and-examples-parallel-boundaries
       status: done
       notes: Documented boundary-first planning, ready-batch inspection, and opt-in parallel config. Scaffold defaults now explicitly keep serial execution; go test ./... passed.
+    - id: parallel-boundary-checkpoint
+      status: done
+      notes: Full uncached go test -count=1 ./... passed. No regressions found; serial defaults remain opt-in-safe, and boundary analysis/parallel execution/docs are covered. Fresh reruns should keep artifact_root/worktree_root docs, examples, scaffold, and config tests aligned.

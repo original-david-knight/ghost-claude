@@ -177,7 +177,7 @@ tasks:
     - id: parallel-boundary-checkpoint
       title: Run full checkpoint for boundary-first parallel planning
       details: Run the full repository verification after the schema, prompts, analysis, parallel execution, merge/finalize, docs, and examples are complete. Fix any regressions found by the full suite. Pay particular attention to preserving existing serial behavior for users who do not opt into parallel execution.
-      status: todo
+      status: done
       workflow: checkpoint
       deps:
         - docs-and-examples-parallel-boundaries
