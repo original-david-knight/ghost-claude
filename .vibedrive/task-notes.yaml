@@ -11,3 +11,6 @@ tasks:
     - id: parallel-runner-isolation-design
       status: done
       notes: Added opt-in parallel config and isolated workspace/artifact path scaffolding while runner execution remains serial. Future reruns should build concurrent orchestration on taskExecutionPaths and implement merge/finalize before enabling parallel agents.
+    - id: parallel-batch-execution
+      status: done
+      notes: Implemented isolated parallel ready-batch execution with per-task workspaces/artifacts, worker failure reporting, serial fallback for unsafe batches, and tests. Merge/finalize remains the next integration phase.

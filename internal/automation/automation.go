@@ -100,7 +100,10 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 	}
 	result.Status = status
 
-	notesFile, err := loadTaskNotes(opts.Workspace, file)
+	notesPath := taskNotesPathForResult(opts.Workspace, opts.ResultPath)
+	reviewPath := reviewPathForResult(opts.Workspace, opts.ResultPath, opts.TaskID)
+
+	notesFile, err := loadTaskNotes(notesPath, file)
 	if err != nil {
 		return err
 	}
@@ -119,7 +122,7 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 			if err := removeResultFile(opts.ResultPath); err != nil {
 				return err
 			}
-			if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
+			if err := removeArtifactFile(reviewPath); err != nil {
 				return err
 			}
 			if err := notesFile.Save(); err != nil {
@@ -144,7 +147,7 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 	if err := removeResultFile(opts.ResultPath); err != nil {
 		return err
 	}
-	if err := removeArtifactFile(ReviewPath(opts.Workspace, opts.TaskID)); err != nil {
+	if err := removeArtifactFile(reviewPath); err != nil {
 		return err
 	}
 	if err := notesFile.Save(); err != nil {
@@ -202,8 +205,8 @@ func applyResult(file *plan.File, taskID string, result TaskResult) error {
 	return fmt.Errorf("task %q not found in %s", taskID, file.Path)
 }
 
-func loadTaskNotes(workspace string, file *plan.File) (*tasknotes.File, error) {
-	notesFile, err := tasknotes.Load(tasknotes.Path(workspace))
+func loadTaskNotes(path string, file *plan.File) (*tasknotes.File, error) {
+	notesFile, err := tasknotes.Load(path)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +225,22 @@ func loadTaskNotes(workspace string, file *plan.File) (*tasknotes.File, error) {
 	}
 
 	return notesFile, nil
+}
+
+func taskNotesPathForResult(workspace, resultPath string) string {
+	return filepath.Join(artifactRootForResult(workspace, resultPath), "task-notes.yaml")
+}
+
+func reviewPathForResult(workspace, resultPath, taskID string) string {
+	return artifactPath(artifactRootForResult(workspace, resultPath), "reviews", taskID, ".json")
+}
+
+func artifactRootForResult(workspace, resultPath string) string {
+	resultPath = strings.TrimSpace(resultPath)
+	if resultPath == "" {
+		return filepath.Join(cleanPathDefault(workspace, "."), ".vibedrive")
+	}
+	return filepath.Clean(filepath.Dir(filepath.Dir(resultPath)))
 }
 
 func runVerifyCommands(ctx context.Context, workspace string, commands []string, stdout, stderr io.Writer) (string, error) {

@@ -229,6 +229,61 @@ tasks:
 	}
 }
 
+func TestFinalizeUsesArtifactRootBesideIsolatedResultPath(t *testing.T) {
+	dir := t.TempDir()
+	workspace := filepath.Join(dir, "worker")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	initGitRepo(t, workspace)
+
+	planPath := filepath.Join(workspace, "vibedrive-plan.yaml")
+	writeFile(t, filepath.Join(workspace, "README.md"), "hello\n")
+	writeFile(t, planPath, `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    status: todo
+`)
+
+	paths := IsolatedArtifactPaths(filepath.Join(dir, "artifacts", "001-scaffold"), "scaffold")
+	writeFile(t, paths.ResultPath, `{"status":"done","notes":"isolated work finished"}`)
+	writeFile(t, paths.ReviewPath, `{"decision":"approved","summary":"looks good","findings":[]}`)
+
+	err := Finalize(context.Background(), FinalizeOptions{
+		Workspace:     workspace,
+		PlanFile:      planPath,
+		TaskID:        "scaffold",
+		ResultPath:    paths.ResultPath,
+		CommitMessage: "feat: finish scaffold",
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("Finalize returned error: %v", err)
+	}
+
+	notesFile, err := tasknotes.Load(paths.TaskNotesPath)
+	if err != nil {
+		t.Fatalf("Load isolated task notes returned error: %v", err)
+	}
+	note, ok := notesFile.Find("scaffold")
+	if !ok {
+		t.Fatal("expected isolated task notes entry for scaffold")
+	}
+	if note.Notes != "isolated work finished" {
+		t.Fatalf("expected isolated notes to be saved beside result path, got %q", note.Notes)
+	}
+	if _, err := os.Stat(paths.ResultPath); !os.IsNotExist(err) {
+		t.Fatalf("expected isolated result file to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(paths.ReviewPath); !os.IsNotExist(err) {
+		t.Fatalf("expected isolated review file to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(tasknotes.Path(workspace)); !os.IsNotExist(err) {
+		t.Fatalf("expected workspace task notes path to stay unused, stat err=%v", err)
+	}
+}
+
 func TestWorkspaceArtifactPathsPreserveCurrentLocations(t *testing.T) {
 	dir := t.TempDir()
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -550,7 +551,133 @@ func TestCleanupTaskExecutionPathsRemovesOnlyOwnedChildren(t *testing.T) {
 	}
 }
 
-func TestRunKeepsConfiguredParallelismSerialUntilOrchestrationExists(t *testing.T) {
+func TestRunExecutesIndependentReadyBatchInParallelWithIsolatedPaths(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	trackDir := filepath.Join(dir, "parallel-track")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: todo
+    owns_paths:
+      - internal/api/**
+  - id: ui
+    title: UI
+    workflow: implement
+    status: todo
+    owns_paths:
+      - web/ui/**
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	script := `set -eu
+track_dir=` + strconv.Quote(trackDir) + `
+mkdir -p "$track_dir"
+touch "$track_dir/{{ .Task.ID }}.started"
+while [ ! -f "$track_dir/api.started" ] || [ ! -f "$track_dir/ui.started" ]; do
+  sleep 0.01
+done
+printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
+printf 'workspace={{ .Workspace }}\nplan={{ .PlanFile }}\nnotes={{ .TaskNotesPath }}\nreview={{ .ReviewPath }}\n' > "{{ .ReviewPath }}"
+printf 'tasks:\n  - id: {{ .Task.ID }}\n    status: done\n    notes: isolated note\n' > "{{ .TaskNotesPath }}"
+`
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 2,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "execute",
+						Type:            config.StepTypeExec,
+						Command:         []string{"sh", "-c", script},
+						RequiredOutputs: []string{"{{ .TaskResultPath }}", "{{ .ReviewPath }}"},
+						Timeout:         "2s",
+					},
+				},
+			},
+		},
+	}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	apiPaths := taskExecutionPaths(cfg, "api", 1, true)
+	uiPaths := taskExecutionPaths(cfg, "ui", 1, true)
+	if apiPaths.Workspace == uiPaths.Workspace {
+		t.Fatalf("expected distinct worker workspaces, both were %q", apiPaths.Workspace)
+	}
+	if apiPaths.TaskResultPath == uiPaths.TaskResultPath {
+		t.Fatalf("expected distinct result paths, both were %q", apiPaths.TaskResultPath)
+	}
+	if apiPaths.TaskNotesPath == uiPaths.TaskNotesPath {
+		t.Fatalf("expected distinct task notes paths, both were %q", apiPaths.TaskNotesPath)
+	}
+
+	for _, paths := range []TaskExecutionPaths{apiPaths, uiPaths} {
+		if _, err := os.Stat(paths.Workspace); err != nil {
+			t.Fatalf("expected workspace %s to exist, stat err=%v", paths.Workspace, err)
+		}
+		if _, err := os.Stat(paths.PlanFile); err != nil {
+			t.Fatalf("expected isolated plan %s to exist, stat err=%v", paths.PlanFile, err)
+		}
+		if _, err := os.Stat(paths.TaskResultPath); err != nil {
+			t.Fatalf("expected result %s to exist, stat err=%v", paths.TaskResultPath, err)
+		}
+		if _, err := os.Stat(paths.TaskNotesPath); err != nil {
+			t.Fatalf("expected task notes %s to exist, stat err=%v", paths.TaskNotesPath, err)
+		}
+		review, err := os.ReadFile(paths.ReviewPath)
+		if err != nil {
+			t.Fatalf("ReadFile review returned error: %v", err)
+		}
+		for _, want := range []string{
+			"workspace=" + paths.Workspace,
+			"plan=" + paths.PlanFile,
+			"notes=" + paths.TaskNotesPath,
+			"review=" + paths.ReviewPath,
+		} {
+			if !strings.Contains(string(review), want) {
+				t.Fatalf("expected review %s to contain %q, got:\n%s", paths.ReviewPath, want, review)
+			}
+		}
+	}
+
+	loaded, err := plan.Load(planPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	for _, task := range loaded.Tasks {
+		if task.Status != plan.StatusTodo {
+			t.Fatalf("expected root task %q to remain todo before merge/finalize, got %q", task.ID, task.Status)
+		}
+	}
+}
+
+func TestRunReportsParallelWorkerFailureWithoutRootPlanCorruption(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
 
@@ -561,10 +688,96 @@ tasks:
     title: API
     workflow: implement
     status: todo
+    owns_paths:
+      - internal/api/**
+  - id: ui
+    title: UI
+    workflow: implement
+    status: todo
+    owns_paths:
+      - web/ui/**
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	script := `set -eu
+if [ "{{ .Task.ID }}" = "ui" ]; then
+  exit 23
+fi
+printf '{"status":"done","notes":"api complete"}' > "{{ .TaskResultPath }}"
+`
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 2,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "execute", Type: config.StepTypeExec, Command: []string{"sh", "-c", script}},
+				},
+			},
+		},
+	}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected Run to report the failed worker")
+	}
+	if !strings.Contains(err.Error(), "ui") {
+		t.Fatalf("expected worker error to name ui, got %v", err)
+	}
+
+	apiPaths := taskExecutionPaths(cfg, "api", 1, true)
+	if _, statErr := os.Stat(apiPaths.TaskResultPath); statErr != nil {
+		t.Fatalf("expected successful sibling result to remain at %s, stat err=%v", apiPaths.TaskResultPath, statErr)
+	}
+
+	loaded, loadErr := plan.Load(planPath)
+	if loadErr != nil {
+		t.Fatalf("Load returned error: %v", loadErr)
+	}
+	for _, task := range loaded.Tasks {
+		if task.Status != plan.StatusTodo {
+			t.Fatalf("expected root task %q to remain todo after worker failure, got %q", task.ID, task.Status)
+		}
+	}
+}
+
+func TestRunKeepsConflictingReadyTasksSerialWithParallelismConfigured(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: todo
+    owns_paths:
+      - internal/api/**
   - id: docs
     title: Docs
     workflow: implement
     status: todo
+    owns_paths:
+      - internal/api/docs.md
 `
 	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -633,7 +846,7 @@ tasks:
 	}
 
 	if maxActive != 1 {
-		t.Fatalf("expected configured parallelism to remain serial in this phase, observed %d active prompts", maxActive)
+		t.Fatalf("expected conflicting tasks to remain serial, observed %d active prompts", maxActive)
 	}
 	if got := strings.Join(agent.prompts, "\n"); got != "finish task api\nfinish task docs" {
 		t.Fatalf("unexpected prompt order:\n%s", got)

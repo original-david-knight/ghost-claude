@@ -5,14 +5,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"vibedrive/internal/automation"
@@ -134,12 +137,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	if strings.TrimSpace(r.cfg.PlanFile) == "" {
 		return fmt.Errorf("plan_file is required")
 	}
-	if r.cfg.EffectiveParallelism() > 1 && r.shouldLogProgress() {
-		fmt.Fprintf(
-			r.stderr,
-			"warning: parallel execution is configured with max_parallelism=%d, but concurrent runner orchestration is not implemented yet; continuing serially\n",
-			r.cfg.EffectiveParallelism(),
-		)
+	if r.cfg.EffectiveParallelism() > 1 && !r.cfg.DryRun {
+		if target := r.fullscreenParallelAgent(); target != "" {
+			fmt.Fprintf(r.stderr, "warning: parallel execution needs non-fullscreen agent transports; %s is configured for fullscreen TUI, continuing serially\n", target)
+			return r.runPlan(ctx)
+		}
+		return r.runParallelPlan(ctx)
 	}
 	return r.runPlan(ctx)
 }
@@ -172,84 +175,669 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			}
 		}
 
-		steps, workflowName, err := r.stepsForTask(task)
+		stop, err := r.runSerialIteration(ctx, currentPlan, task, iteration, &stalled)
 		if err != nil {
 			return err
+		}
+		if stop {
+			return nil
+		}
+	}
+}
+
+func (r *Runner) runParallelPlan(ctx context.Context) error {
+	stalled := 0
+
+	for iteration := 1; ; iteration++ {
+		if r.cfg.MaxIterations > 0 && iteration > r.cfg.MaxIterations {
+			return fmt.Errorf("stopped after reaching max_iterations=%d", r.cfg.MaxIterations)
+		}
+
+		currentPlan, err := plan.Load(r.cfg.PlanFile)
+		if err != nil {
+			return err
+		}
+
+		analysis, err := currentPlan.AnalyzeReadyBatch(r.cfg.EffectiveParallelism())
+		if err != nil {
+			return err
+		}
+
+		if len(analysis.Selected) == 0 {
+			_, err := currentPlan.FindNextReady()
+			switch {
+			case errors.Is(err, plan.ErrAllTasksDone):
+				if r.shouldLogProgress() {
+					fmt.Fprintln(r.stdout, "All plan tasks are complete.")
+				}
+				return nil
+			case errors.Is(err, plan.ErrNoReadyTasks):
+				return fmt.Errorf("no ready tasks remain in %s; unfinished tasks: %s", r.cfg.PlanFile, summarizeUnfinishedTasks(currentPlan.UnfinishedTasks()))
+			case err != nil:
+				return err
+			default:
+				return fmt.Errorf("ready-batch analysis selected no tasks even though a ready task exists")
+			}
+		}
+
+		if len(analysis.Selected) == 1 {
+			stop, err := r.runSerialIteration(ctx, currentPlan, analysis.Selected[0], iteration, &stalled)
+			if err != nil {
+				return err
+			}
+			if stop {
+				return nil
+			}
+			continue
 		}
 
 		if r.shouldLogProgress() {
 			fmt.Fprintf(r.stdout, "\n== Iteration %d ==\n", iteration)
-			fmt.Fprintf(r.stdout, "Next task: %s (%s) via workflow %s\n", task.Title, task.ID, workflowName)
+			fmt.Fprintf(r.stdout, "Parallel ready batch (%d/%d): %s\n", len(analysis.Selected), analysis.Limit, summarizeTaskIDs(analysis.Selected))
 		}
 
-		paths := taskExecutionPaths(r.cfg, task.ID, iteration, false)
-		data := TemplateData{
-			ConfigPath:     r.cfg.Path,
-			ExecutablePath: r.executablePath,
-			Iteration:      iteration,
-			TaskResultPath: paths.TaskResultPath,
-			TaskNotesPath:  paths.TaskNotesPath,
-			ReviewPath:     paths.ReviewPath,
-			Workspace:      paths.Workspace,
-			PlanFile:       paths.PlanFile,
-			Plan:           currentPlan,
-			Task:           task,
-			Now:            time.Now(),
+		results, err := r.runParallelBatch(ctx, currentPlan, analysis.Selected, iteration)
+		if r.shouldLogProgress() {
+			for _, result := range results {
+				if result.Err != nil {
+					fmt.Fprintf(r.stderr, "parallel task %s failed: %v\n", result.Task.ID, result.Err)
+					continue
+				}
+				fmt.Fprintf(r.stdout, "parallel task %s completed in %s with status %q\n", result.Task.ID, result.Paths.Workspace, result.Status)
+			}
 		}
-
-		if err := ensurePlanArtifactDirectories(data); err != nil {
-			return err
-		}
-
-		currentNotes, err := tasknotes.Load(data.TaskNotesPath)
 		if err != nil {
 			return err
 		}
-		currentSignature := taskProgressSignature(task, currentNotes)
 
-		if err := r.runSteps(ctx, steps, data); err != nil {
-			return err
+		return nil
+	}
+}
+
+func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File, task plan.Task, iteration int, stalled *int) (bool, error) {
+	steps, workflowName, err := r.stepsForTask(task)
+	if err != nil {
+		return false, err
+	}
+
+	if r.shouldLogProgress() {
+		fmt.Fprintf(r.stdout, "\n== Iteration %d ==\n", iteration)
+		fmt.Fprintf(r.stdout, "Next task: %s (%s) via workflow %s\n", task.Title, task.ID, workflowName)
+	}
+
+	paths := taskExecutionPaths(r.cfg, task.ID, iteration, false)
+	data := TemplateData{
+		ConfigPath:     r.cfg.Path,
+		ExecutablePath: r.executablePath,
+		Iteration:      iteration,
+		TaskResultPath: paths.TaskResultPath,
+		TaskNotesPath:  paths.TaskNotesPath,
+		ReviewPath:     paths.ReviewPath,
+		Workspace:      paths.Workspace,
+		PlanFile:       paths.PlanFile,
+		Plan:           currentPlan,
+		Task:           task,
+		Now:            time.Now(),
+	}
+
+	if err := ensurePlanArtifactDirectories(data); err != nil {
+		return false, err
+	}
+
+	currentNotes, err := tasknotes.Load(data.TaskNotesPath)
+	if err != nil {
+		return false, err
+	}
+	currentSignature := taskProgressSignature(task, currentNotes)
+
+	if err := r.runSteps(ctx, steps, data); err != nil {
+		return false, err
+	}
+
+	if r.cfg.DryRun {
+		fmt.Fprintln(r.stdout, "\nDry run complete.")
+		return true, nil
+	}
+
+	nextPlan, err := plan.Load(r.cfg.PlanFile)
+	if err != nil {
+		return false, err
+	}
+
+	updatedTask, ok := nextPlan.FindTask(task.ID)
+	if !ok {
+		return false, fmt.Errorf("task %q disappeared from %s during iteration %d", task.ID, r.cfg.PlanFile, iteration)
+	}
+
+	nextNotes, err := tasknotes.Load(data.TaskNotesPath)
+	if err != nil {
+		return false, err
+	}
+
+	if taskProgressSignature(updatedTask, nextNotes) == currentSignature {
+		(*stalled)++
+		if *stalled >= r.cfg.MaxStalledIterations {
+			return false, fmt.Errorf(
+				"iteration %d made no task progress; %q (%s) still has status %q in %s. "+
+					"The workflow must update the selected task's status or task notes when work progresses",
+				iteration,
+				updatedTask.Title,
+				updatedTask.ID,
+				updatedTask.Status,
+				r.cfg.PlanFile,
+			)
+		}
+		if r.shouldLogProgress() {
+			fmt.Fprintf(r.stderr, "warning: no task progress after iteration %d; retrying (%d/%d)\n", iteration, *stalled, r.cfg.MaxStalledIterations)
+		}
+	} else {
+		*stalled = 0
+	}
+
+	return false, nil
+}
+
+type parallelTaskResult struct {
+	Task   plan.Task
+	Paths  TaskExecutionPaths
+	Status string
+	Notes  string
+	Err    error
+}
+
+type preparedParallelTask struct {
+	Task             plan.Task
+	Paths            TaskExecutionPaths
+	Steps            []config.Step
+	IsolatedPlan     *plan.File
+	IsolatedTask     plan.Task
+	InitialSignature string
+}
+
+func (r *Runner) runParallelBatch(ctx context.Context, currentPlan *plan.File, tasks []plan.Task, iteration int) ([]parallelTaskResult, error) {
+	results := make([]parallelTaskResult, len(tasks))
+	prepared := make([]preparedParallelTask, len(tasks))
+	ready := make([]int, 0, len(tasks))
+
+	for i, task := range tasks {
+		paths := taskExecutionPaths(r.cfg, task.ID, iteration, true)
+		results[i] = parallelTaskResult{Task: task, Paths: paths}
+
+		work, err := r.prepareParallelTask(ctx, currentPlan, task, paths)
+		if err != nil {
+			results[i].Err = err
+			continue
 		}
 
-		if r.cfg.DryRun {
-			fmt.Fprintln(r.stdout, "\nDry run complete.")
+		prepared[i] = work
+		ready = append(ready, i)
+	}
+
+	var wg sync.WaitGroup
+	for _, i := range ready {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = r.runPreparedParallelTask(ctx, prepared[i], iteration)
+		}(i)
+	}
+	wg.Wait()
+
+	errs := make([]error, 0)
+	for _, result := range results {
+		if result.Err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.Task.ID, result.Err))
+		}
+	}
+	if len(errs) > 0 {
+		return results, errors.Join(errs...)
+	}
+	return results, nil
+}
+
+func (r *Runner) prepareParallelTask(ctx context.Context, currentPlan *plan.File, task plan.Task, paths TaskExecutionPaths) (preparedParallelTask, error) {
+	steps, _, err := r.stepsForTask(task)
+	if err != nil {
+		return preparedParallelTask{}, err
+	}
+
+	if err := r.prepareParallelTaskWorkspace(ctx, currentPlan, paths); err != nil {
+		return preparedParallelTask{}, err
+	}
+
+	isolatedPlan, err := plan.Load(paths.PlanFile)
+	if err != nil {
+		return preparedParallelTask{}, err
+	}
+
+	isolatedTask, ok := isolatedPlan.FindTask(task.ID)
+	if !ok {
+		return preparedParallelTask{}, fmt.Errorf("task %q disappeared from isolated plan %s", task.ID, paths.PlanFile)
+	}
+
+	if err := ensurePlanArtifactDirectories(TemplateData{
+		TaskResultPath: paths.TaskResultPath,
+		ReviewPath:     paths.ReviewPath,
+	}); err != nil {
+		return preparedParallelTask{}, err
+	}
+
+	currentNotes, err := tasknotes.Load(paths.TaskNotesPath)
+	if err != nil {
+		return preparedParallelTask{}, err
+	}
+
+	return preparedParallelTask{
+		Task:             task,
+		Paths:            paths,
+		Steps:            steps,
+		IsolatedPlan:     isolatedPlan,
+		IsolatedTask:     isolatedTask,
+		InitialSignature: taskProgressSignature(isolatedTask, currentNotes),
+	}, nil
+}
+
+func (r *Runner) runPreparedParallelTask(ctx context.Context, work preparedParallelTask, iteration int) parallelTaskResult {
+	result := parallelTaskResult{Task: work.Task, Paths: work.Paths}
+
+	data := TemplateData{
+		ConfigPath:     r.cfg.Path,
+		ExecutablePath: r.executablePath,
+		Iteration:      iteration,
+		TaskResultPath: work.Paths.TaskResultPath,
+		TaskNotesPath:  work.Paths.TaskNotesPath,
+		ReviewPath:     work.Paths.ReviewPath,
+		Workspace:      work.Paths.Workspace,
+		PlanFile:       work.Paths.PlanFile,
+		Plan:           work.IsolatedPlan,
+		Task:           work.IsolatedTask,
+		Now:            time.Now(),
+	}
+
+	worker, err := r.isolatedRunner(work.Paths, work.Steps)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+
+	if err := worker.runSteps(ctx, work.Steps, data); err != nil {
+		result.Err = err
+		return result
+	}
+
+	status, notes, err := collectParallelTaskProgress(work.Paths, work.Task.ID, work.InitialSignature)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	result.Status = status
+	result.Notes = notes
+	return result
+}
+
+func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (*Runner, error) {
+	workerCfg := *r.cfg
+	workerCfg.Workspace = paths.Workspace
+	workerCfg.PlanFile = paths.PlanFile
+
+	worker := *r
+	worker.cfg = &workerCfg
+
+	needsClaude, needsCodex, err := r.agentTargetsForSteps(steps)
+	if err != nil {
+		return nil, err
+	}
+	if needsClaude {
+		claudeAgent, err := claude.New(
+			workerCfg.Claude.Command,
+			workerCfg.Claude.Args,
+			workerCfg.Workspace,
+			workerCfg.Claude.Transport,
+			workerCfg.Claude.StartupTimeout,
+			r.stdout,
+			r.stderr,
+		)
+		if err != nil {
+			return nil, err
+		}
+		worker.claude = claudeAgent
+	}
+	if needsCodex {
+		codexAgent, err := codex.New(
+			workerCfg.Codex.Command,
+			workerCfg.Codex.Args,
+			workerCfg.Workspace,
+			workerCfg.Codex.Transport,
+			workerCfg.Codex.StartupTimeout,
+			r.stdout,
+			r.stderr,
+		)
+		if err != nil {
+			return nil, err
+		}
+		worker.codex = codexAgent
+	}
+
+	return &worker, nil
+}
+
+func (r *Runner) agentTargetsForSteps(steps []config.Step) (bool, bool, error) {
+	var needsClaude, needsCodex bool
+	for _, step := range steps {
+		if step.Disabled {
+			continue
+		}
+		target, err := r.stepAgent(step)
+		if err != nil {
+			return false, false, err
+		}
+		switch target {
+		case config.AgentClaude:
+			needsClaude = true
+		case config.AgentCodex:
+			needsCodex = true
+		}
+	}
+	return needsClaude, needsCodex, nil
+}
+
+func (r *Runner) fullscreenParallelAgent() string {
+	needsClaude, needsCodex, err := r.configuredAgentTargets()
+	if err != nil {
+		return ""
+	}
+	if needsClaude && r.claude != nil && r.claude.IsFullscreenTUI() {
+		return config.AgentClaude
+	}
+	if needsCodex && r.codex != nil && r.codex.IsFullscreenTUI() {
+		return config.AgentCodex
+	}
+	return ""
+}
+
+func (r *Runner) configuredAgentTargets() (bool, bool, error) {
+	var needsClaude, needsCodex bool
+	merge := func(steps []config.Step) error {
+		stepNeedsClaude, stepNeedsCodex, err := r.agentTargetsForSteps(steps)
+		if err != nil {
+			return err
+		}
+		needsClaude = needsClaude || stepNeedsClaude
+		needsCodex = needsCodex || stepNeedsCodex
+		return nil
+	}
+
+	if err := merge(r.cfg.Steps); err != nil {
+		return false, false, err
+	}
+	for _, workflow := range r.cfg.Workflows {
+		if err := merge(workflow.Steps); err != nil {
+			return false, false, err
+		}
+	}
+	return needsClaude, needsCodex, nil
+}
+
+func (r *Runner) prepareParallelTaskWorkspace(ctx context.Context, currentPlan *plan.File, paths TaskExecutionPaths) error {
+	if err := removeExistingIsolatedWorkspace(ctx, r.cfg.Workspace, paths); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(paths.WorktreeRoot, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(paths.ArtifactRoot, 0o755); err != nil {
+		return err
+	}
+
+	if err := checkGitWorkspace(ctx, r.cfg.Workspace); err != nil {
+		if copyErr := copyWorkspace(r.cfg.Workspace, paths.Workspace, paths.WorktreeRoot, paths.ArtifactBaseRoot); copyErr != nil {
+			return fmt.Errorf("prepare non-git isolated workspace copy: %w; fallback copy failed: %v", err, copyErr)
+		}
+	} else if err := addGitWorktree(ctx, r.cfg.Workspace, paths.Workspace); err != nil {
+		return err
+	}
+
+	if err := writeIsolatedPlanSnapshot(currentPlan, paths.PlanFile); err != nil {
+		return err
+	}
+	return copyTaskNotesSnapshot(tasknotes.Path(r.cfg.Workspace), paths.TaskNotesPath)
+}
+
+func removeExistingIsolatedWorkspace(ctx context.Context, rootWorkspace string, paths TaskExecutionPaths) error {
+	if paths.Isolated {
+		_ = exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "remove", "--force", paths.Workspace).Run()
+		_ = exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "prune").Run()
+	}
+	return cleanupTaskExecutionPaths(paths)
+}
+
+func checkGitWorkspace(ctx context.Context, rootWorkspace string) error {
+	check := exec.CommandContext(ctx, "git", "-C", rootWorkspace, "rev-parse", "--is-inside-work-tree")
+	if output, err := check.CombinedOutput(); err != nil {
+		return fmt.Errorf("git workspace check: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func addGitWorktree(ctx context.Context, rootWorkspace, workspace string) error {
+	if err := os.MkdirAll(filepath.Dir(workspace), 0o755); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "add", "--detach", workspace, "HEAD")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree add: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func copyWorkspace(sourceRoot, destRoot string, excludedRoots ...string) error {
+	absSource, err := filepath.Abs(sourceRoot)
+	if err != nil {
+		return err
+	}
+	absDest, err := filepath.Abs(destRoot)
+	if err != nil {
+		return err
+	}
+
+	excluded := []string{absDest}
+	for _, root := range excludedRoots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+		excluded = append(excluded, absRoot)
+	}
+
+	return filepath.WalkDir(absSource, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if shouldSkipCopiedPath(absSource, absPath, excluded) {
+			if entry.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		}
 
-		nextPlan, err := plan.Load(r.cfg.PlanFile)
+		rel, err := filepath.Rel(absSource, absPath)
 		if err != nil {
 			return err
 		}
-
-		updatedTask, ok := nextPlan.FindTask(task.ID)
-		if !ok {
-			return fmt.Errorf("task %q disappeared from %s during iteration %d", task.ID, r.cfg.PlanFile, iteration)
+		target := filepath.Join(absDest, rel)
+		if rel == "." {
+			return os.MkdirAll(target, 0o755)
 		}
 
-		nextNotes, err := tasknotes.Load(data.TaskNotesPath)
+		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-
-		if taskProgressSignature(updatedTask, nextNotes) == currentSignature {
-			stalled++
-			if stalled >= r.cfg.MaxStalledIterations {
-				return fmt.Errorf(
-					"iteration %d made no task progress; %q (%s) still has status %q in %s. "+
-						"The workflow must update the selected task's status or task notes when work progresses",
-					iteration,
-					updatedTask.Title,
-					updatedTask.ID,
-					updatedTask.Status,
-					r.cfg.PlanFile,
-				)
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(target, info.Mode().Perm())
+		case entry.Type()&os.ModeSymlink != 0:
+			linkTarget, err := os.Readlink(absPath)
+			if err != nil {
+				return err
 			}
-			if r.shouldLogProgress() {
-				fmt.Fprintf(r.stderr, "warning: no task progress after iteration %d; retrying (%d/%d)\n", iteration, stalled, r.cfg.MaxStalledIterations)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
 			}
-		} else {
-			stalled = 0
+			return os.Symlink(linkTarget, target)
+		case entry.Type().IsRegular():
+			return copyRegularFile(absPath, target, info.Mode().Perm())
+		default:
+			return nil
 		}
+	})
+}
+
+func shouldSkipCopiedPath(sourceRoot, path string, excludedRoots []string) bool {
+	rel, err := filepath.Rel(sourceRoot, path)
+	if err == nil {
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(os.PathSeparator)) {
+			return true
+		}
+	}
+
+	for _, excluded := range excludedRoots {
+		rel, err := filepath.Rel(excluded, path)
+		if err == nil && (rel == "." || isLocalRelativePath(rel)) {
+			return true
+		}
+	}
+	return false
+}
+
+func copyRegularFile(source, target string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func writeIsolatedPlanSnapshot(currentPlan *plan.File, path string) error {
+	if currentPlan == nil {
+		return fmt.Errorf("plan file is nil")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	snapshot := *currentPlan
+	snapshot.Path = path
+	snapshot.Tasks = append([]plan.Task(nil), currentPlan.Tasks...)
+	return snapshot.Save()
+}
+
+func copyTaskNotesSnapshot(source, target string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(target, data, 0o644)
+}
+
+func collectParallelTaskProgress(paths TaskExecutionPaths, taskID, initialSignature string) (string, string, error) {
+	if result, ok, err := loadParallelTaskResult(paths.TaskResultPath); err != nil {
+		return "", "", err
+	} else if ok {
+		status := normalizeCollectedTaskStatus(result.Status)
+		if status == "" {
+			return "", "", fmt.Errorf("task result %s has unsupported status %q", paths.TaskResultPath, result.Status)
+		}
+		return status, strings.TrimSpace(result.Notes), nil
+	}
+
+	workerPlan, err := plan.Load(paths.PlanFile)
+	if err != nil {
+		return "", "", err
+	}
+	updatedTask, ok := workerPlan.FindTask(taskID)
+	if !ok {
+		return "", "", fmt.Errorf("task %q not found in isolated plan %s", taskID, paths.PlanFile)
+	}
+	notesFile, err := tasknotes.Load(paths.TaskNotesPath)
+	if err != nil {
+		return "", "", err
+	}
+	if taskProgressSignature(updatedTask, notesFile) == initialSignature {
+		return "", "", fmt.Errorf("task %q made no isolated task progress; expected a task result or isolated plan/task notes update", taskID)
+	}
+
+	status := normalizeCollectedTaskStatus(updatedTask.Status)
+	notes := strings.TrimSpace(updatedTask.Notes)
+	if note, ok := notesFile.Find(taskID); ok {
+		if noteStatus := normalizeCollectedTaskStatus(note.Status); noteStatus != "" {
+			status = noteStatus
+		}
+		if strings.TrimSpace(note.Notes) != "" {
+			notes = strings.TrimSpace(note.Notes)
+		}
+	}
+	if status == "" {
+		return "", "", fmt.Errorf("task %q has unsupported collected status %q", taskID, updatedTask.Status)
+	}
+	return status, notes, nil
+}
+
+func loadParallelTaskResult(path string) (automation.TaskResult, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return automation.TaskResult{}, false, nil
+		}
+		return automation.TaskResult{}, false, err
+	}
+
+	var result automation.TaskResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return automation.TaskResult{}, false, fmt.Errorf("parse task result %s: %w", path, err)
+	}
+	return result, true, nil
+}
+
+func normalizeCollectedTaskStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case plan.StatusDone:
+		return plan.StatusDone
+	case plan.StatusInProgress:
+		return plan.StatusInProgress
+	case plan.StatusBlocked:
+		return plan.StatusBlocked
+	case plan.StatusManual:
+		return plan.StatusManual
+	default:
+		return ""
 	}
 }
 
@@ -951,6 +1539,18 @@ func summarizeUnfinishedTasks(tasks []plan.Task) string {
 		parts = append(parts, fmt.Sprintf("%s(%s)", task.ID, task.Status))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func summarizeTaskIDs(tasks []plan.Task) string {
+	if len(tasks) == 0 {
+		return "none"
+	}
+
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	return strings.Join(ids, ", ")
 }
 
 func writePromptPreview(w io.Writer, prompt string) {

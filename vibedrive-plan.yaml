@@ -102,7 +102,7 @@ tasks:
     - id: parallel-batch-execution
       title: Execute independent ready tasks in isolated parallel workers
       details: Implement the first working parallel execution path. When parallelism is enabled, the runner should select a safe ready batch, prepare isolated workspaces, run each task's workflow independently, and collect task results without letting workers share a mutable plan file, task notes file, git index, or uncommitted worktree. Preserve serial execution as the default and fallback path.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - boundary-aware-plan-prompts
