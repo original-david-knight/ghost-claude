@@ -31,6 +31,9 @@ const (
 	defaultCodexReasoningEffort = "xhigh"
 	defaultCodexBypassFlag      = "--dangerously-bypass-approvals-and-sandbox"
 
+	DefaultParallelWorktreeRoot = ".vibedrive/worktrees"
+	DefaultParallelArtifactRoot = ".vibedrive/task-runs"
+
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
 
@@ -49,10 +52,18 @@ type Config struct {
 	DefaultWorkflow      string              `yaml:"default_workflow"`
 	Coder                string              `yaml:"-"`
 	Reviewer             string              `yaml:"-"`
+	Parallel             ParallelConfig      `yaml:"parallel"`
 	Claude               ClaudeConfig        `yaml:"claude"`
 	Codex                CodexConfig         `yaml:"codex"`
 	Steps                []Step              `yaml:"steps"`
 	Workflows            map[string]Workflow `yaml:"workflows"`
+}
+
+type ParallelConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	MaxParallelism int    `yaml:"max_parallelism"`
+	WorktreeRoot   string `yaml:"worktree_root"`
+	ArtifactRoot   string `yaml:"artifact_root"`
 }
 
 type ClaudeConfig struct {
@@ -115,6 +126,7 @@ func Load(path string) (*Config, error) {
 		cfg.Workspace = filepath.Join(cfg.BaseDir, cfg.Workspace)
 	}
 	cfg.Workspace = filepath.Clean(cfg.Workspace)
+	cfg.normalizeParallelPaths()
 
 	if cfg.PlanFile == "" {
 		cfg.PlanFile = "vibedrive-plan.yaml"
@@ -181,6 +193,7 @@ func DefaultAgentLaunchConfig(path string) (*Config, error) {
 	cfg.BaseDir = filepath.Dir(absPath)
 	cfg.Workspace = cfg.BaseDir
 	cfg.PlanFile = filepath.Join(cfg.Workspace, cfg.PlanFile)
+	cfg.normalizeParallelPaths()
 	cfg.Claude.Args = ensureDefaultClaudeArgs(cfg.Claude.Args)
 	if cfg.Codex.Transport == "" {
 		cfg.Codex.Transport = defaultCodexTransport(cfg.Codex.Args)
@@ -196,6 +209,16 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxStalledIterations < 1 {
 		return fmt.Errorf("max_stalled_iterations must be >= 1")
+	}
+	c.applyParallelValidationDefaults()
+	if c.Parallel.MaxParallelism < 1 {
+		return fmt.Errorf("parallel.max_parallelism must be >= 1")
+	}
+	if strings.TrimSpace(c.Parallel.WorktreeRoot) == "" {
+		return fmt.Errorf("parallel.worktree_root is required")
+	}
+	if strings.TrimSpace(c.Parallel.ArtifactRoot) == "" {
+		return fmt.Errorf("parallel.artifact_root is required")
 	}
 	if c.Claude.Command == "" {
 		return fmt.Errorf("claude.command is required")
@@ -289,6 +312,11 @@ func defaultConfig() Config {
 		MaxStalledIterations: 2,
 		Coder:                AgentCodex,
 		Reviewer:             AgentClaude,
+		Parallel: ParallelConfig{
+			MaxParallelism: 1,
+			WorktreeRoot:   DefaultParallelWorktreeRoot,
+			ArtifactRoot:   DefaultParallelArtifactRoot,
+		},
 		Claude: ClaudeConfig{
 			Command:         "claude",
 			Args:            []string{"--effort", defaultClaudeEffort},
@@ -347,6 +375,59 @@ func (c *Config) CoderAgent() string {
 
 func (c *Config) ReviewerAgent() string {
 	return normalizeAgent(c.Reviewer)
+}
+
+func (c *Config) EffectiveParallelism() int {
+	if c == nil || !c.Parallel.Enabled || c.Parallel.MaxParallelism < 1 {
+		return 1
+	}
+	return c.Parallel.MaxParallelism
+}
+
+func (c *Config) ParallelWorktreeRoot() string {
+	if c == nil {
+		return filepath.Clean(DefaultParallelWorktreeRoot)
+	}
+	return resolveWorkspacePath(c.Workspace, c.Parallel.WorktreeRoot, DefaultParallelWorktreeRoot)
+}
+
+func (c *Config) ParallelArtifactRoot() string {
+	if c == nil {
+		return filepath.Clean(DefaultParallelArtifactRoot)
+	}
+	return resolveWorkspacePath(c.Workspace, c.Parallel.ArtifactRoot, DefaultParallelArtifactRoot)
+}
+
+func (c *Config) normalizeParallelPaths() {
+	c.Parallel.WorktreeRoot = c.ParallelWorktreeRoot()
+	c.Parallel.ArtifactRoot = c.ParallelArtifactRoot()
+}
+
+func (c *Config) applyParallelValidationDefaults() {
+	if c.Parallel.Enabled || c.Parallel.MaxParallelism != 0 {
+		return
+	}
+	if strings.TrimSpace(c.Parallel.WorktreeRoot) != "" || strings.TrimSpace(c.Parallel.ArtifactRoot) != "" {
+		return
+	}
+	c.Parallel.MaxParallelism = 1
+	c.Parallel.WorktreeRoot = DefaultParallelWorktreeRoot
+	c.Parallel.ArtifactRoot = DefaultParallelArtifactRoot
+}
+
+func resolveWorkspacePath(workspace, value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	if !filepath.IsAbs(value) {
+		workspace = strings.TrimSpace(workspace)
+		if workspace == "" {
+			workspace = "."
+		}
+		value = filepath.Join(workspace, value)
+	}
+	return filepath.Clean(value)
 }
 
 func ensureDefaultClaudeArgs(args []string) []string {

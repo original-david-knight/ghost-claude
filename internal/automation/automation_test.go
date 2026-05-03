@@ -229,6 +229,48 @@ tasks:
 	}
 }
 
+func TestWorkspaceArtifactPathsPreserveCurrentLocations(t *testing.T) {
+	dir := t.TempDir()
+
+	paths := WorkspaceArtifactPaths(dir, "api/db")
+
+	if paths.RootDir != filepath.Join(dir, ".vibedrive") {
+		t.Fatalf("expected root dir under workspace .vibedrive, got %q", paths.RootDir)
+	}
+	if paths.ResultPath != ResultPath(dir, "api/db") {
+		t.Fatalf("expected result path %q, got %q", ResultPath(dir, "api/db"), paths.ResultPath)
+	}
+	if paths.ReviewPath != ReviewPath(dir, "api/db") {
+		t.Fatalf("expected review path %q, got %q", ReviewPath(dir, "api/db"), paths.ReviewPath)
+	}
+	if paths.TaskNotesPath != tasknotes.Path(dir) {
+		t.Fatalf("expected task notes path %q, got %q", tasknotes.Path(dir), paths.TaskNotesPath)
+	}
+}
+
+func TestIsolatedArtifactPathsUseDedicatedRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, ".vibedrive", "task-runs", "001-api-db-abcdef123456")
+
+	paths := IsolatedArtifactPaths(root, "api/db")
+
+	if paths.RootDir != root {
+		t.Fatalf("expected root dir %q, got %q", root, paths.RootDir)
+	}
+	wantResult := filepath.Join(root, "task-results", "api_db.json")
+	if paths.ResultPath != wantResult {
+		t.Fatalf("expected result path %q, got %q", wantResult, paths.ResultPath)
+	}
+	wantReview := filepath.Join(root, "reviews", "api_db.json")
+	if paths.ReviewPath != wantReview {
+		t.Fatalf("expected review path %q, got %q", wantReview, paths.ReviewPath)
+	}
+	wantNotes := filepath.Join(root, "task-notes.yaml")
+	if paths.TaskNotesPath != wantNotes {
+		t.Fatalf("expected task notes path %q, got %q", wantNotes, paths.TaskNotesPath)
+	}
+}
+
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
 

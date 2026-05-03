@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -139,6 +140,133 @@ func TestLoadSetsDefaultCodexTUIArgs(t *testing.T) {
 	want := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", `model_reasoning_effort="xhigh"`}
 	if !slices.Equal(cfg.Codex.Args, want) {
 		t.Fatalf("expected codex args %v, got %v", want, cfg.Codex.Args)
+	}
+}
+
+func TestLoadDefaultsParallelExecutionToSerial(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `steps:
+  - name: inspect
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Parallel.Enabled {
+		t.Fatal("expected parallel execution to be disabled by default")
+	}
+	if cfg.Parallel.MaxParallelism != 1 {
+		t.Fatalf("expected default max parallelism 1, got %d", cfg.Parallel.MaxParallelism)
+	}
+	if cfg.EffectiveParallelism() != 1 {
+		t.Fatalf("expected effective parallelism 1, got %d", cfg.EffectiveParallelism())
+	}
+
+	wantWorktreeRoot := filepath.Join(dir, DefaultParallelWorktreeRoot)
+	if cfg.Parallel.WorktreeRoot != wantWorktreeRoot {
+		t.Fatalf("expected worktree root %q, got %q", wantWorktreeRoot, cfg.Parallel.WorktreeRoot)
+	}
+	wantArtifactRoot := filepath.Join(dir, DefaultParallelArtifactRoot)
+	if cfg.Parallel.ArtifactRoot != wantArtifactRoot {
+		t.Fatalf("expected artifact root %q, got %q", wantArtifactRoot, cfg.Parallel.ArtifactRoot)
+	}
+}
+
+func TestLoadRequiresParallelismOptIn(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `parallel:
+  max_parallelism: 4
+steps:
+  - name: inspect
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Parallel.MaxParallelism != 4 {
+		t.Fatalf("expected configured max parallelism 4, got %d", cfg.Parallel.MaxParallelism)
+	}
+	if cfg.EffectiveParallelism() != 1 {
+		t.Fatalf("expected effective parallelism to stay serial until enabled, got %d", cfg.EffectiveParallelism())
+	}
+}
+
+func TestLoadAcceptsOptInParallelExecution(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `parallel:
+  enabled: true
+  max_parallelism: 3
+  worktree_root: .vibedrive/custom-worktrees
+  artifact_root: .vibedrive/custom-task-runs
+steps:
+  - name: inspect
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.EffectiveParallelism() != 3 {
+		t.Fatalf("expected effective parallelism 3, got %d", cfg.EffectiveParallelism())
+	}
+	wantWorktreeRoot := filepath.Join(dir, ".vibedrive/custom-worktrees")
+	if cfg.Parallel.WorktreeRoot != wantWorktreeRoot {
+		t.Fatalf("expected worktree root %q, got %q", wantWorktreeRoot, cfg.Parallel.WorktreeRoot)
+	}
+	wantArtifactRoot := filepath.Join(dir, ".vibedrive/custom-task-runs")
+	if cfg.Parallel.ArtifactRoot != wantArtifactRoot {
+		t.Fatalf("expected artifact root %q, got %q", wantArtifactRoot, cfg.Parallel.ArtifactRoot)
+	}
+}
+
+func TestLoadRejectsInvalidParallelismValues(t *testing.T) {
+	for _, value := range []int{0, -1} {
+		t.Run(fmt.Sprintf("max_parallelism=%d", value), func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "vibedrive.yaml")
+
+			content := fmt.Sprintf(`parallel:
+  enabled: true
+  max_parallelism: %d
+steps:
+  - name: inspect
+    prompt: inspect
+`, value)
+			if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			_, err := Load(configPath)
+			if err == nil {
+				t.Fatal("expected Load to reject invalid parallelism")
+			}
+			if !strings.Contains(err.Error(), "parallel.max_parallelism must be >= 1") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
@@ -360,6 +488,11 @@ func TestValidateAllowsSameAgentForCoderAndReviewer(t *testing.T) {
 		MaxStalledIterations: 1,
 		Coder:                AgentCodex,
 		Reviewer:             AgentCodex,
+		Parallel: ParallelConfig{
+			MaxParallelism: 1,
+			WorktreeRoot:   DefaultParallelWorktreeRoot,
+			ArtifactRoot:   DefaultParallelArtifactRoot,
+		},
 		Claude: ClaudeConfig{
 			Command:         "claude",
 			Transport:       ClaudeTransportTUI,

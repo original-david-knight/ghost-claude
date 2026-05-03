@@ -8,3 +8,6 @@ tasks:
     - id: plan-parallel-readiness-analysis
       status: done
       notes: Added deterministic plan-level ready-batch analysis plus CLI inspection. Missing task owns_paths/component ownership forces serial fallback; component owned_paths can supply ownership. Verified go test ./internal/plan ./cmd/vibedrive and go test ./... pass.
+    - id: parallel-runner-isolation-design
+      status: done
+      notes: Added opt-in parallel config and isolated workspace/artifact path scaffolding while runner execution remains serial. Future reruns should build concurrent orchestration on taskExecutionPaths and implement merge/finalize before enabling parallel agents.

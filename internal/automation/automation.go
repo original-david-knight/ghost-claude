@@ -23,6 +23,13 @@ type TaskResult struct {
 	Notes  string `json:"notes,omitempty"`
 }
 
+type TaskArtifactPaths struct {
+	RootDir       string
+	ResultPath    string
+	ReviewPath    string
+	TaskNotesPath string
+}
+
 type FinalizeOptions struct {
 	Workspace     string
 	PlanFile      string
@@ -39,12 +46,41 @@ func ReviewPath(workspace, taskID string) string {
 	return artifactPath(workspace, reviewDir, taskID, ".json")
 }
 
+func WorkspaceArtifactPaths(workspace, taskID string) TaskArtifactPaths {
+	workspace = cleanPathDefault(workspace, ".")
+	return TaskArtifactPaths{
+		RootDir:       filepath.Join(workspace, ".vibedrive"),
+		ResultPath:    ResultPath(workspace, taskID),
+		ReviewPath:    ReviewPath(workspace, taskID),
+		TaskNotesPath: tasknotes.Path(workspace),
+	}
+}
+
+func IsolatedArtifactPaths(rootDir, taskID string) TaskArtifactPaths {
+	rootDir = cleanPathDefault(rootDir, ".")
+	return TaskArtifactPaths{
+		RootDir:       rootDir,
+		ResultPath:    artifactPath(rootDir, "task-results", taskID, ".json"),
+		ReviewPath:    artifactPath(rootDir, "reviews", taskID, ".json"),
+		TaskNotesPath: filepath.Join(rootDir, "task-notes.yaml"),
+	}
+}
+
 func artifactPath(workspace, dir, taskID, ext string) string {
+	workspace = cleanPathDefault(workspace, ".")
 	fileName := strings.NewReplacer("/", "_", "\\", "_").Replace(strings.TrimSpace(taskID))
 	if fileName == "" {
 		fileName = "task"
 	}
 	return filepath.Join(workspace, dir, fileName+ext)
+}
+
+func cleanPathDefault(path, fallback string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = fallback
+	}
+	return filepath.Clean(path)
 }
 
 func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Writer) error {

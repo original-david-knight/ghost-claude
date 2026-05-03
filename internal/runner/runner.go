@@ -3,12 +3,15 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +49,20 @@ type TemplateData struct {
 	Plan           *plan.File
 	Task           plan.Task
 	Now            time.Time
+}
+
+type TaskExecutionPaths struct {
+	TaskID           string
+	Name             string
+	Workspace        string
+	PlanFile         string
+	WorktreeRoot     string
+	ArtifactBaseRoot string
+	ArtifactRoot     string
+	TaskResultPath   string
+	TaskNotesPath    string
+	ReviewPath       string
+	Isolated         bool
 }
 
 type claudeClient interface {
@@ -117,6 +134,13 @@ func (r *Runner) Run(ctx context.Context) error {
 	if strings.TrimSpace(r.cfg.PlanFile) == "" {
 		return fmt.Errorf("plan_file is required")
 	}
+	if r.cfg.EffectiveParallelism() > 1 && r.shouldLogProgress() {
+		fmt.Fprintf(
+			r.stderr,
+			"warning: parallel execution is configured with max_parallelism=%d, but concurrent runner orchestration is not implemented yet; continuing serially\n",
+			r.cfg.EffectiveParallelism(),
+		)
+	}
 	return r.runPlan(ctx)
 }
 
@@ -158,15 +182,16 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			fmt.Fprintf(r.stdout, "Next task: %s (%s) via workflow %s\n", task.Title, task.ID, workflowName)
 		}
 
+		paths := taskExecutionPaths(r.cfg, task.ID, iteration, false)
 		data := TemplateData{
 			ConfigPath:     r.cfg.Path,
 			ExecutablePath: r.executablePath,
 			Iteration:      iteration,
-			TaskResultPath: automation.ResultPath(r.cfg.Workspace, task.ID),
-			TaskNotesPath:  tasknotes.Path(r.cfg.Workspace),
-			ReviewPath:     automation.ReviewPath(r.cfg.Workspace, task.ID),
-			Workspace:      r.cfg.Workspace,
-			PlanFile:       r.cfg.PlanFile,
+			TaskResultPath: paths.TaskResultPath,
+			TaskNotesPath:  paths.TaskNotesPath,
+			ReviewPath:     paths.ReviewPath,
+			Workspace:      paths.Workspace,
+			PlanFile:       paths.PlanFile,
 			Plan:           currentPlan,
 			Task:           task,
 			Now:            time.Now(),
@@ -620,6 +645,158 @@ tasks:
     notes: <brief notes>
 
 Preserve existing task notes and statuses as much as possible. Do not edit vibedrive-plan.yaml or make unrelated changes.`, path, taskID, parseErr, path)
+}
+
+func taskExecutionPaths(cfg *config.Config, taskID string, iteration int, isolated bool) TaskExecutionPaths {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	if !isolated {
+		artifacts := automation.WorkspaceArtifactPaths(cfg.Workspace, taskID)
+		return TaskExecutionPaths{
+			TaskID:         taskID,
+			Name:           "main",
+			Workspace:      cfg.Workspace,
+			PlanFile:       cfg.PlanFile,
+			ArtifactRoot:   artifacts.RootDir,
+			TaskResultPath: artifacts.ResultPath,
+			TaskNotesPath:  artifacts.TaskNotesPath,
+			ReviewPath:     artifacts.ReviewPath,
+		}
+	}
+
+	name := isolatedWorkspaceName(cfg, taskID, iteration)
+	worktreeRoot := cfg.ParallelWorktreeRoot()
+	artifactBaseRoot := cfg.ParallelArtifactRoot()
+	artifactRoot := filepath.Join(artifactBaseRoot, name)
+	workspace := filepath.Join(worktreeRoot, name)
+	artifacts := automation.IsolatedArtifactPaths(artifactRoot, taskID)
+
+	return TaskExecutionPaths{
+		TaskID:           taskID,
+		Name:             name,
+		Workspace:        workspace,
+		PlanFile:         planFileInWorkspace(cfg.Workspace, cfg.PlanFile, workspace),
+		WorktreeRoot:     worktreeRoot,
+		ArtifactBaseRoot: artifactBaseRoot,
+		ArtifactRoot:     artifactRoot,
+		TaskResultPath:   artifacts.ResultPath,
+		TaskNotesPath:    artifacts.TaskNotesPath,
+		ReviewPath:       artifacts.ReviewPath,
+		Isolated:         true,
+	}
+}
+
+func isolatedWorkspaceName(cfg *config.Config, taskID string, iteration int) string {
+	if iteration < 1 {
+		iteration = 1
+	}
+	slug := taskIDSlug(taskID)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		filepath.Clean(cfg.Workspace),
+		filepath.Clean(cfg.PlanFile),
+		strconv.Itoa(iteration),
+		taskID,
+	}, "\x00")))
+	return fmt.Sprintf("%03d-%s-%s", iteration, slug, hex.EncodeToString(sum[:])[:12])
+}
+
+func taskIDSlug(taskID string) string {
+	taskID = strings.ToLower(strings.TrimSpace(taskID))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range taskID {
+		isAlpha := r >= 'a' && r <= 'z'
+		isDigit := r >= '0' && r <= '9'
+		if isAlpha || isDigit {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "task"
+	}
+	if len(slug) > 48 {
+		slug = strings.TrimRight(slug[:48], "-")
+		if slug == "" {
+			slug = "task"
+		}
+	}
+	return slug
+}
+
+func planFileInWorkspace(rootWorkspace, rootPlanFile, workspace string) string {
+	rootPlanFile = strings.TrimSpace(rootPlanFile)
+	if rootPlanFile == "" {
+		return ""
+	}
+
+	rel, err := filepath.Rel(filepath.Clean(rootWorkspace), filepath.Clean(rootPlanFile))
+	if err != nil || !isLocalRelativePath(rel) {
+		return filepath.Join(workspace, filepath.Base(rootPlanFile))
+	}
+	return filepath.Join(workspace, rel)
+}
+
+func cleanupTaskExecutionPaths(paths TaskExecutionPaths) error {
+	if !paths.Isolated {
+		return nil
+	}
+
+	workspace, err := ownedChildPath(paths.WorktreeRoot, paths.Workspace)
+	if err != nil {
+		return err
+	}
+	artifactRoot, err := ownedChildPath(paths.ArtifactBaseRoot, paths.ArtifactRoot)
+	if err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(workspace); err != nil {
+		return err
+	}
+	return os.RemoveAll(artifactRoot)
+}
+
+func ownedChildPath(root, target string) (string, error) {
+	root = strings.TrimSpace(root)
+	target = strings.TrimSpace(target)
+	if root == "" || target == "" {
+		return "", fmt.Errorf("refusing to remove isolated workspace with empty root or target")
+	}
+
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absTarget)
+	if err != nil {
+		return "", err
+	}
+	if !isLocalRelativePath(rel) {
+		return "", fmt.Errorf("refusing to remove %s outside isolation root %s", absTarget, absRoot)
+	}
+	return absTarget, nil
+}
+
+func isLocalRelativePath(path string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." || path == ".." || filepath.IsAbs(path) {
+		return false
+	}
+	return !strings.HasPrefix(path, ".."+string(os.PathSeparator))
 }
 
 func ensurePlanArtifactDirectories(data TemplateData) error {

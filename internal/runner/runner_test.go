@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"vibedrive/internal/automation"
 	"vibedrive/internal/config"
@@ -24,12 +27,18 @@ type fakeAgent struct {
 	planPath        string
 	closeEvents     *[]string
 	closeLabel      string
+	onRun           func(string) error
 }
 
 func (f *fakeAgent) RunPrompt(_ context.Context, session *claude.Session, prompt string) error {
 	f.prompts = append(f.prompts, prompt)
 	f.sessionIDs = append(f.sessionIDs, session.ID)
 
+	if f.onRun != nil {
+		if err := f.onRun(prompt); err != nil {
+			return err
+		}
+	}
 	return handleFakePrompt(prompt, f.planPath)
 }
 
@@ -377,6 +386,257 @@ tasks:
 	reviewPath := automation.ReviewPath(dir, "scaffold")
 	if _, err := os.Stat(reviewPath); err != nil {
 		t.Fatalf("expected review artifact %s to exist, stat err=%v", reviewPath, err)
+	}
+}
+
+func TestTaskExecutionPathsUseMainWorkspaceByDefault(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	paths := taskExecutionPaths(&config.Config{
+		Workspace: dir,
+		PlanFile:  planPath,
+	}, "scaffold", 1, false)
+
+	if paths.Isolated {
+		t.Fatal("expected default execution paths not to be isolated")
+	}
+	if paths.Workspace != dir {
+		t.Fatalf("expected workspace %q, got %q", dir, paths.Workspace)
+	}
+	if paths.PlanFile != planPath {
+		t.Fatalf("expected plan file %q, got %q", planPath, paths.PlanFile)
+	}
+	if paths.TaskResultPath != automation.ResultPath(dir, "scaffold") {
+		t.Fatalf("expected result path %q, got %q", automation.ResultPath(dir, "scaffold"), paths.TaskResultPath)
+	}
+	if paths.ReviewPath != automation.ReviewPath(dir, "scaffold") {
+		t.Fatalf("expected review path %q, got %q", automation.ReviewPath(dir, "scaffold"), paths.ReviewPath)
+	}
+	if paths.TaskNotesPath != tasknotes.Path(dir) {
+		t.Fatalf("expected task notes path %q, got %q", tasknotes.Path(dir), paths.TaskNotesPath)
+	}
+}
+
+func TestTaskExecutionPathsBuildDeterministicIsolatedPaths(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "plans", "vibedrive-plan.yaml")
+	cfg := &config.Config{
+		Workspace: dir,
+		PlanFile:  planPath,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 4,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+	}
+
+	paths := taskExecutionPaths(cfg, "api/db", 7, true)
+	again := taskExecutionPaths(cfg, "api/db", 7, true)
+	if paths.Name != again.Name {
+		t.Fatalf("expected deterministic workspace name, got %q then %q", paths.Name, again.Name)
+	}
+	if !regexp.MustCompile(`^007-api-db-[a-f0-9]{12}$`).MatchString(paths.Name) {
+		t.Fatalf("unexpected workspace name %q", paths.Name)
+	}
+
+	sameSlug := taskExecutionPaths(cfg, "api:db", 7, true)
+	if sameSlug.Name == paths.Name {
+		t.Fatalf("expected hash suffix to distinguish task IDs with the same slug, got %q", paths.Name)
+	}
+
+	wantWorkspace := filepath.Join(cfg.Parallel.WorktreeRoot, paths.Name)
+	if paths.Workspace != wantWorkspace {
+		t.Fatalf("expected workspace %q, got %q", wantWorkspace, paths.Workspace)
+	}
+	wantPlanFile := filepath.Join(paths.Workspace, "plans", "vibedrive-plan.yaml")
+	if paths.PlanFile != wantPlanFile {
+		t.Fatalf("expected isolated plan file %q, got %q", wantPlanFile, paths.PlanFile)
+	}
+	wantArtifactRoot := filepath.Join(cfg.Parallel.ArtifactRoot, paths.Name)
+	if paths.ArtifactRoot != wantArtifactRoot {
+		t.Fatalf("expected artifact root %q, got %q", wantArtifactRoot, paths.ArtifactRoot)
+	}
+	if paths.ArtifactBaseRoot != cfg.Parallel.ArtifactRoot {
+		t.Fatalf("expected artifact base root %q, got %q", cfg.Parallel.ArtifactRoot, paths.ArtifactBaseRoot)
+	}
+	wantResultPath := filepath.Join(wantArtifactRoot, "task-results", "api_db.json")
+	if paths.TaskResultPath != wantResultPath {
+		t.Fatalf("expected result path %q, got %q", wantResultPath, paths.TaskResultPath)
+	}
+	wantReviewPath := filepath.Join(wantArtifactRoot, "reviews", "api_db.json")
+	if paths.ReviewPath != wantReviewPath {
+		t.Fatalf("expected review path %q, got %q", wantReviewPath, paths.ReviewPath)
+	}
+	wantNotesPath := filepath.Join(wantArtifactRoot, "task-notes.yaml")
+	if paths.TaskNotesPath != wantNotesPath {
+		t.Fatalf("expected task notes path %q, got %q", wantNotesPath, paths.TaskNotesPath)
+	}
+}
+
+func TestCleanupTaskExecutionPathsRemovesOnlyOwnedChildren(t *testing.T) {
+	dir := t.TempDir()
+	workspaceRoot := filepath.Join(dir, "worktrees")
+	artifactRoot := filepath.Join(dir, "task-runs")
+	paths := TaskExecutionPaths{
+		Isolated:         true,
+		WorktreeRoot:     workspaceRoot,
+		Workspace:        filepath.Join(workspaceRoot, "001-task-abcdef123456"),
+		ArtifactBaseRoot: artifactRoot,
+		ArtifactRoot:     filepath.Join(artifactRoot, "001-task-abcdef123456"),
+	}
+	if err := os.MkdirAll(paths.Workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.MkdirAll(paths.ArtifactRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+
+	if err := cleanupTaskExecutionPaths(paths); err != nil {
+		t.Fatalf("cleanupTaskExecutionPaths returned error: %v", err)
+	}
+	if _, err := os.Stat(paths.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("expected workspace to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(paths.ArtifactRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected artifact root to be removed, stat err=%v", err)
+	}
+
+	outside := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	err := cleanupTaskExecutionPaths(TaskExecutionPaths{
+		Isolated:         true,
+		WorktreeRoot:     workspaceRoot,
+		Workspace:        outside,
+		ArtifactBaseRoot: artifactRoot,
+		ArtifactRoot:     filepath.Join(artifactRoot, "002-task-abcdef123456"),
+	})
+	if err == nil {
+		t.Fatal("expected cleanup to reject workspace outside owned root")
+	}
+	if !strings.Contains(err.Error(), "refusing to remove") {
+		t.Fatalf("unexpected cleanup error: %v", err)
+	}
+	if _, statErr := os.Stat(outside); statErr != nil {
+		t.Fatalf("expected outside directory to remain, stat err=%v", statErr)
+	}
+
+	outsideArtifact := filepath.Join(dir, "outside-artifact")
+	ownedWorkspace := filepath.Join(workspaceRoot, "003-task-abcdef123456")
+	if err := os.MkdirAll(ownedWorkspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.MkdirAll(outsideArtifact, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	err = cleanupTaskExecutionPaths(TaskExecutionPaths{
+		Isolated:         true,
+		WorktreeRoot:     workspaceRoot,
+		Workspace:        ownedWorkspace,
+		ArtifactBaseRoot: artifactRoot,
+		ArtifactRoot:     outsideArtifact,
+	})
+	if err == nil {
+		t.Fatal("expected cleanup to reject artifact path outside owned root")
+	}
+	if _, statErr := os.Stat(outsideArtifact); statErr != nil {
+		t.Fatalf("expected outside artifact directory to remain, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(ownedWorkspace); statErr != nil {
+		t.Fatalf("expected owned workspace to remain when artifact path is unsafe, stat err=%v", statErr)
+	}
+}
+
+func TestRunKeepsConfiguredParallelismSerialUntilOrchestrationExists(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: todo
+  - id: docs
+    title: Docs
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 2,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+		Claude: config.ClaudeConfig{
+			SessionStrategy: config.SessionStrategySessionID,
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "finish", Type: config.StepTypeClaude, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	var mu sync.Mutex
+	active := 0
+	maxActive := 0
+	agent := &fakeAgent{
+		planPath: planPath,
+		onRun: func(_ string) error {
+			mu.Lock()
+			active++
+			if active > maxActive {
+				maxActive = active
+			}
+			mu.Unlock()
+
+			time.Sleep(5 * time.Millisecond)
+
+			mu.Lock()
+			active--
+			mu.Unlock()
+			return nil
+		},
+	}
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		claude: agent,
+		newSession: func(_ string) (*claude.Session, error) {
+			return &claude.Session{
+				Strategy: config.SessionStrategySessionID,
+				ID:       "session-1",
+			}, nil
+		},
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if maxActive != 1 {
+		t.Fatalf("expected configured parallelism to remain serial in this phase, observed %d active prompts", maxActive)
+	}
+	if got := strings.Join(agent.prompts, "\n"); got != "finish task api\nfinish task docs" {
+		t.Fatalf("unexpected prompt order:\n%s", got)
 	}
 }
 

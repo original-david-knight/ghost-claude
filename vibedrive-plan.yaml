@@ -77,7 +77,7 @@ tasks:
     - id: parallel-runner-isolation-design
       title: Introduce isolated worktree execution design in config and runner scaffolding
       details: Add the configuration and runner structure needed for parallel task execution while keeping default behavior serial. Parallel execution should be opt-in, bounded by a max parallelism setting, and designed around isolated git worktrees or equivalent separate working directories. This task should establish the config model, validation, worktree naming, artifact path strategy, and tests without needing to complete full concurrent agent orchestration yet.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - plan-parallel-readiness-analysis
