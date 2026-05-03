@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -410,6 +411,14 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 		return err
 	}
 
+	var notesBefore taskNotesSnapshot
+	if !r.cfg.DryRun && isAgentTarget(target) && strings.TrimSpace(data.TaskNotesPath) != "" {
+		notesBefore, err = readTaskNotesSnapshot(data.TaskNotesPath)
+		if err != nil {
+			return fmt.Errorf("read task notes before step %q: %w", step.Name, err)
+		}
+	}
+
 	run := func() error {
 		switch target {
 		case config.AgentClaude:
@@ -432,7 +441,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
 				return nil
 			}
-			return r.claude.RunPrompt(stepCtx, session, prompt)
+			return r.runAgentPrompt(stepCtx, target, session, codexSession, step.Name, prompt)
 		case config.AgentCodex:
 			if r.codex == nil {
 				return fmt.Errorf("codex step %q requires a codex client", step.Name)
@@ -451,7 +460,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
 				return nil
 			}
-			return r.codex.RunPrompt(stepCtx, codexSession, prompt)
+			return r.runAgentPrompt(stepCtx, target, session, codexSession, step.Name, prompt)
 		case config.StepTypeExec:
 			command, err := render.Strings(step.Command, data)
 			if err != nil {
@@ -510,11 +519,107 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 	if r.cfg.DryRun {
 		return nil
 	}
+	if isAgentTarget(target) && strings.TrimSpace(data.TaskNotesPath) != "" {
+		if err := r.validateTaskNotesAfterAgentStep(stepCtx, target, session, codexSession, step.Name, data.Task.ID, data.TaskNotesPath, notesBefore); err != nil {
+			return err
+		}
+	}
 	if err := verifyRequiredOutputs(step.Name, requiredOutputs); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, stepName, prompt string) error {
+	switch target {
+	case config.AgentClaude:
+		if session == nil {
+			return fmt.Errorf("claude step %q requires a session", stepName)
+		}
+		return r.claude.RunPrompt(ctx, session, prompt)
+	case config.AgentCodex:
+		if r.codex == nil {
+			return fmt.Errorf("codex step %q requires a codex client", stepName)
+		}
+		return r.codex.RunPrompt(ctx, codexSession, prompt)
+	default:
+		return fmt.Errorf("step %q does not target an agent", stepName)
+	}
+}
+
+func (r *Runner) validateTaskNotesAfterAgentStep(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, stepName, taskID, notesPath string, before taskNotesSnapshot) error {
+	after, err := readTaskNotesSnapshot(notesPath)
+	if err != nil {
+		return fmt.Errorf("read task notes after step %q: %w", stepName, err)
+	}
+	if !before.changed(after) {
+		return nil
+	}
+
+	if _, err := tasknotes.Load(notesPath); err == nil {
+		return nil
+	} else {
+		prompt := taskNotesRepairPrompt(notesPath, taskID, err)
+		if r.shouldLogProgress() {
+			fmt.Fprintf(r.stderr, "warning: task notes YAML is invalid after step %q; asking %s to repair it\n", stepName, target)
+		}
+		if err := r.runAgentPrompt(ctx, target, session, codexSession, stepName, prompt); err != nil {
+			return fmt.Errorf("ask %s to repair task notes YAML after step %q: %w", target, stepName, err)
+		}
+		if _, err := tasknotes.Load(notesPath); err != nil {
+			return fmt.Errorf("task notes YAML is still invalid after repair prompt for step %q: %w", stepName, err)
+		}
+	}
+
+	return nil
+}
+
+type taskNotesSnapshot struct {
+	exists bool
+	data   []byte
+}
+
+func readTaskNotesSnapshot(path string) (taskNotesSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return taskNotesSnapshot{}, nil
+		}
+		return taskNotesSnapshot{}, err
+	}
+	return taskNotesSnapshot{exists: true, data: data}, nil
+}
+
+func (s taskNotesSnapshot) changed(next taskNotesSnapshot) bool {
+	if s.exists != next.exists {
+		return true
+	}
+	return !bytes.Equal(s.data, next.data)
+}
+
+func isAgentTarget(target string) bool {
+	switch target {
+	case config.AgentClaude, config.AgentCodex:
+		return true
+	default:
+		return false
+	}
+}
+
+func taskNotesRepairPrompt(path, taskID string, parseErr error) string {
+	return fmt.Sprintf(`The task notes YAML at %s does not parse after your previous step for task %s.
+
+Parse error:
+%s
+
+Fix %s so it is valid YAML. Use this shape:
+tasks:
+  - id: <task id>
+    status: done|in_progress|blocked|manual
+    notes: <brief notes>
+
+Preserve existing task notes and statuses as much as possible. Do not edit vibedrive-plan.yaml or make unrelated changes.`, path, taskID, parseErr, path)
 }
 
 func ensurePlanArtifactDirectories(data TemplateData) error {

@@ -30,19 +30,7 @@ func (f *fakeAgent) RunPrompt(_ context.Context, session *claude.Session, prompt
 	f.prompts = append(f.prompts, prompt)
 	f.sessionIDs = append(f.sessionIDs, session.ID)
 
-	if strings.HasPrefix(prompt, "write ") {
-		return writeOutput(strings.TrimPrefix(prompt, "write "))
-	}
-	if strings.HasPrefix(prompt, "finish task ") {
-		taskID := strings.TrimPrefix(prompt, "finish task ")
-		return updateTask(f.planPath, taskID, plan.StatusDone, "done")
-	}
-	if strings.HasPrefix(prompt, "progress task ") {
-		taskID := strings.TrimPrefix(prompt, "progress task ")
-		return updateTask(f.planPath, taskID, plan.StatusInProgress, "still working")
-	}
-
-	return nil
+	return handleFakePrompt(prompt, f.planPath)
 }
 
 func (f *fakeAgent) Close(session *claude.Session) error {
@@ -72,19 +60,7 @@ type fakeCodex struct {
 func (f *fakeCodex) RunPrompt(_ context.Context, session *codex.Session, prompt string) error {
 	f.prompts = append(f.prompts, prompt)
 
-	if strings.HasPrefix(prompt, "write ") {
-		return writeOutput(strings.TrimPrefix(prompt, "write "))
-	}
-	if strings.HasPrefix(prompt, "finish task ") {
-		taskID := strings.TrimPrefix(prompt, "finish task ")
-		return updateTask(f.planPath, taskID, plan.StatusDone, "done")
-	}
-	if strings.HasPrefix(prompt, "progress task ") {
-		taskID := strings.TrimPrefix(prompt, "progress task ")
-		return updateTask(f.planPath, taskID, plan.StatusInProgress, "still working")
-	}
-
-	return nil
+	return handleFakePrompt(prompt, f.planPath)
 }
 
 func (f *fakeCodex) Close(_ *codex.Session) error {
@@ -465,6 +441,82 @@ tasks:
 	}
 }
 
+func TestRunAsksAgentToRepairInvalidTaskNotesYAML(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		Coder:                config.AgentCodex,
+		Reviewer:             config.AgentCodex,
+		MaxStalledIterations: 1,
+		DefaultWorkflow:      "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "break-notes", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "break task notes {{ .Task.ID }}"},
+					{Name: "finish", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	codexAgent := &fakeCodex{planPath: planPath}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		codex:  codexAgent,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(codexAgent.prompts) != 3 {
+		t.Fatalf("expected original, repair, and finish prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if codexAgent.prompts[0] != "break task notes scaffold" {
+		t.Fatalf("expected first prompt to break task notes, got %q", codexAgent.prompts[0])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "does not parse") {
+		t.Fatalf("expected repair prompt to explain parse failure, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "task-notes.yaml") {
+		t.Fatalf("expected repair prompt to name task notes path, got %q", codexAgent.prompts[1])
+	}
+	if codexAgent.prompts[2] != "finish task scaffold" {
+		t.Fatalf("expected runner to continue after notes repair, got %q", codexAgent.prompts[2])
+	}
+
+	notesFile, err := tasknotes.Load(tasknotes.Path(dir))
+	if err != nil {
+		t.Fatalf("expected repaired task notes to parse, got %v", err)
+	}
+	note, ok := notesFile.Find("scaffold")
+	if !ok {
+		t.Fatal("expected scaffold task note")
+	}
+	if note.Status != plan.StatusDone {
+		t.Fatalf("expected task note status %q, got %q", plan.StatusDone, note.Status)
+	}
+}
+
 func TestRunDispatchesCoderAndReviewerStepsWithClaudeReviewer(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
@@ -834,6 +886,37 @@ func updateTask(path, taskID, status, notes string) error {
 	}
 
 	return os.ErrNotExist
+}
+
+func handleFakePrompt(prompt, planPath string) error {
+	if strings.HasPrefix(prompt, "write ") {
+		return writeOutput(strings.TrimPrefix(prompt, "write "))
+	}
+	if strings.HasPrefix(prompt, "finish task ") {
+		taskID := strings.TrimPrefix(prompt, "finish task ")
+		return updateTask(planPath, taskID, plan.StatusDone, "done")
+	}
+	if strings.HasPrefix(prompt, "progress task ") {
+		taskID := strings.TrimPrefix(prompt, "progress task ")
+		return updateTask(planPath, taskID, plan.StatusInProgress, "still working")
+	}
+	if strings.HasPrefix(prompt, "break task notes ") {
+		taskID := strings.TrimPrefix(prompt, "break task notes ")
+		return writeTaskNotes(filepath.Dir(planPath), "tasks:\n  - id: "+taskID+"\n    notes: [broken\n")
+	}
+	if strings.Contains(prompt, "does not parse") && strings.Contains(prompt, "task-notes.yaml") {
+		return writeTaskNotes(filepath.Dir(planPath), "tasks:\n  - id: scaffold\n    status: in_progress\n    notes: repaired\n")
+	}
+
+	return nil
+}
+
+func writeTaskNotes(workspace, content string) error {
+	path := tasknotes.Path(workspace)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func writeOutput(path string) error {
