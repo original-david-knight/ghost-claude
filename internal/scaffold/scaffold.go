@@ -12,6 +12,12 @@ max_iterations: 0
 max_stalled_iterations: 2
 default_workflow: implement
 
+parallel:
+  enabled: false
+  max_parallelism: 1
+  worktree_root: .vibedrive/worktrees
+  artifact_root: .vibedrive/task-runs
+
 claude:
   command: claude
   transport: tui

@@ -204,6 +204,48 @@ func TestExamplePlanLoadsValidatesAndSaves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
+	if got := len(file.Project.Components); got < 4 {
+		t.Fatalf("expected example plan to document component boundaries, got %d components", got)
+	}
+	service, ok := file.FindTask("implement-service-contract")
+	if !ok {
+		t.Fatal("expected example plan to include service implementation task")
+	}
+	if service.Component != "service" {
+		t.Fatalf("expected service task component metadata, got %q", service.Component)
+	}
+	if got, want := []string(service.OwnsPaths), []string{"internal/service/**"}; !slices.Equal(got, want) {
+		t.Fatalf("expected service owned paths %v, got %v", want, got)
+	}
+	if got, want := []string(service.ReadsContracts), []string{"internal/contracts/public-api.md"}; !slices.Equal(got, want) {
+		t.Fatalf("expected service contract reads %v, got %v", want, got)
+	}
+	checkpoint, ok := file.FindTask("integration-checkpoint")
+	if !ok {
+		t.Fatal("expected example plan to include an integration checkpoint")
+	}
+	if checkpoint.Workflow != "checkpoint" {
+		t.Fatalf("expected integration checkpoint workflow, got %q", checkpoint.Workflow)
+	}
+	if got, want := []string(checkpoint.Deps), []string{"implement-service-contract", "implement-web-contract"}; !slices.Equal(got, want) {
+		t.Fatalf("expected integration checkpoint deps %v, got %v", want, got)
+	}
+	for i := range file.Tasks {
+		if file.Tasks[i].ID == "define-public-contract" {
+			file.Tasks[i].Status = StatusDone
+		}
+	}
+	analysis, err := file.AnalyzeReadyBatch(3)
+	if err != nil {
+		t.Fatalf("AnalyzeReadyBatch returned error: %v", err)
+	}
+	if got, want := taskIDs(analysis.Selected), []string{"implement-service-contract", "implement-web-contract"}; !slices.Equal(got, want) {
+		t.Fatalf("expected example plan to expose a safe parallel batch %v, got %v", want, got)
+	}
+	exclusion := requireReadyBatchExclusion(t, analysis, "integration-checkpoint")
+	if exclusion.Reason != ReadyBatchReasonUnmetDependencies {
+		t.Fatalf("expected checkpoint to wait for integrated work, got %#v", exclusion)
+	}
 	if err := file.Validate(); err != nil {
 		t.Fatalf("Validate returned error: %v", err)
 	}

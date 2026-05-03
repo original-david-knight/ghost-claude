@@ -154,7 +154,7 @@ tasks:
     - id: docs-and-examples-parallel-boundaries
       title: Document boundary-first planning and parallel execution
       details: Update user-facing docs and examples to explain how Vibedrive uses components, contracts, owned paths, and conflicts to reduce per-agent context. Documentation should make clear that parallel execution is an outcome of explicit boundaries, not a blanket speed setting. Include examples for serial fallback, boundary analysis, safe parallel batches, and checkpoint placement after integration.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - parallel-merge-and-finalize

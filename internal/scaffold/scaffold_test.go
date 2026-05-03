@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"vibedrive/internal/config"
 )
 
 func TestWriteWritesSampleConfig(t *testing.T) {
@@ -25,6 +27,7 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 	if !strings.Contains(string(configContent), "plan_file: vibedrive-plan.yaml") {
 		t.Fatalf("expected plan mode sample config, got %q", string(configContent))
 	}
+	assertScaffoldedParallelDefaults(t, configPath, string(configContent))
 	if !strings.Contains(string(configContent), "codex:") {
 		t.Fatalf("expected scaffolded config to define codex, got %q", string(configContent))
 	}
@@ -123,6 +126,7 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	if !strings.Contains(string(configContent), "workspace: .") {
 		t.Fatalf("expected sample config content, got %q", string(configContent))
 	}
+	assertScaffoldedParallelDefaults(t, configPath, string(configContent))
 	if !strings.Contains(string(configContent), "type: agent") || !strings.Contains(string(configContent), "actor: coder") {
 		t.Fatalf("expected scaffolded config to use runtime-resolved coder steps, got %q", string(configContent))
 	}
@@ -161,5 +165,32 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	}
 	if strings.Contains(string(configContent), "fresh_session: true") {
 		t.Fatalf("expected scaffolded config to avoid extra Claude sessions in the default workflow, got %q", string(configContent))
+	}
+}
+
+func assertScaffoldedParallelDefaults(t *testing.T, configPath, content string) {
+	t.Helper()
+
+	for _, want := range []string{
+		"parallel:",
+		"enabled: false",
+		"max_parallelism: 1",
+		"worktree_root: .vibedrive/worktrees",
+		"artifact_root: .vibedrive/task-runs",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected scaffolded config to include parallel default %q, got %q", want, content)
+		}
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load scaffolded config returned error: %v", err)
+	}
+	if cfg.Parallel.Enabled {
+		t.Fatal("expected scaffolded config to keep parallel execution disabled")
+	}
+	if cfg.EffectiveParallelism() != 1 {
+		t.Fatalf("expected scaffolded config to stay serial by default, got effective parallelism %d", cfg.EffectiveParallelism())
 	}
 }

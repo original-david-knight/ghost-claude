@@ -17,3 +17,6 @@ tasks:
     - id: parallel-merge-and-finalize
       status: done
       notes: Parallel worker outputs now integrate through root-side patch apply and finalize in plan order. Fresh reruns should keep worker artifacts isolated and let root verification decide done status per task.
+    - id: docs-and-examples-parallel-boundaries
+      status: done
+      notes: Documented boundary-first planning, ready-batch inspection, and opt-in parallel config. Scaffold defaults now explicitly keep serial execution; go test ./... passed.

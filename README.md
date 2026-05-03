@@ -12,6 +12,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 - **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
 - **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
 - **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). Plans should include any harnesses or instrumentation agents need to verify their own work, such as scripted screenshot capture for UI changes. A task only stays `done` when its commands pass; otherwise it drops back to `in_progress` with a failure note.
+- **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Vibedrive uses that metadata to reduce each agent's context and, when parallel execution is explicitly enabled, to select safe batches.
 - **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
 
 ## Example
@@ -79,6 +80,7 @@ Preview what would happen without touching anything:
 
 ```bash
 vibedrive run --dry-run
+vibedrive plan ready-batch --limit 3
 vibedrive init --print-sources
 vibedrive init --print-sources --source DESIGN.md --source docs/specs
 ```
@@ -122,11 +124,12 @@ vibedrive init --source DESIGN.md --author <same-author> --critic <same-critic>
 
 For each iteration:
 
-1. Select the next ready task in `vibedrive-plan.yaml`, with `in_progress` tasks preferred over `todo` tasks and dependencies respected.
-2. Start a fresh Claude session when a Claude step needs one.
-3. Run every configured step in order. Claude steps share one session for the work item by default, but `fresh_session: true` isolates a Claude step in its own session. Codex steps run non-interactively.
-4. Close any Claude sessions that were opened.
-5. Re-read the queue state. If the selected item changed state, advance. If not, count a stall and retry.
+1. Load `vibedrive-plan.yaml`. With default serial execution, select the next ready task, preferring `in_progress` over `todo` and respecting dependencies.
+2. When `parallel.enabled: true` and effective parallelism is greater than one, analyze the ready tasks for a safe batch. Tasks only run together when their declared boundaries make that safe; otherwise the runner falls back to one task for that iteration.
+3. Start fresh agent sessions when a step needs one.
+4. Run every configured step in order for each selected task. Claude and Codex TUI steps share one session for the work item by default, but `fresh_session: true` isolates a step in its own session.
+5. Close any agent sessions that were opened.
+6. Re-read the queue state. If the selected item changed state, advance. If not, count a stall and retry.
 
 The runner stops when there is no work left, when `max_iterations` is reached, or when the same item stalls `max_stalled_iterations` times in a row.
 
@@ -154,6 +157,7 @@ vibedrive start [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
 vibedrive restart [-config PATH] [-workspace DIR]
+vibedrive plan ready-batch [-config vibedrive.yaml] [-workspace DIR] [-plan vibedrive-plan.yaml] [-limit N]
 vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 vibedrive help
 ```
@@ -172,6 +176,12 @@ plan_file: vibedrive-plan.yaml
 max_iterations: 0
 max_stalled_iterations: 2
 default_workflow: implement
+
+parallel:
+  enabled: false
+  max_parallelism: 1
+  worktree_root: .vibedrive/worktrees
+  artifact_root: .vibedrive/task-runs
 
 claude:
   command: claude
@@ -246,45 +256,104 @@ workflows:
 
 ### `vibedrive-plan.yaml`
 
-The runner uses a machine-readable task file. The repository ships a complete starter in [`vibedrive-plan.example.yaml`](vibedrive-plan.example.yaml). Minimal example:
+The runner uses a machine-readable task file. The repository ships a complete starter in [`vibedrive-plan.example.yaml`](vibedrive-plan.example.yaml). Boundary-aware example:
 
 ```yaml
 project:
-  name: planet-v1
-  objective: Ship Planet v1 end-to-end in this repository.
+  name: service-web-v1
+  objective: Ship the service and web client behind a stable public contract.
   source_docs:
     - DESIGN.md
     - TEST_PLAN.md
   constraint_files:
     - DESIGN.md
+  components:
+    - id: contracts
+      name: Shared contracts
+      owned_paths:
+        - internal/contracts/**
+      provides_contracts:
+        - internal/contracts/public-api.md
+    - id: service
+      name: Service implementation
+      owned_paths:
+        - internal/service/**
+      reads_contracts:
+        - internal/contracts/public-api.md
+    - id: web
+      name: Web client
+      owned_paths:
+        - web/**
+      reads_contracts:
+        - internal/contracts/public-api.md
 
 tasks:
-  - id: scaffold
-    title: Scaffold the repo and get `go build ./...` green
+  - id: define-public-contract
+    title: Define the public contract shared by service and web work
     workflow: implement
     status: todo
-    details: Set up the initial layout and keep the repo buildable after each change.
-    context_files:
-      - DESIGN.md
+    component: contracts
+    owns_paths:
+      - internal/contracts/**
+    provides_contracts:
+      - internal/contracts/public-api.md
     acceptance:
-      - `go build ./...` succeeds
-      - fast test script exists and runs
+      - contract file defines the service and web interface
       - task notes capture what was learned in this phase and any replanning input for a fresh rerun
     verify_commands:
-      - go build ./...
-    commit_message: feat: scaffold the repository
+      - test -f internal/contracts/public-api.md
+    commit_message: docs: define public integration contract
 
-  - id: scaffold-checkpoint
-    title: Run the first full-suite checkpoint and fix regressions
+  - id: implement-service-contract
+    title: Implement the service side of the public contract
+    workflow: implement
+    status: todo
+    deps:
+      - define-public-contract
+    component: service
+    owns_paths:
+      - internal/service/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+    acceptance:
+      - service behavior matches the contract
+    verify_commands:
+      - go test ./internal/service/...
+
+  - id: implement-web-contract
+    title: Implement the web client side of the public contract
+    workflow: implement
+    status: todo
+    deps:
+      - define-public-contract
+    component: web
+    owns_paths:
+      - web/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+    acceptance:
+      - web behavior matches the contract
+    verify_commands:
+      - npm test --prefix web
+
+  - id: integration-checkpoint
+    title: Run the service and web integration checkpoint
     workflow: checkpoint
     status: todo
     deps:
-      - scaffold
+      - implement-service-contract
+      - implement-web-contract
+    reads_contracts:
+      - internal/contracts/public-api.md
+    conflicts_with:
+      - implement-service-contract
+      - implement-web-contract
     acceptance:
-      - full checkpoint verification is complete
+      - full integration verification is complete after both component implementations are integrated
       - task notes capture what was learned in this phase and any replanning input for a fresh rerun
     verify_commands:
       - go test ./...
+      - npm test --prefix web
 ```
 
 The intended use is:
@@ -302,6 +371,80 @@ The intended use is:
 - generated plans should give agents a self-verification path for each task, including preparatory checks, fixtures, harnesses, screenshot capture, or other instrumentation when existing commands are not enough
 - those risk triggers are about expected breadth and discovered risk from the source inputs or prior notes, not runtime-observed changed-file counts
 - your external planning tool can still generate both files if you prefer that flow
+
+### Boundary-first parallelism
+
+Parallel execution is an outcome of explicit boundaries, not a blanket speed setting. A good plan first identifies components, the contract files they share, the paths each task may edit, and the tasks that must never run together. That metadata lets each agent receive less context and gives the runner enough information to decide whether a batch is safe.
+
+Use `project.components` for durable ownership:
+
+```yaml
+components:
+  - id: service
+    owned_paths:
+      - internal/service/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+  - id: web
+    owned_paths:
+      - web/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+```
+
+Then give each implementation task explicit edit authority:
+
+```yaml
+tasks:
+  - id: implement-service-contract
+    deps: [define-public-contract]
+    component: service
+    owns_paths:
+      - internal/service/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+
+  - id: implement-web-contract
+    deps: [define-public-contract]
+    component: web
+    owns_paths:
+      - web/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+```
+
+After `define-public-contract` is `done`, those two tasks are safe to batch because they write disjoint owned paths and only read the shared contract. Put the integration checkpoint after the independent work has been merged back:
+
+```yaml
+  - id: integration-checkpoint
+    workflow: checkpoint
+    deps:
+      - implement-service-contract
+      - implement-web-contract
+    reads_contracts:
+      - internal/contracts/public-api.md
+    verify_commands:
+      - go test ./...
+      - npm test --prefix web
+```
+
+Use `vibedrive plan ready-batch` to inspect the decision before launching agents:
+
+```bash
+vibedrive plan ready-batch --limit 3
+```
+
+Example output after the contract task is complete:
+
+```text
+Ready batch (2/3):
+  - implement-service-contract: Implement the service side of the public contract
+  - implement-web-contract: Implement the web client side of the public contract
+Not selected:
+  - integration-checkpoint: unmet_dependencies deps=implement-service-contract,implement-web-contract
+```
+
+Serial fallback is deliberate. A ready task with no `owns_paths` and no component-owned paths can still run, but it will not be batched with another selected task because the runner cannot prove its write boundary. Ready tasks also remain serial when they list each other in `conflicts_with`, write overlapping `owns_paths`, or both write the same `provides_contracts` file. The inspection command reports those reasons as `missing_ownership_metadata`, `explicit_conflict`, `ownership_conflict`, or `contract_writer_conflict`.
 
 ### Project fields
 
@@ -364,6 +507,18 @@ The intended use is:
 | `max_stalled_iterations` | `2`           | Abort after this many no-progress iterations on the same item.     |
 | `default_workflow`       | unset         | Workflow used when a plan task omits `workflow`.                   |
 | `dry_run`                | `false`       | Render prompts and commands without running anything.              |
+| `parallel`               | serial        | Optional block for isolated parallel task execution. Defaults keep effective parallelism at one. |
+
+### `parallel` block
+
+| Field             | Default                    | Meaning                                                                 |
+| ----------------- | -------------------------- | ----------------------------------------------------------------------- |
+| `enabled`         | `false`                    | Opts into parallel execution. When false, `max_parallelism` is ignored and the runner stays serial. |
+| `max_parallelism` | `1`                        | Maximum number of safe ready tasks to run in one batch. Must be at least `1`. |
+| `worktree_root`   | `.vibedrive/worktrees`     | Workspace-relative root for isolated git worktrees used by parallel workers. |
+| `artifact_root`   | `.vibedrive/task-runs`     | Workspace-relative root for isolated task results, review artifacts, and task notes from parallel workers. |
+
+The scaffold writes `parallel.enabled: false` and `max_parallelism: 1`, so existing plans run exactly one task at a time. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. Parallel agent steps also require non-fullscreen transports; with the default `tui` transports, vibedrive warns and continues serially instead of trying to drive multiple fullscreen sessions at once.
 
 ### `claude` block
 
@@ -435,6 +590,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - In the default scaffold, task-result notes are intended to capture what the coder learned in that phase so you can revise the plan and rerun it from a fresh environment.
 - `vibedrive task finalize` accepts `done`, `in_progress`, `blocked`, and `manual` task results. The scaffolded prompts only instruct the implementation steps to emit the first three.
 - `verify_commands` lets plan tasks declare deterministic checks for the exec finalizer to run before a task can stay `done`.
+- `vibedrive plan ready-batch` loads the plan without launching agents and explains why ready tasks are or are not parallel-ready.
 - If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing.
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.

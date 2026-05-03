@@ -7,65 +7,124 @@ project:
   constraint_files:
     - DESIGN.md
   components:
-    - id: plan-schema
-      name: Plan schema and validation
+    - id: contracts
+      name: Shared contracts and integration boundaries
       owned_paths:
-        - internal/plan/**
-      reads_contracts:
-        - README.md
+        - internal/contracts/**
       provides_contracts:
-        - internal/plan/plan.go
-    - id: docs
-      name: User-facing documentation and examples
+        - internal/contracts/public-api.md
+    - id: service
+      name: Service implementation
       owned_paths:
-        - README.md
-        - vibedrive-plan.example.yaml
+        - internal/service/**
       reads_contracts:
-        - internal/plan/plan.go
+        - internal/contracts/public-api.md
+      provides_contracts:
+        - internal/service/service.go
+    - id: web
+      name: Web client
+      owned_paths:
+        - web/**
+      reads_contracts:
+        - internal/contracts/public-api.md
+    - id: integration
+      name: Integrated verification
+      owned_paths:
+        - internal/**
+        - web/**
+      reads_contracts:
+        - internal/contracts/public-api.md
 
 tasks:
-  - id: bootstrap
-    title: Replace this sample task with a real project task
+  - id: define-public-contract
+    title: Define the public contract shared by service and web work
     workflow: implement
     status: todo
-    component: plan-schema
+    component: contracts
     owns_paths:
-      - internal/plan/**
-    reads_contracts:
-      - README.md
+      - internal/contracts/**
     provides_contracts:
-      - internal/plan/plan.go
-    conflicts_with:
-      - checkpoint-1
+      - internal/contracts/public-api.md
     details: >-
-      Describe the goal, relevant files, and any important constraints the agent
-      should keep in mind while implementing this task. Keep routine testing and
-      cleanup inline here unless a trigger-justified follow-up task is needed.
-      Include any automated checks, harnesses, fixtures, instrumentation, or
-      artifact capture needed for agents to verify the work without manual help.
+      Establish the contract file before implementation tasks begin so later
+      agents can work from a narrow, stable interface instead of rereading the
+      whole repository.
     acceptance:
-      - Define concrete acceptance criteria here.
-      - Agents can verify the work with the listed commands or artifacts without manual help.
+      - The contract file names the request, response, and error behavior needed by the service and web components.
+      - The contract is specific enough for downstream tasks to implement against it without extra product context.
       - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
     verify_commands:
-      - go test ./...
-    commit_message: "feat: replace the sample bootstrap task"
+      - test -f internal/contracts/public-api.md
+    commit_message: "docs: define public integration contract"
 
-  - id: checkpoint-1
-    title: Replace this sample checkpoint with a real verification gate
+  - id: implement-service-contract
+    title: Implement the service side of the public contract
+    workflow: implement
+    status: todo
+    deps:
+      - define-public-contract
+    component: service
+    owns_paths:
+      - internal/service/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+    provides_contracts:
+      - internal/service/service.go
+    details: >-
+      Implement only the service-owned paths against the public contract. Do
+      not change web-owned files in this task.
+    acceptance:
+      - Service behavior matches internal/contracts/public-api.md.
+      - Service tests cover the contract-level success and error cases.
+      - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+    verify_commands:
+      - go test ./internal/service/...
+    commit_message: "feat: implement service contract"
+
+  - id: implement-web-contract
+    title: Implement the web client side of the public contract
+    workflow: implement
+    status: todo
+    deps:
+      - define-public-contract
+    component: web
+    owns_paths:
+      - web/**
+    reads_contracts:
+      - internal/contracts/public-api.md
+    details: >-
+      Implement only the web-owned paths against the public contract. This task
+      is parallel-ready with implement-service-contract because the tasks write
+      disjoint owned paths and only read the shared contract.
+    acceptance:
+      - Web behavior matches internal/contracts/public-api.md.
+      - Web verification covers loading, success, and contract-level error states.
+      - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
+    verify_commands:
+      - npm test --prefix web
+    commit_message: "feat: implement web contract"
+
+  - id: integration-checkpoint
+    title: Run the service and web integration checkpoint
     workflow: checkpoint
     status: todo
     deps:
-      - bootstrap
-    component: docs
+      - implement-service-contract
+      - implement-web-contract
+    component: integration
     owns_paths:
-      - README.md
-      - vibedrive-plan.example.yaml
+      - internal/**
+      - web/**
     reads_contracts:
-      - internal/plan/plan.go
+      - internal/contracts/public-api.md
+    conflicts_with:
+      - implement-service-contract
+      - implement-web-contract
     acceptance:
-      - Define the full-suite or milestone gate here.
+      - Full service and web integration verification is complete after both component implementations are integrated.
+      - Any integration regression is fixed or captured in task notes for a fresh replan.
       - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
     verify_commands:
       - go test ./...
-    commit_message: "chore: record the first project checkpoint"
+      - npm test --prefix web
+    commit_message: "chore: verify service and web integration"
