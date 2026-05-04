@@ -23,6 +23,7 @@ From inside the repo you want built:
 vibedrive start               # alias for create; does not require vibedrive.yaml
 vibedrive create              # interactively author DESIGN.md with the default Codex author and Claude critic
 vibedrive init DESIGN.md      # scaffold vibedrive.yaml + vibedrive-plan.yaml from your spec
+vibedrive view                # inspect plan progress, dependency graph, and workflow steps
 vibedrive run                 # run the loop: codex codes, claude reviews
 ```
 
@@ -62,6 +63,7 @@ vibedrive init DESIGN.md    # single positional source alias
 vibedrive init --source DESIGN.md --source docs/specs
 vibedrive init --source DESIGN.md --source docs/specs --print-sources   # preview resolved sources without writing config or plan
 vibedrive restart           # replans from prior task notes, then resets vibedrive-plan.yaml to a fresh-run state
+vibedrive view              # prints current task status, dependency graph, and configured workflow steps
 vibedrive run    # starts the loop with coder=codex and reviewer=claude
 vibedrive run --coder claude --reviewer codex   # flips roles at run time without changing vibedrive-plan.yaml
 vibedrive run --coder codex --reviewer codex    # same agent can both code and review
@@ -73,6 +75,7 @@ Target a different repo without `cd`:
 vibedrive create --workspace /path/to/repo
 vibedrive init --workspace /path/to/repo
 vibedrive restart --workspace /path/to/repo
+vibedrive view --workspace /path/to/repo
 vibedrive run  --workspace /path/to/repo
 ```
 
@@ -80,6 +83,7 @@ Preview what would happen without touching anything:
 
 ```bash
 vibedrive run --dry-run
+vibedrive view
 vibedrive plan ready-batch --limit 3
 vibedrive init --print-sources
 vibedrive init --print-sources --source DESIGN.md --source docs/specs
@@ -157,6 +161,7 @@ vibedrive start [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
 vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
 vibedrive restart [-config PATH] [-workspace DIR]
+vibedrive view [-config PATH] [-workspace DIR] [-plan vibedrive-plan.yaml]
 vibedrive plan ready-batch [-config vibedrive.yaml] [-workspace DIR] [-plan vibedrive-plan.yaml] [-limit N]
 vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 vibedrive help
@@ -446,6 +451,16 @@ Not selected:
 
 Serial fallback is deliberate. A ready task with no `owns_paths` and no component-owned paths can still run, but it will not be batched with another selected task because the runner cannot prove its write boundary. Ready tasks also remain serial when they list each other in `conflicts_with`, write overlapping `owns_paths`, or both write the same `provides_contracts` file. The inspection command reports those reasons as `missing_ownership_metadata`, `explicit_conflict`, `ownership_conflict`, or `contract_writer_conflict`.
 
+Use `vibedrive view` for the broader project snapshot. It prints the current task counts, next ready task, an ASCII dependency graph, and the configured workflow step pipeline for each task:
+
+```bash
+vibedrive view
+vibedrive view --workspace /path/to/repo
+vibedrive view --plan vibedrive-plan.yaml
+```
+
+Task completion comes from `vibedrive-plan.yaml`. Vibedrive does not persist per-step history, so the view marks workflow steps from the enclosing task status: steps under a `done` task are shown as complete, while steps under `todo`, `in_progress`, `blocked`, or `manual` tasks inherit that task marker.
+
 ### Project fields
 
 | Field              | Meaning                                                                 |
@@ -591,6 +606,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `vibedrive task finalize` accepts `done`, `in_progress`, `blocked`, and `manual` task results. The scaffolded prompts only instruct the implementation steps to emit the first three.
 - `verify_commands` lets plan tasks declare deterministic checks for the exec finalizer to run before a task can stay `done`.
 - `vibedrive plan ready-batch` loads the plan without launching agents and explains why ready tasks are or are not parallel-ready.
+- `vibedrive view` loads the plan without launching agents and displays progress, the task dependency graph, and each task's configured workflow steps.
 - If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing.
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.

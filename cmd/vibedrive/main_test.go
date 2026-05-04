@@ -195,6 +195,117 @@ func TestReadyBatchCommandRejectsPositionalArguments(t *testing.T) {
 	}
 }
 
+func TestViewCommandPrintsTaskGraphAndWorkflowSteps(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive.yaml"), []byte(`workspace: .
+plan_file: vibedrive-plan.yaml
+default_workflow: implement
+workflows:
+  implement:
+    steps:
+      - name: execute
+        type: agent
+        actor: coder
+        prompt: execute
+      - name: review
+        type: agent
+        actor: reviewer
+        prompt: review
+      - name: finalize
+        type: exec
+        command:
+          - echo
+          - done
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive-plan.yaml"), []byte(`project:
+  name: demo
+  objective: Ship the demo.
+tasks:
+  - id: db
+    title: Build DB
+    status: done
+  - id: api
+    title: Build API
+    status: in_progress
+    deps:
+      - db
+  - id: ui
+    title: Build UI
+    status: todo
+    deps:
+      - api
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile plan returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := viewCommand([]string{"--workspace", dir}, &out)
+	if err != nil {
+		t.Fatalf("viewCommand returned error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Project: demo",
+		"Progress: 1/3 tasks done (33%)",
+		"Next: api - Build API",
+		"Task Graph:",
+		"[x] db (done) - Build DB",
+		"[~] api (in_progress) - Build API",
+		"[ ] ui (todo) - Build UI",
+		"steps (implement): [x] execute(agent:coder) -> [x] review(agent:reviewer) -> [x] finalize(exec)",
+		"steps (implement): [~] execute(agent:coder) -> [~] review(agent:reviewer) -> [~] finalize(exec)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected view output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func TestViewCommandSupportsPlanWithoutConfig(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	if err := os.WriteFile(planPath, []byte(`project:
+  name: demo
+tasks:
+  - id: api
+    title: API work
+    status: todo
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile plan returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := viewCommand([]string{"--workspace", dir, "--plan", "vibedrive-plan.yaml"}, &out)
+	if err != nil {
+		t.Fatalf("viewCommand returned error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Project: demo",
+		"[ ] api (todo) - API work",
+		"steps: unavailable (config not loaded)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected view output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func TestViewCommandRejectsPositionalArguments(t *testing.T) {
+	var out bytes.Buffer
+	err := viewCommand([]string{"unexpected"}, &out)
+	if err == nil {
+		t.Fatal("expected viewCommand to reject positional arguments")
+	}
+	if !strings.Contains(err.Error(), "does not accept positional arguments") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestApplyRuntimeAgentRolesUsesDefaults(t *testing.T) {
 	cfg := newRuntimeRoleConfig()
 

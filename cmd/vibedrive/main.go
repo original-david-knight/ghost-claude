@@ -46,6 +46,8 @@ func realMain() error {
 		return initCommand(ctx, args[1:])
 	case "restart":
 		return restartCommand(ctx, args[1:])
+	case "view":
+		return viewCommand(args[1:], os.Stdout)
 	case "plan":
 		return planCommand(args[1:])
 	case "task":
@@ -196,6 +198,7 @@ Usage:
   vibedrive create [-workspace DIR] [--author claude|codex] [--critic claude|codex]
   vibedrive init [-config vibedrive.yaml] [-workspace DIR] [--source PATH ...] [--author claude|codex] [--critic claude|codex] [--print-sources] [-force] [SOURCE]
   vibedrive restart [-config vibedrive.yaml] [-workspace /path/to/repo]
+  vibedrive view [-config vibedrive.yaml] [-workspace /path/to/repo] [-plan vibedrive-plan.yaml]
   vibedrive plan ready-batch [-config vibedrive.yaml] [-workspace /path/to/repo] [-plan vibedrive-plan.yaml] [-limit N]
   vibedrive task finalize --workspace DIR --plan PATH --task TASK_ID --result PATH [--message MSG]
 
