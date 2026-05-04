@@ -23,6 +23,7 @@ import (
 	"vibedrive/internal/plan"
 	"vibedrive/internal/render"
 	"vibedrive/internal/tasknotes"
+	"vibedrive/internal/tmuxagent"
 	"vibedrive/pkg/agentcli/claude"
 	"vibedrive/pkg/agentcli/codex"
 )
@@ -37,6 +38,8 @@ type Runner struct {
 	executablePath  string
 	newSession      func(string) (*claude.Session, error)
 	newCodexSession func() (*codex.Session, error)
+	tmux            *tmuxagent.Controller
+	tmuxAnnounced   bool
 }
 
 type TemplateData struct {
@@ -138,10 +141,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("plan_file is required")
 	}
 	if r.cfg.EffectiveParallelism() > 1 && !r.cfg.DryRun {
-		if target := r.fullscreenParallelAgent(); target != "" {
-			fmt.Fprintf(r.stderr, "warning: parallel execution needs non-fullscreen agent transports; %s is configured for fullscreen TUI, continuing serially\n", target)
-			return r.runPlan(ctx)
-		}
+		defer r.closeParallelTmux()
 		return r.runParallelPlan(ctx)
 	}
 	return r.runPlan(ctx)
@@ -359,6 +359,16 @@ type preparedParallelTask struct {
 }
 
 func (r *Runner) runParallelBatch(ctx context.Context, currentPlan *plan.File, tasks []plan.Task, iteration int) ([]parallelTaskResult, error) {
+	needsTmux, err := r.parallelBatchNeedsTmux(tasks)
+	if err != nil {
+		return nil, err
+	}
+	if needsTmux {
+		if err := r.ensureParallelTmux(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	results := make([]parallelTaskResult, len(tasks))
 	prepared := make([]preparedParallelTask, len(tasks))
 	ready := make([]int, 0, len(tasks))
@@ -669,30 +679,56 @@ func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (
 		return nil, err
 	}
 	if needsClaude {
-		claudeAgent, err := claude.New(
-			workerCfg.Claude.Command,
-			workerCfg.Claude.Args,
-			workerCfg.Workspace,
-			workerCfg.Claude.Transport,
-			workerCfg.Claude.StartupTimeout,
-			r.stdout,
-			r.stderr,
-		)
+		var claudeAgent claudeClient
+		var err error
+		if r.tmux != nil {
+			claudeAgent, err = newTmuxClaudeClient(
+				workerCfg.Claude.Command,
+				workerCfg.Claude.Args,
+				workerCfg.Workspace,
+				workerCfg.Claude.StartupTimeout,
+				r.tmux,
+				paths.Name,
+			)
+		} else {
+			claudeAgent, err = claude.New(
+				workerCfg.Claude.Command,
+				workerCfg.Claude.Args,
+				workerCfg.Workspace,
+				workerCfg.Claude.Transport,
+				workerCfg.Claude.StartupTimeout,
+				r.stdout,
+				r.stderr,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}
 		worker.claude = claudeAgent
 	}
 	if needsCodex {
-		codexAgent, err := codex.New(
-			workerCfg.Codex.Command,
-			workerCfg.Codex.Args,
-			workerCfg.Workspace,
-			workerCfg.Codex.Transport,
-			workerCfg.Codex.StartupTimeout,
-			r.stdout,
-			r.stderr,
-		)
+		var codexAgent codexClient
+		var err error
+		if r.tmux != nil {
+			codexAgent, err = newTmuxCodexClient(
+				workerCfg.Codex.Command,
+				workerCfg.Codex.Args,
+				workerCfg.Workspace,
+				workerCfg.Codex.StartupTimeout,
+				r.tmux,
+				paths.Name,
+			)
+		} else {
+			codexAgent, err = codex.New(
+				workerCfg.Codex.Command,
+				workerCfg.Codex.Args,
+				workerCfg.Workspace,
+				workerCfg.Codex.Transport,
+				workerCfg.Codex.StartupTimeout,
+				r.stdout,
+				r.stderr,
+			)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -722,41 +758,49 @@ func (r *Runner) agentTargetsForSteps(steps []config.Step) (bool, bool, error) {
 	return needsClaude, needsCodex, nil
 }
 
-func (r *Runner) fullscreenParallelAgent() string {
-	needsClaude, needsCodex, err := r.configuredAgentTargets()
-	if err != nil {
-		return ""
+func (r *Runner) parallelBatchNeedsTmux(tasks []plan.Task) (bool, error) {
+	for _, task := range tasks {
+		steps, _, err := r.stepsForTask(task)
+		if err != nil {
+			return false, err
+		}
+		needsClaude, needsCodex, err := r.agentTargetsForSteps(steps)
+		if err != nil {
+			return false, err
+		}
+		if needsClaude || needsCodex {
+			return true, nil
+		}
 	}
-	if needsClaude && r.claude != nil && r.claude.IsFullscreenTUI() {
-		return config.AgentClaude
-	}
-	if needsCodex && r.codex != nil && r.codex.IsFullscreenTUI() {
-		return config.AgentCodex
-	}
-	return ""
+	return false, nil
 }
 
-func (r *Runner) configuredAgentTargets() (bool, bool, error) {
-	var needsClaude, needsCodex bool
-	merge := func(steps []config.Step) error {
-		stepNeedsClaude, stepNeedsCodex, err := r.agentTargetsForSteps(steps)
-		if err != nil {
-			return err
-		}
-		needsClaude = needsClaude || stepNeedsClaude
-		needsCodex = needsCodex || stepNeedsCodex
-		return nil
+func (r *Runner) ensureParallelTmux(ctx context.Context) error {
+	if r.tmux == nil {
+		r.tmux = tmuxagent.NewController(tmuxagent.Options{
+			SessionName: tmuxagent.RunSessionName(r.cfg.Workspace, r.cfg.PlanFile, os.Getpid()),
+			Stderr:      r.stderr,
+		})
 	}
+	if err := r.tmux.Start(ctx); err != nil {
+		return err
+	}
+	if !r.tmuxAnnounced && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "parallel TUI tmux session: %s\nattach with: %s\n", r.tmux.SessionName(), r.tmux.AttachCommand())
+		r.tmuxAnnounced = true
+	}
+	return nil
+}
 
-	if err := merge(r.cfg.Steps); err != nil {
-		return false, false, err
+func (r *Runner) closeParallelTmux() {
+	if r.tmux == nil {
+		return
 	}
-	for _, workflow := range r.cfg.Workflows {
-		if err := merge(workflow.Steps); err != nil {
-			return false, false, err
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.tmux.Kill(ctx); err != nil && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "warning: failed to close tmux session %s: %v\n", r.tmux.SessionName(), err)
 	}
-	return needsClaude, needsCodex, nil
 }
 
 func (r *Runner) prepareParallelTaskWorkspace(ctx context.Context, currentPlan *plan.File, paths TaskExecutionPaths) error {

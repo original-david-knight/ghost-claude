@@ -6,14 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"time"
 )
 
 const (
-	TransportPrint = "print"
-	TransportTUI   = "tui"
+	TransportTUI = "tui"
 
 	SessionStrategySessionID = "session_id"
 	SessionStrategyContinue  = "continue"
@@ -58,7 +56,9 @@ func New(command string, args []string, workdir, transport, startupTimeout strin
 	}
 
 	switch client.transport {
-	case TransportPrint, TransportTUI:
+	case TransportTUI:
+	case "print":
+		return nil, fmt.Errorf("claude transport %q is no longer supported; use %q", transport, TransportTUI)
 	default:
 		return nil, fmt.Errorf("unsupported claude transport %q", transport)
 	}
@@ -84,8 +84,6 @@ func NewSession(strategy string) (*Session, error) {
 
 func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string) error {
 	switch c.transport {
-	case TransportPrint:
-		return c.runPrintPrompt(ctx, session, prompt)
 	case TransportTUI:
 		return c.runTUIPrompt(ctx, session, prompt)
 	default:
@@ -95,8 +93,6 @@ func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string)
 
 func (c *Client) RunInteractivePrompt(ctx context.Context, session *Session, prompt string) error {
 	switch c.transport {
-	case TransportPrint:
-		return fmt.Errorf("claude transport %q cannot run an interactive prompt; set claude.transport to %q", c.transport, TransportTUI)
 	case TransportTUI:
 		return c.runTUIInteractivePrompt(ctx, session, prompt)
 	default:
@@ -113,40 +109,6 @@ func (c *Client) Close(session *Session) error {
 
 func (c *Client) IsFullscreenTUI() bool {
 	return c.transport == TransportTUI
-}
-
-func (c *Client) runPrintPrompt(ctx context.Context, session *Session, prompt string) error {
-	args := append([]string{}, c.args...)
-	args = append(args, "--print")
-
-	switch session.Strategy {
-	case SessionStrategySessionID:
-		if session.Started {
-			args = append(args, "--resume", session.ID)
-		} else {
-			args = append(args, "--session-id", session.ID)
-		}
-	case SessionStrategyContinue:
-		if session.Started {
-			args = append(args, "--continue")
-		}
-	default:
-		return fmt.Errorf("unsupported session strategy %q", session.Strategy)
-	}
-
-	args = append(args, prompt)
-
-	cmd := exec.CommandContext(ctx, c.command, args...)
-	cmd.Dir = c.workdir
-	cmd.Stdout = c.stdout
-	cmd.Stderr = c.stderr
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("run %q with args %q: %w", c.command, strings.Join(args, " "), err)
-	}
-
-	session.Started = true
-	return nil
 }
 
 func (c *Client) runTUIPrompt(ctx context.Context, session *Session, prompt string) error {

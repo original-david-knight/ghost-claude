@@ -18,6 +18,7 @@ import (
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/tasknotes"
+	"vibedrive/internal/tmuxagent"
 	"vibedrive/pkg/agentcli/claude"
 	"vibedrive/pkg/agentcli/codex"
 )
@@ -671,6 +672,82 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 		if strings.Contains(tree, transient) {
 			t.Fatalf("expected commit tree not to contain transient %s; tree:\n%s", transient, tree)
 		}
+	}
+}
+
+func TestRunRequiresTmuxForParallelAgentSteps(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: todo
+    owns_paths:
+      - api.txt
+  - id: ui
+    title: UI
+    workflow: implement
+    status: todo
+    owns_paths:
+      - ui.txt
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Parallel: config.ParallelConfig{
+			Enabled:        true,
+			MaxParallelism: 2,
+			WorktreeRoot:   filepath.Join(dir, config.DefaultParallelWorktreeRoot),
+			ArtifactRoot:   filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+		Claude: config.ClaudeConfig{
+			SessionStrategy: config.SessionStrategySessionID,
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "finish", Type: config.StepTypeClaude, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	agent := &fakeAgent{planPath: planPath}
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		claude: agent,
+		tmux: tmuxagent.NewController(tmuxagent.Options{
+			LookPath: func(string) (string, error) {
+				return "", os.ErrNotExist
+			},
+		}),
+		newSession: func(_ string) (*claude.Session, error) {
+			return &claude.Session{Strategy: config.SessionStrategySessionID, ID: "session-1"}, nil
+		},
+	}
+
+	err := r.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected Run to fail when tmux is unavailable")
+	}
+	if !strings.Contains(err.Error(), "tmux is required for parallel TUI execution") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(agent.prompts) != 0 {
+		t.Fatalf("expected no serial fallback prompts, got %q", strings.Join(agent.prompts, "\n"))
 	}
 }
 

@@ -12,7 +12,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 - **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
 - **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
 - **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). Plans should include any harnesses or instrumentation agents need to verify their own work, such as scripted screenshot capture for UI changes. A task only stays `done` when its commands pass; otherwise it drops back to `in_progress` with a failure note.
-- **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Vibedrive uses that metadata to reduce each agent's context and, when parallel execution is explicitly enabled, to select safe batches.
+- **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Vibedrive uses that metadata to reduce each agent's context and, when parallel execution is explicitly enabled, to select safe batches. Parallel agent batches run the real TUIs in tmux.
 - **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
 
 ## Example
@@ -518,7 +518,7 @@ Serial fallback is deliberate. A ready task with no `owns_paths` and no componen
 | `worktree_root`   | `.vibedrive/worktrees`     | Workspace-relative root for isolated git worktrees used by parallel workers. |
 | `artifact_root`   | `.vibedrive/task-runs`     | Workspace-relative root for isolated task results, review artifacts, and task notes from parallel workers. |
 
-The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so existing plans still run exactly one task at a time until parallel execution is explicitly enabled. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. Parallel agent steps also require non-fullscreen transports; with the default `tui` transports, vibedrive warns and continues serially instead of trying to drive multiple fullscreen sessions at once.
+The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so existing plans still run exactly one task at a time until parallel execution is explicitly enabled. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. When a parallel batch includes agent steps, tmux is required so Vibedrive can run one real TUI per worker without corrupting the parent terminal. At batch start, Vibedrive prints the tmux session name and an attach command such as `tmux attach-session -t vibedrive-...`; if tmux is missing, the run fails clearly instead of falling back to serial execution.
 
 ### `claude` block
 
@@ -526,7 +526,7 @@ The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so exist
 | ------------------ | ------------ | ----------------------------------------------------------------------- |
 | `command`          | `claude`     | Executable to launch.                                                   |
 | `args`             | `["--effort", "max", "--permission-mode", "bypassPermissions"]` | Extra CLI flags passed to Claude. If you set custom args without an explicit `--effort`, vibedrive appends `--effort max`. If you do not set a Claude permission flag, vibedrive appends `--permission-mode bypassPermissions` so agent steps do not stop on approval prompts. |
-| `transport`        | `tui`        | `tui` drives the fullscreen UI inside a PTY. `print` uses `--print`.   |
+| `transport`        | `tui`        | Optional compatibility field. Only `tui` is supported.                |
 | `startup_timeout`  | `30s`        | How long to wait for Claude to become ready before failing.             |
 | `session_strategy` | `session_id` | `session_id` starts a new session per item; `continue` resumes.         |
 
@@ -535,13 +535,13 @@ The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so exist
 | Field             | Default                                                                 | Meaning                                                                 |
 | ----------------- | ----------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | `command`         | `codex`                                                                 | Executable to launch.                                                   |
-| `transport`       | `tui`                                                                   | `tui` drives Codex's native interactive UI inside a PTY. `exec` keeps the non-interactive runner flow. |
+| `transport`       | `tui`                                                                   | Optional compatibility field. Only `tui` is supported.                |
 | `startup_timeout` | `30s`                                                                   | How long to wait for Codex to become ready in `tui` mode before failing. |
 | `args`            | `["--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=\"xhigh\""]` | Extra CLI flags passed to Codex before the rendered prompt.             |
 
-vibedrive prepends `--dangerously-bypass-approvals-and-sandbox` to Codex invocations so the agent never pauses for approval prompts. If you set custom `codex.args` without an explicit `model_reasoning_effort=...` override, vibedrive appends `-c model_reasoning_effort="xhigh"`.
+vibedrive prepends `--dangerously-bypass-approvals-and-sandbox` to Codex invocations so the agent never pauses for approval prompts. If you set custom `codex.args` without an explicit `model_reasoning_effort=...` override, vibedrive appends `-c model_reasoning_effort="xhigh"`. Non-interactive Codex subcommands such as `exec` and `review` are rejected for agent steps.
 
-In `tui` mode, Codex runs the same fullscreen terminal UI you get from invoking `codex` yourself, and vibedrive reuses that PTY session across steps for the current item. In `exec` mode, vibedrive enables Codex's JSON event stream internally and renders a filtered terminal view: the runner prints the rendered step instructions first, then agent messages, command names, and file-change summaries stay visible, while command output, raw file reads, and diff bodies are suppressed. If you explicitly include `--json` in `codex.args`, vibedrive leaves the stream untouched.
+Codex runs the same fullscreen terminal UI you get from invoking `codex` yourself, and vibedrive reuses that PTY session across steps for the current item. In parallel agent batches, each worker gets its own Codex TUI window inside the run's tmux session.
 
 ### Step fields
 
@@ -595,11 +595,11 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.
 - The finalizer stages changes with `git add -A` and only creates a commit when something is actually staged.
-- Codex steps use native TUI mode by default, so the app now shows the same Codex interface you get from running `codex` directly.
-- If you prefer the older non-interactive behavior, set `codex.transport: exec`. In that mode, vibedrive suppresses raw file-read and diff payloads but still shows the rest of Codex's progress.
+- Codex steps use native TUI mode, so the app shows the same Codex interface you get from running `codex` directly.
+- Parallel agent steps require tmux. Use the printed attach command to inspect the running worker windows.
 - `--coder` and `--reviewer` are independent. You can set them to different agents or to the same agent.
 - Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`codex` and reviewer=`claude`.
-- `vibedrive init` uses the selected bootstrap author and critic and their configured transports. Defaults are author=`codex` and critic=`claude`. `--author claude` uses Claude for authoring, `--critic codex` uses Codex for critique, and each bootstrap phase uses a fresh instance even when both roles resolve to the same agent type.
+- `vibedrive init` uses the selected bootstrap author and critic through their TUI flows. Defaults are author=`codex` and critic=`claude`. `--author claude` uses Claude for authoring, `--critic codex` uses Codex for critique, and each bootstrap phase uses a fresh instance even when both roles resolve to the same agent type.
 - In TUI mode, YAML multiline prompts are flattened into one submitted message, because real newlines would be interpreted as separate messages by Claude's composer.
 - In a fresh workspace, the runner auto-confirms Claude's trust dialog so the loop can start unattended.
 - TUI automation detects "Claude is idle" from terminal-title transitions. If a future Claude release changes that behavior, the detector may need updating.

@@ -302,8 +302,8 @@ func TestLoadAppendsDefaultCodexReasoningWhenMissing(t *testing.T) {
 
 	content := `codex:
   args:
-    - review
-    - --uncommitted
+    - --profile
+    - vibedrive
 steps:
   - name: inspect
     type: codex
@@ -318,11 +318,11 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.Codex.Transport != CodexTransportExec {
-		t.Fatalf("expected codex transport %q, got %q", CodexTransportExec, cfg.Codex.Transport)
+	if cfg.Codex.Transport != CodexTransportTUI {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportTUI, cfg.Codex.Transport)
 	}
 
-	want := []string{"--dangerously-bypass-approvals-and-sandbox", "review", "--uncommitted", "-c", `model_reasoning_effort="xhigh"`}
+	want := []string{"--dangerously-bypass-approvals-and-sandbox", "--profile", "vibedrive", "-c", `model_reasoning_effort="xhigh"`}
 	if !slices.Equal(cfg.Codex.Args, want) {
 		t.Fatalf("expected codex args %v, got %v", want, cfg.Codex.Args)
 	}
@@ -334,7 +334,6 @@ func TestLoadPreservesExplicitCodexReasoning(t *testing.T) {
 
 	content := `codex:
   args:
-    - exec
     - -c
     - model_reasoning_effort="high"
 steps:
@@ -351,11 +350,11 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.Codex.Transport != CodexTransportExec {
-		t.Fatalf("expected codex transport %q, got %q", CodexTransportExec, cfg.Codex.Transport)
+	if cfg.Codex.Transport != CodexTransportTUI {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportTUI, cfg.Codex.Transport)
 	}
 
-	want := []string{"--dangerously-bypass-approvals-and-sandbox", "exec", "-c", `model_reasoning_effort="high"`}
+	want := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", `model_reasoning_effort="high"`}
 	if !slices.Equal(cfg.Codex.Args, want) {
 		t.Fatalf("expected codex args %v, got %v", want, cfg.Codex.Args)
 	}
@@ -367,7 +366,6 @@ func TestLoadStripsConflictingCodexPermissionFlags(t *testing.T) {
 
 	content := `codex:
   args:
-    - exec
     - --sandbox
     - read-only
     - --ask-for-approval
@@ -387,22 +385,21 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.Codex.Transport != CodexTransportExec {
-		t.Fatalf("expected codex transport %q, got %q", CodexTransportExec, cfg.Codex.Transport)
+	if cfg.Codex.Transport != CodexTransportTUI {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportTUI, cfg.Codex.Transport)
 	}
 
-	want := []string{"--dangerously-bypass-approvals-and-sandbox", "exec", "-c", `model_reasoning_effort="xhigh"`}
+	want := []string{"--dangerously-bypass-approvals-and-sandbox", "-c", `model_reasoning_effort="xhigh"`}
 	if !slices.Equal(cfg.Codex.Args, want) {
 		t.Fatalf("expected codex args %v, got %v", want, cfg.Codex.Args)
 	}
 }
 
-func TestLoadRejectsExecSubcommandForCodexTUITransport(t *testing.T) {
+func TestLoadRejectsNonInteractiveCodexSubcommands(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
 
 	content := `codex:
-  transport: tui
   args:
     - exec
 steps:
@@ -416,10 +413,58 @@ steps:
 
 	_, err := Load(configPath)
 	if err == nil {
-		t.Fatal("expected Load to reject exec subcommand for codex tui transport")
+		t.Fatal("expected Load to reject exec subcommand")
 	}
-	if !strings.Contains(err.Error(), `codex.transport "tui" does not support subcommand "exec"`) {
+	if !strings.Contains(err.Error(), `codex.args subcommand "exec" is non-interactive`) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadRejectsNonTUITransportSettings(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name: "claude print",
+			content: `claude:
+  transport: print
+steps:
+  - name: inspect
+    prompt: inspect
+`,
+			want: `claude.transport "print" is no longer supported`,
+		},
+		{
+			name: "codex exec",
+			content: `codex:
+  transport: exec
+steps:
+  - name: inspect
+    type: codex
+    prompt: inspect
+`,
+			want: `codex.transport "exec" is no longer supported`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "vibedrive.yaml")
+			if err := os.WriteFile(configPath, []byte(tt.content), 0o644); err != nil {
+				t.Fatalf("WriteFile returned error: %v", err)
+			}
+
+			_, err := Load(configPath)
+			if err == nil {
+				t.Fatal("expected Load to reject non-TUI transport")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
 	}
 }
 
