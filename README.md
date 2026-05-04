@@ -179,7 +179,7 @@ default_workflow: implement
 
 parallel:
   enabled: false
-  max_parallelism: 1
+  max_parallelism: 3
   worktree_root: .vibedrive/worktrees
   artifact_root: .vibedrive/task-runs
 
@@ -507,18 +507,18 @@ Serial fallback is deliberate. A ready task with no `owns_paths` and no componen
 | `max_stalled_iterations` | `2`           | Abort after this many no-progress iterations on the same item.     |
 | `default_workflow`       | unset         | Workflow used when a plan task omits `workflow`.                   |
 | `dry_run`                | `false`       | Render prompts and commands without running anything.              |
-| `parallel`               | serial        | Optional block for isolated parallel task execution. Defaults keep effective parallelism at one. |
+| `parallel`               | serial        | Optional block for isolated parallel task execution. Defaults keep execution serial until explicitly enabled. |
 
 ### `parallel` block
 
 | Field             | Default                    | Meaning                                                                 |
 | ----------------- | -------------------------- | ----------------------------------------------------------------------- |
 | `enabled`         | `false`                    | Opts into parallel execution. When false, `max_parallelism` is ignored and the runner stays serial. |
-| `max_parallelism` | `1`                        | Maximum number of safe ready tasks to run in one batch. Must be at least `1`. |
+| `max_parallelism` | `3`                        | Maximum number of safe ready tasks to run in one batch. Must be at least `1`. |
 | `worktree_root`   | `.vibedrive/worktrees`     | Workspace-relative root for isolated git worktrees used by parallel workers. |
 | `artifact_root`   | `.vibedrive/task-runs`     | Workspace-relative root for isolated task results, review artifacts, and task notes from parallel workers. |
 
-The scaffold writes `parallel.enabled: false` and `max_parallelism: 1`, so existing plans run exactly one task at a time. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. Parallel agent steps also require non-fullscreen transports; with the default `tui` transports, vibedrive warns and continues serially instead of trying to drive multiple fullscreen sessions at once.
+The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so existing plans still run exactly one task at a time until parallel execution is explicitly enabled. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. Parallel agent steps also require non-fullscreen transports; with the default `tui` transports, vibedrive warns and continues serially instead of trying to drive multiple fullscreen sessions at once.
 
 ### `claude` block
 

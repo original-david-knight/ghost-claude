@@ -174,7 +174,7 @@ func assertScaffoldedParallelDefaults(t *testing.T, configPath, content string) 
 	for _, want := range []string{
 		"parallel:",
 		"enabled: false",
-		"max_parallelism: 1",
+		"max_parallelism: 3",
 		"worktree_root: .vibedrive/worktrees",
 		"artifact_root: .vibedrive/task-runs",
 	} {

@@ -31,8 +31,9 @@ const (
 	defaultCodexReasoningEffort = "xhigh"
 	defaultCodexBypassFlag      = "--dangerously-bypass-approvals-and-sandbox"
 
-	DefaultParallelWorktreeRoot = ".vibedrive/worktrees"
-	DefaultParallelArtifactRoot = ".vibedrive/task-runs"
+	DefaultParallelMaxParallelism = 3
+	DefaultParallelWorktreeRoot   = ".vibedrive/worktrees"
+	DefaultParallelArtifactRoot   = ".vibedrive/task-runs"
 
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
@@ -313,7 +314,7 @@ func defaultConfig() Config {
 		Coder:                AgentCodex,
 		Reviewer:             AgentClaude,
 		Parallel: ParallelConfig{
-			MaxParallelism: 1,
+			MaxParallelism: DefaultParallelMaxParallelism,
 			WorktreeRoot:   DefaultParallelWorktreeRoot,
 			ArtifactRoot:   DefaultParallelArtifactRoot,
 		},
@@ -410,7 +411,7 @@ func (c *Config) applyParallelValidationDefaults() {
 	if strings.TrimSpace(c.Parallel.WorktreeRoot) != "" || strings.TrimSpace(c.Parallel.ArtifactRoot) != "" {
 		return
 	}
-	c.Parallel.MaxParallelism = 1
+	c.Parallel.MaxParallelism = DefaultParallelMaxParallelism
 	c.Parallel.WorktreeRoot = DefaultParallelWorktreeRoot
 	c.Parallel.ArtifactRoot = DefaultParallelArtifactRoot
 }

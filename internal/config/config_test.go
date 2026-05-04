@@ -163,8 +163,8 @@ func TestLoadDefaultsParallelExecutionToSerial(t *testing.T) {
 	if cfg.Parallel.Enabled {
 		t.Fatal("expected parallel execution to be disabled by default")
 	}
-	if cfg.Parallel.MaxParallelism != 1 {
-		t.Fatalf("expected default max parallelism 1, got %d", cfg.Parallel.MaxParallelism)
+	if cfg.Parallel.MaxParallelism != DefaultParallelMaxParallelism {
+		t.Fatalf("expected default max parallelism %d, got %d", DefaultParallelMaxParallelism, cfg.Parallel.MaxParallelism)
 	}
 	if cfg.EffectiveParallelism() != 1 {
 		t.Fatalf("expected effective parallelism 1, got %d", cfg.EffectiveParallelism())
@@ -489,7 +489,7 @@ func TestValidateAllowsSameAgentForCoderAndReviewer(t *testing.T) {
 		Coder:                AgentCodex,
 		Reviewer:             AgentCodex,
 		Parallel: ParallelConfig{
-			MaxParallelism: 1,
+			MaxParallelism: DefaultParallelMaxParallelism,
 			WorktreeRoot:   DefaultParallelWorktreeRoot,
 			ArtifactRoot:   DefaultParallelArtifactRoot,
 		},
