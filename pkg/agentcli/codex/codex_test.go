@@ -51,8 +51,29 @@ func TestTitleMonitorClassifiesIdleAndBusyTitles(t *testing.T) {
 	if state, ok := monitor.classifyTitle("vibedrive"); !ok || state != "idle" {
 		t.Fatalf("expected idle title classification, got state=%q ok=%v", state, ok)
 	}
+	if state, ok := monitor.classifyTitle("david@host:~/workspace/vibedrive"); !ok || state != "idle" {
+		t.Fatalf("expected path-style idle title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("gpt-5.5 xhigh · ~/workspace/vibedrive"); !ok || state != "idle" {
+		t.Fatalf("expected Codex status title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("gpt-5.5 xhigh • ~/workspace/vibedrive"); !ok || state != "idle" {
+		t.Fatalf("expected bullet-separated Codex status title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("gpt-5.5 xhigh · ~/workspace/planet/…/worktrees/…51448272af5"); !ok || state != "idle" {
+		t.Fatalf("expected abbreviated Codex status title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("vibedriv..."); !ok || state != "idle" {
+		t.Fatalf("expected truncated idle title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("...vibedrive"); !ok || state != "idle" {
+		t.Fatalf("expected suffix-truncated idle title classification, got state=%q ok=%v", state, ok)
+	}
 	if state, ok := monitor.classifyTitle("busy vibedrive"); !ok || state != "busy" {
 		t.Fatalf("expected busy title classification, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("⠴ vibedrive"); !ok || state != "busy" {
+		t.Fatalf("expected spinner title classification, got state=%q ok=%v", state, ok)
 	}
 }
 

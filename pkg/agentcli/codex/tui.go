@@ -68,7 +68,7 @@ func (c *Client) startTUI(ctx context.Context) (*tuiSession, error) {
 
 	if err := session.completeStartup(readyCtx); err != nil {
 		_ = session.Close()
-		return nil, err
+		return nil, fmt.Errorf("wait for codex tui startup (%s): %w", c.startupTimeout, err)
 	}
 
 	return session, nil
@@ -262,8 +262,105 @@ func (m *titleMonitor) classifyTitle(title string) (string, bool) {
 	if trimmed == "" {
 		return "", false
 	}
-	if trimmed == m.idleTitle {
+	if isBusyTitle(trimmed) {
+		return "busy", true
+	}
+	if titleMatchesIdle(trimmed, m.idleTitle) {
+		return "idle", true
+	}
+	if titleLooksIdleStatus(trimmed) {
 		return "idle", true
 	}
 	return "busy", true
+}
+
+func isBusyTitle(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	if lower == "" {
+		return false
+	}
+	if strings.HasPrefix(lower, "busy ") {
+		return true
+	}
+	for _, marker := range []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"} {
+		if strings.HasPrefix(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func titleMatchesIdle(title, idleTitle string) bool {
+	title = strings.TrimSpace(title)
+	idleTitle = strings.TrimSpace(idleTitle)
+	if title == "" || idleTitle == "" {
+		return false
+	}
+	if title == idleTitle {
+		return true
+	}
+	if filepath.Base(filepath.Clean(title)) == idleTitle {
+		return true
+	}
+	if titleAbbreviatesIdle(title, idleTitle) {
+		return true
+	}
+	return strings.Contains(title, idleTitle)
+}
+
+func titleAbbreviatesIdle(title, idleTitle string) bool {
+	for _, marker := range []string{"...", "…"} {
+		if !strings.Contains(title, marker) {
+			continue
+		}
+		parts := strings.Split(title, marker)
+		prefix := strings.TrimSpace(parts[0])
+		suffix := strings.TrimSpace(parts[len(parts)-1])
+		if idleTitleHasPrefix(idleTitle, prefix) || idleTitleHasSuffix(idleTitle, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func idleTitleHasPrefix(idleTitle, prefix string) bool {
+	if !idleFragmentLongEnough(idleTitle, prefix) {
+		return false
+	}
+	if strings.HasPrefix(idleTitle, prefix) {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(prefix))
+	return base != prefix && idleFragmentLongEnough(idleTitle, base) && strings.HasPrefix(idleTitle, base)
+}
+
+func idleTitleHasSuffix(idleTitle, suffix string) bool {
+	if !idleFragmentLongEnough(idleTitle, suffix) {
+		return false
+	}
+	if strings.HasSuffix(idleTitle, suffix) {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(suffix))
+	return base != suffix && idleFragmentLongEnough(idleTitle, base) && strings.HasSuffix(idleTitle, base)
+}
+
+func idleFragmentLongEnough(idleTitle, fragment string) bool {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return false
+	}
+	required := 8
+	if len(idleTitle) < required {
+		required = len(idleTitle)
+	}
+	return len(fragment) >= required
+}
+
+func titleLooksIdleStatus(title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	return (strings.Contains(title, " · ") || strings.Contains(title, " • ")) && (strings.Contains(title, "/") || strings.Contains(title, "~"))
 }

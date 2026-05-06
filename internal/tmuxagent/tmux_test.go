@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,8 @@ type tmuxCall struct {
 }
 
 type fakeTmux struct {
-	calls []tmuxCall
+	calls      []tmuxCall
+	nextPaneID int
 }
 
 func (f *fakeTmux) run(_ context.Context, command string, args []string, stdin string) ([]byte, error) {
@@ -27,13 +29,27 @@ func (f *fakeTmux) run(_ context.Context, command string, args []string, stdin s
 	switch {
 	case len(args) == 1 && args[0] == "-V":
 		return []byte("tmux 3.4\n"), nil
+	case len(args) > 0 && args[0] == "new-session" && containsOrdered(args, []string{"-P", "-F", "#{pane_id}"}):
+		return f.nextPane(), nil
 	case len(args) > 0 && args[0] == "new-window":
-		return []byte("%42\n"), nil
+		return f.nextPane(), nil
+	case len(args) > 0 && args[0] == "split-window":
+		return f.nextPane(), nil
+	case len(args) > 0 && args[0] == "list-panes":
+		return []byte("%1\n%2\n"), nil
 	case len(args) > 0 && args[0] == "display-message":
+		if args[len(args)-1] == "#{window_width}" {
+			return []byte("120\n"), nil
+		}
 		return []byte("0\n"), nil
 	default:
 		return nil, nil
 	}
+}
+
+func (f *fakeTmux) nextPane() []byte {
+	f.nextPaneID++
+	return []byte("%" + strconv.Itoa(f.nextPaneID) + "\n")
 }
 
 func TestRunSessionNameIsDeterministicAndSanitized(t *testing.T) {
@@ -87,8 +103,8 @@ func TestControllerStartsSessionAndCreatesWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
-	if pane.Target != "%42" {
-		t.Fatalf("expected pane target %%42, got %q", pane.Target)
+	if pane.Target != "%1" {
+		t.Fatalf("expected pane target %%1, got %q", pane.Target)
 	}
 
 	if len(fake.calls) < 3 {
@@ -106,6 +122,160 @@ func TestControllerStartsSessionAndCreatesWindow(t *testing.T) {
 	}
 	if windowArgs[len(windowArgs)-1] != "exec 'codex' '--profile' 'team one'" {
 		t.Fatalf("unexpected shell command arg %q", windowArgs[len(windowArgs)-1])
+	}
+}
+
+func TestControllerDashboardStacksAgentPanesBesideStatus(t *testing.T) {
+	fake := &fakeTmux{}
+	controller := NewController(Options{
+		Command:       "tmux",
+		SessionName:   "vibedrive test",
+		Run:           fake.run,
+		StatusCommand: "sh",
+		StatusArgs:    []string{"-lc", "watch vibedrive"},
+		StatusWorkdir: "/repo",
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	first, err := controller.NewPane(context.Background(), PaneSpec{
+		Name:    "api",
+		Agent:   "codex",
+		Command: "codex",
+		Workdir: "/repo",
+	})
+	if err != nil {
+		t.Fatalf("first NewPane returned error: %v", err)
+	}
+	second, err := controller.NewPane(context.Background(), PaneSpec{
+		Name:    "ui",
+		Agent:   "claude",
+		Command: "claude",
+		Workdir: "/repo",
+	})
+	if err != nil {
+		t.Fatalf("second NewPane returned error: %v", err)
+	}
+	if first.Target != "%2" || second.Target != "%3" {
+		t.Fatalf("unexpected pane targets: first=%q second=%q", first.Target, second.Target)
+	}
+
+	if len(fake.calls) < 11 {
+		t.Fatalf("expected version, session, splits, and layouts, got %#v", fake.calls)
+	}
+	sessionArgs := fake.calls[1].args
+	if !containsOrdered(sessionArgs, []string{"new-session", "-d", "-s", "vibedrive-test", "-n", "vibedrive", "-P", "-F", "#{pane_id}", "-c", "/repo"}) {
+		t.Fatalf("unexpected dashboard session args: %#v", sessionArgs)
+	}
+	if sessionArgs[len(sessionArgs)-1] != "exec 'sh' '-lc' 'watch vibedrive'" {
+		t.Fatalf("unexpected status command arg %q", sessionArgs[len(sessionArgs)-1])
+	}
+
+	firstSplit := fake.calls[2].args
+	if !containsOrdered(firstSplit, []string{"split-window", "-d", "-P", "-F", "#{pane_id}", "-h", "-t", "%1", "-c", "/repo"}) {
+		t.Fatalf("expected first agent pane to split right of status pane, got %#v", firstSplit)
+	}
+	secondSplit := fake.calls[7].args
+	if !containsOrdered(secondSplit, []string{"split-window", "-d", "-P", "-F", "#{pane_id}", "-v", "-t", "%2", "-c", "/repo"}) {
+		t.Fatalf("expected second agent pane to split below first agent pane, got %#v", secondSplit)
+	}
+	for _, callIndex := range []int{3, 8} {
+		if !reflect.DeepEqual(fake.calls[callIndex].args, []string{"select-layout", "-t", "vibedrive-test:vibedrive", "main-vertical"}) {
+			t.Fatalf("expected main-vertical layout call, got %#v", fake.calls[callIndex].args)
+		}
+	}
+	for _, callIndex := range []int{5, 10} {
+		if !reflect.DeepEqual(fake.calls[callIndex].args, []string{"resize-pane", "-t", "%1", "-x", "40"}) {
+			t.Fatalf("expected status pane resize to one third width, got %#v", fake.calls[callIndex].args)
+		}
+	}
+}
+
+func TestControllerDashboardFallsBackWhenAgentPaneDisappears(t *testing.T) {
+	var calls []tmuxCall
+	nextPaneID := 0
+	sawMissingAgentSplit := false
+	controller := NewController(Options{
+		Command:       "tmux",
+		SessionName:   "vibedrive test",
+		StatusCommand: "sh",
+		StatusArgs:    []string{"-lc", "watch vibedrive"},
+		StatusWorkdir: "/repo",
+		Run: func(_ context.Context, command string, args []string, stdin string) ([]byte, error) {
+			calls = append(calls, tmuxCall{
+				command: command,
+				args:    append([]string{}, args...),
+				stdin:   stdin,
+			})
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session" && containsOrdered(args, []string{"-P", "-F", "#{pane_id}"}):
+				nextPaneID++
+				return []byte("%" + strconv.Itoa(nextPaneID) + "\n"), nil
+			case len(args) > 0 && args[0] == "split-window" && containsOrdered(args, []string{"-v", "-t", "%2"}):
+				sawMissingAgentSplit = true
+				return []byte("can't find pane: %2\n"), errors.New("exit status 1")
+			case len(args) > 0 && args[0] == "split-window":
+				nextPaneID++
+				return []byte("%" + strconv.Itoa(nextPaneID) + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message":
+				if args[len(args)-1] == "#{window_width}" {
+					return []byte("120\n"), nil
+				}
+				return []byte("0\n"), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	first, err := controller.NewPane(context.Background(), PaneSpec{
+		Name:    "api",
+		Agent:   "codex",
+		Command: "codex",
+		Workdir: "/repo",
+	})
+	if err != nil {
+		t.Fatalf("first NewPane returned error: %v", err)
+	}
+	second, err := controller.NewPane(context.Background(), PaneSpec{
+		Name:    "ui",
+		Agent:   "claude",
+		Command: "claude",
+		Workdir: "/repo",
+	})
+	if err != nil {
+		t.Fatalf("second NewPane returned error: %v", err)
+	}
+	if first.Target != "%2" || second.Target != "%3" {
+		t.Fatalf("unexpected pane targets: first=%q second=%q", first.Target, second.Target)
+	}
+	if !sawMissingAgentSplit {
+		t.Fatal("expected test to exercise missing prior agent pane")
+	}
+
+	foundFallback := false
+	for _, call := range calls {
+		if containsOrdered(call.args, []string{"split-window", "-d", "-P", "-F", "#{pane_id}", "-h", "-t", "%1", "-c", "/repo"}) {
+			foundFallback = true
+		}
+	}
+	if !foundFallback {
+		t.Fatalf("expected fallback split from status pane after stale agent target, got %#v", calls)
+	}
+}
+
+func TestIsTargetMissingErrorRecognizesOnlyTmuxTargets(t *testing.T) {
+	if !IsTargetMissingError(errors.New("can't find pane: %23")) {
+		t.Fatal("expected pane lookup failure to be recognized")
+	}
+	if IsTargetMissingError(errors.New("tmux: command not found")) {
+		t.Fatal("expected unrelated not found error to remain visible")
 	}
 }
 
@@ -152,7 +322,7 @@ func TestControllerReportsMissingTmux(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Start to fail")
 	}
-	if !strings.Contains(err.Error(), "tmux is required for parallel TUI execution") {
+	if !strings.Contains(err.Error(), "tmux is required for vibedrive TUI execution") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

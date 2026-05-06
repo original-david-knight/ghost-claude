@@ -292,6 +292,7 @@ func CommitIfNeeded(ctx context.Context, workspace, message string, stdout, stde
 
 func transientArtifactExcludes() []string {
 	return []string{
+		":(exclude).vibedrive/run-state.json",
 		":(exclude).vibedrive/task-results/**",
 		":(exclude).vibedrive/reviews/**",
 		":(exclude).vibedrive/task-runs/**",

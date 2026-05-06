@@ -130,7 +130,7 @@ Init source selection:
 Plan authoring:
   --author selects the bootstrap author and defaults to codex. Choosing it does not change runtime --coder/--reviewer defaults.
   --critic selects the bootstrap critic and defaults to claude.
-  Init runs three fresh agent instances in order: author creates the plan, critic reviews without editing it, then author revises from critic feedback.
+  Init runs six fresh agent instances in order: author writes COMPONENTS.md, critic reviews it, author revises it, author creates the plan from that breakdown, critic reviews the plan without editing it, then author revises the plan from critic feedback.
   The generated plan keeps routine testing and cleanup inline by default and only adds standalone tech-debt follow-up when risk triggers justify it.
 
 Flags:
@@ -210,7 +210,7 @@ Init notes:
   Repeat --source to add files or directories. A single positional SOURCE adds one extra source.
   Omit sources to scan the workspace's top-level regular files. Use --print-sources to preview that resolved source set.
   Use --author claude|codex and --critic claude|codex to pick bootstrap roles. Defaults: author=codex, critic=claude.
-  Init uses fresh instances for author create-plan, critic review without edits, and author revision from critic feedback.
+  Init uses fresh instances for author component discovery, critic component review, author component revision, author create-plan, critic plan review without edits, and author plan revision from critic feedback.
   Bootstrap planning keeps routine testing and cleanup inline by default and only adds standalone tech-debt follow-up when risk triggers justify it.`)
 }
 

@@ -33,7 +33,10 @@ type sourceSpec struct {
 	Files []string
 }
 
-const defaultPlanFile = "vibedrive-plan.yaml"
+const (
+	defaultPlanFile       = "vibedrive-plan.yaml"
+	defaultComponentsFile = "COMPONENTS.md"
+)
 
 func New(stdout, stderr io.Writer) *Initializer {
 	return &Initializer{
@@ -82,35 +85,61 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 		}
 	}
 
-	source, err := resolveSources(cfg.Workspace, sourceArgs, cfg.Path, cfg.PlanFile)
+	componentsPath := initComponentsPath(cfg.Workspace)
+	if force {
+		if err := os.Remove(componentsPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	source, err := resolveSources(cfg.Workspace, sourceArgs, cfg.Path, cfg.PlanFile, componentsPath)
 	if err != nil {
 		return err
 	}
 
-	feedbackPath := initCriticFeedbackPath(cfg.Workspace)
-	if err := os.MkdirAll(filepath.Dir(feedbackPath), 0o755); err != nil {
+	componentsFeedbackPath := initComponentsCriticFeedbackPath(cfg.Workspace)
+	planFeedbackPath := initCriticFeedbackPath(cfg.Workspace)
+	if err := os.MkdirAll(filepath.Dir(planFeedbackPath), 0o755); err != nil {
 		return err
 	}
-	if err := os.Remove(feedbackPath); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{componentsFeedbackPath, planFeedbackPath} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	defer func() {
-		_ = os.Remove(feedbackPath)
+		_ = os.Remove(componentsFeedbackPath)
+		_ = os.Remove(planFeedbackPath)
 	}()
 
-	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderCreatePlanPrompt(cfg, source)); err != nil {
+	if err := i.runBootstrapPhase(ctx, cfg, author, "components", renderComponentsPrompt(cfg, source, componentsPath)); err != nil {
 		return err
 	}
-	if err := i.runBootstrapPhase(ctx, cfg, critic, "critic", renderCriticPlanPrompt(cfg, source, feedbackPath)); err != nil {
+	if err := requireNonEmptyFile(componentsPath, "component breakdown phase"); err != nil {
 		return err
 	}
-	if _, err := os.Stat(feedbackPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("critic phase did not write feedback artifact %s", feedbackPath)
-		}
+	if err := i.runBootstrapPhase(ctx, cfg, critic, "component-critic", renderCriticComponentsPrompt(cfg, source, componentsPath, componentsFeedbackPath)); err != nil {
 		return err
 	}
-	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderRevisePlanPrompt(cfg, source, feedbackPath)); err != nil {
+	if err := requireNonEmptyFile(componentsFeedbackPath, "component critic phase"); err != nil {
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, author, "components", renderReviseComponentsPrompt(cfg, source, componentsPath, componentsFeedbackPath)); err != nil {
+		return err
+	}
+	if err := requireNonEmptyFile(componentsPath, "component revision phase"); err != nil {
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderCreatePlanPrompt(cfg, source, componentsPath)); err != nil {
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, critic, "critic", renderCriticPlanPrompt(cfg, source, componentsPath, planFeedbackPath)); err != nil {
+		return err
+	}
+	if err := requireNonEmptyFile(planFeedbackPath, "critic phase"); err != nil {
+		return err
+	}
+	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderRevisePlanPrompt(cfg, source, componentsPath, planFeedbackPath)); err != nil {
 		return err
 	}
 
@@ -144,7 +173,7 @@ func (i *Initializer) PrintSources(configPath string, sourceArgs []string) error
 		return err
 	}
 
-	source, err := resolveSources(cfg.Workspace, sourceArgs, cfg.Path, cfg.PlanFile)
+	source, err := resolveSources(cfg.Workspace, sourceArgs, cfg.Path, cfg.PlanFile, initComponentsPath(cfg.Workspace))
 	if err != nil {
 		return err
 	}
@@ -153,8 +182,109 @@ func (i *Initializer) PrintSources(configPath string, sourceArgs []string) error
 	return err
 }
 
-func renderCreatePlanPrompt(cfg *config.Config, source sourceSpec) string {
+func renderComponentsPrompt(cfg *config.Config, source sourceSpec, componentsPath string) string {
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
+	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+
+	return strings.TrimSpace(fmt.Sprintf(`
+Bootstrap vibedrive component discovery for this repository.
+
+Use these project source inputs as the primary requirements, constraints, design, and success-criteria materials:
+%s
+
+Read every listed file completely. Follow any referenced local docs that materially define the project, scope, tests, constraints, checkpoints, or success criteria.
+
+Before a task plan is generated, break the project down into independently workable components and write the result to %s.
+
+Write Markdown with this structure:
+
+# Components
+
+## <stable-kebab-component-id>: <Human-readable component name>
+- Owned paths:
+  - <repo-relative path or glob owned by this component>
+- Public interfaces and contracts:
+  - <repo-relative contract/interface doc, package, API, command, or data shape>
+- Reads from:
+  - <other component id or contract this component consumes>
+- Provides:
+  - <contract, artifact, command, package, or service this component owns>
+- Parallelization notes:
+  - <where this component can be worked independently, and what conflicts or dependencies must be respected>
+
+Requirements:
+- choose stable kebab-case component ids that can be copied into vibedrive-plan.yaml project.components and task component fields
+- make components narrow enough to support parallel development with clear ownership, but not so tiny that every task becomes cross-cutting
+- identify owned_paths using repo-relative paths or globs wherever practical
+- identify shared contracts, public interfaces, generated artifacts, data files, commands, packages, or service boundaries each component owns or consumes
+- call out integration checkpoints and component dependency ordering needed before independent work can proceed safely
+- call out shared paths, shared contracts, or unclear ownership that should force conflicts_with or dependency metadata in the generated plan
+- include any foundation or contract-first components needed to establish interfaces before cross-component implementation work starts
+- do not create vibedrive-plan.yaml in this phase
+- keep %s concise but concrete enough that the later plan can populate project.components, task component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata from it
+
+After writing %s, quickly re-read it and confirm every component has a stable id, owned paths or explicit ownership notes, and parallelization guidance.
+`, sourceRefs, componentsRef, componentsRef, componentsRef))
+}
+
+func renderCriticComponentsPrompt(cfg *config.Config, source sourceSpec, componentsPath, feedbackPath string) string {
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
+	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
+
+	return strings.TrimSpace(fmt.Sprintf(`
+Review the component breakdown in %s against these source inputs:
+%s
+
+Also inspect any source docs they reference when checking component coverage and fidelity.
+
+Perform a critical review of %s. You are the critic only: do not change %s, do not create vibedrive-plan.yaml, and do not change any source document.
+
+Focus on:
+- missing project components, owned paths, public interfaces, shared contracts, generated artifacts, commands, packages, data boundaries, or service boundaries
+- components that are too broad to support independent work or too tiny to avoid constant cross-cutting tasks
+- unstable or unclear component ids that would be hard to copy into project.components and task component fields
+- unclear edit ownership, shared paths, shared contracts, or integration checkpoints that would weaken safe parallelization
+- missing component dependency ordering before independent work can proceed safely
+- missing foundation or contract-first components needed before cross-component implementation starts
+- missing or weak parallelization notes, conflicts, or dependency guidance
+- requirements from the listed source inputs that were omitted or weakened
+
+Write concise, actionable critic feedback to %s. Use Markdown bullets grouped by severity. Include an explicit "No actionable feedback" note if %s already satisfies the source inputs and parallelization goals.
+`, componentsRef, sourceRefs, componentsRef, componentsRef, feedbackRef, componentsRef))
+}
+
+func renderReviseComponentsPrompt(cfg *config.Config, source sourceSpec, componentsPath, feedbackPath string) string {
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
+	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
+
+	return strings.TrimSpace(fmt.Sprintf(`
+Revise the component breakdown in %s using the transient critic feedback at %s.
+
+Use these project source inputs as the authority when deciding which critic feedback is actionable:
+%s
+
+Read %s, %s, and every listed source input completely before making changes.
+
+Apply actionable critic feedback directly to %s. Ignore feedback that would weaken or contradict the listed source inputs.
+
+When revising:
+- keep stable kebab-case component ids unless critic feedback or source requirements show the id is wrong
+- preserve or improve repo-relative owned paths, public interfaces, shared contracts, generated artifacts, commands, packages, data boundaries, and service boundaries
+- make components narrow enough to support parallel development with clear ownership, but not so tiny that every task becomes cross-cutting
+- clarify dependency ordering, integration checkpoints, shared paths, shared contracts, and conflicts that the generated plan must reflect
+- preserve or add foundation and contract-first components needed before cross-component implementation starts
+- strengthen parallelization notes so the later plan can populate project.components, task component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata from %s
+- do not create vibedrive-plan.yaml in this phase
+
+After writing %s, quickly re-read it and confirm every component has a stable id, owned paths or explicit ownership notes, and parallelization guidance.
+`, componentsRef, feedbackRef, sourceRefs, componentsRef, feedbackRef, componentsRef, componentsRef, componentsRef))
+}
+
+func renderCreatePlanPrompt(cfg *config.Config, source sourceSpec, componentsPath string) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
 
 	return strings.TrimSpace(fmt.Sprintf(`
@@ -162,6 +292,8 @@ Bootstrap vibedrive plan mode for this repository.
 
 Use these project source inputs as the primary requirements, constraints, design, and success-criteria materials:
 %s
+
+Also read the component breakdown in %s completely and use it as the authority for component ids, owned paths, public interfaces, shared contracts, integration checkpoints, and parallelization boundaries.
 
 Read every listed file completely. Follow any referenced local docs that materially define the project, scope, tests, constraints, checkpoints, or success criteria.
 
@@ -212,10 +344,11 @@ tasks:
     commit_message: <clear commit message>
 
 Requirements for the plan:
-- source_docs must include every listed source input and any repo docs referenced from them that are necessary to execute the project correctly
+- source_docs must include %s, every listed source input, and any repo docs referenced from them that are necessary to execute the project correctly
 - constraint_files must include the subset of source_docs that define hard requirements, constraints, checkpoints, or success criteria
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
-- before generating tasks, first identify the repository components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need
+- honor the component ids and boundaries from %s when populating project.components and task component fields; if a source input forces a different boundary, preserve the source requirement and make the reason explicit in task details or acceptance criteria
+- before generating tasks, first identify the repository components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need using %s
 - optimize decomposition for context reduction, not merely speed; tasks should be assignable with narrow read context and explicit edit authority
 - populate project.components whenever useful component boundaries can be identified, using repo-relative owned_paths and reads_contracts/provides_contracts metadata to document ownership and interfaces
 - for each task, declare component, owns_paths, reads_contracts, provides_contracts, and conflicts_with whenever that metadata is known or needed to keep edit authority and integration boundaries explicit
@@ -240,11 +373,12 @@ Requirements for the plan:
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
-`, sourceRefs, planRef, planRef))
+`, sourceRefs, componentsRef, planRef, componentsRef, componentsRef, componentsRef, planRef))
 }
 
-func renderCriticPlanPrompt(cfg *config.Config, source sourceSpec, feedbackPath string) string {
+func renderCriticPlanPrompt(cfg *config.Config, source sourceSpec, componentsPath, feedbackPath string) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
 	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
 
@@ -252,12 +386,13 @@ func renderCriticPlanPrompt(cfg *config.Config, source sourceSpec, feedbackPath 
 Review the generated execution plan in %s against these source inputs:
 %s
 
-Also inspect any source docs they reference when checking plan coverage and fidelity.
+Also read %s and inspect any source docs they reference when checking plan coverage and fidelity.
 
 Perform a critical review of the plan. You are the critic only: do not change %s, and do not change any source document.
 
 Focus on:
 - missing constraints or success criteria
+- missing, stale, or contradicted use of the component breakdown in %s
 - missing component, ownership, contract, or integration-boundary analysis before task generation
 - incorrect or weak task decomposition
 - tasks with excessive context requirements, unclear read scope, or context_files that are broad because interfaces or ownership were not declared
@@ -278,11 +413,12 @@ Focus on:
 - requirements from the listed source inputs that were omitted or weakened
 
 Write concise, actionable critic feedback to %s. Use Markdown bullets grouped by severity. Include an explicit "No actionable feedback" note if the plan already satisfies the source inputs.
-`, planRef, sourceRefs, planRef, feedbackRef))
+`, planRef, sourceRefs, componentsRef, planRef, componentsRef, feedbackRef))
 }
 
-func renderRevisePlanPrompt(cfg *config.Config, source sourceSpec, feedbackPath string) string {
+func renderRevisePlanPrompt(cfg *config.Config, source sourceSpec, componentsPath, feedbackPath string) string {
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
+	componentsRef := repoRelative(cfg.Workspace, componentsPath)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
 	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
 
@@ -292,7 +428,7 @@ Revise the generated execution plan in %s using the transient critic feedback at
 Use these project source inputs as the authority when deciding which critic feedback is actionable:
 %s
 
-Read %s, %s, and every listed source input completely before making changes.
+Read %s, %s, %s, and every listed source input completely before making changes.
 
 Apply actionable critic feedback directly to %s. Ignore feedback that would weaken or contradict the listed source inputs.
 
@@ -300,7 +436,8 @@ Keep the YAML valid. Keep task statuses at todo. Do not weaken or remove constra
 
 When revising:
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
-- ensure the plan first analyzes components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need before finalizing task generation
+- preserve %s in source_docs and honor its component ids and boundaries when populating project.components and task component fields; if a source input forces a different boundary, preserve the source requirement and make the reason explicit
+- ensure the plan uses %s to analyze components, public interfaces, shared contracts, owned paths, integration checkpoints, and the minimum read context each task should need before finalizing task generation
 - optimize revised tasks for context reduction, not merely speed; tasks should be assignable with narrow read context and explicit edit authority
 - populate or correct project.components, task component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata wherever that information is known or needed for safe bounded work
 - keep context_files narrow and contract-oriented so agents do not need broad repository context to infer interfaces or ownership
@@ -319,11 +456,33 @@ When revising:
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
-`, planRef, feedbackRef, sourceRefs, planRef, feedbackRef, planRef, planRef))
+`, planRef, feedbackRef, sourceRefs, planRef, feedbackRef, componentsRef, planRef, componentsRef, componentsRef, planRef))
+}
+
+func initComponentsPath(workspace string) string {
+	return filepath.Join(workspace, defaultComponentsFile)
+}
+
+func initComponentsCriticFeedbackPath(workspace string) string {
+	return filepath.Join(workspace, ".vibedrive", "init-components-feedback.md")
 }
 
 func initCriticFeedbackPath(workspace string) string {
 	return filepath.Join(workspace, ".vibedrive", "init-critic-feedback.md")
+}
+
+func requireNonEmptyFile(path, phase string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s did not write required artifact %s", phase, path)
+		}
+		return err
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("%s wrote empty required artifact %s", phase, path)
+	}
+	return nil
 }
 
 func resolvePreviewConfig(configPath string) (*config.Config, error) {

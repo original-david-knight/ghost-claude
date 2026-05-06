@@ -17,6 +17,7 @@ import (
 	"vibedrive/internal/automation"
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
+	"vibedrive/internal/runstate"
 	"vibedrive/internal/tasknotes"
 	"vibedrive/internal/tmuxagent"
 	"vibedrive/pkg/agentcli/claude"
@@ -67,11 +68,17 @@ type fakeCodex struct {
 	planPath        string
 	closeEvents     *[]string
 	closeLabel      string
+	onRun           func(string) error
 }
 
 func (f *fakeCodex) RunPrompt(_ context.Context, session *codex.Session, prompt string) error {
 	f.prompts = append(f.prompts, prompt)
 
+	if f.onRun != nil {
+		if err := f.onRun(prompt); err != nil {
+			return err
+		}
+	}
 	return handleFakePrompt(prompt, f.planPath)
 }
 
@@ -175,6 +182,137 @@ tasks:
 	}
 	if strings.Join(agent.prompts, "\n") != strings.Join(wantPrompts, "\n") {
 		t.Fatalf("unexpected prompts:\n%s", strings.Join(agent.prompts, "\n"))
+	}
+}
+
+func TestRunRecordsActiveRuntimeStepState(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Claude: config.ClaudeConfig{
+			SessionStrategy: config.SessionStrategySessionID,
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "analyze", Type: config.StepTypeClaude, Prompt: "analyze {{ .Task.ID }}"},
+					{Name: "finish", Type: config.StepTypeClaude, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	var seen []runstate.Task
+	agent := &fakeAgent{
+		planPath: planPath,
+		onRun: func(prompt string) error {
+			state, err := runstate.Load(runstate.Path(dir))
+			if err != nil {
+				return err
+			}
+			active, ok := runstate.ActiveTasksForPlan(state, planPath)["scaffold"]
+			if !ok {
+				return os.ErrNotExist
+			}
+			seen = append(seen, active)
+			return nil
+		},
+	}
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		claude: agent,
+		newSession: func(_ string) (*claude.Session, error) {
+			return &claude.Session{
+				Strategy: config.SessionStrategySessionID,
+				ID:       "session-1",
+			}, nil
+		},
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected to observe two active steps, got %#v", seen)
+	}
+	if seen[0].Status != plan.StatusInProgress || seen[0].StepName != "analyze" || seen[0].StepIndex != 0 || seen[0].StepTotal != 2 {
+		t.Fatalf("unexpected first active step: %#v", seen[0])
+	}
+	if seen[1].Status != plan.StatusInProgress || seen[1].StepName != "finish" || seen[1].StepIndex != 1 || seen[1].StepTotal != 2 {
+		t.Fatalf("unexpected second active step: %#v", seen[1])
+	}
+	if _, err := os.Stat(runstate.Path(dir)); !os.IsNotExist(err) {
+		t.Fatalf("expected run state to be cleared after Run, stat err=%v", err)
+	}
+}
+
+func TestIsolatedRunnerRecordsRuntimeStateAgainstRootPlan(t *testing.T) {
+	dir := t.TempDir()
+	rootPlanPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	isolatedDir := filepath.Join(dir, ".vibedrive", "worktrees", "001-api")
+	isolatedPlanPath := filepath.Join(isolatedDir, "vibedrive-plan.yaml")
+
+	cfg := &config.Config{
+		Workspace:       dir,
+		PlanFile:        rootPlanPath,
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "execute", Type: config.StepTypeExec, Command: []string{"true"}},
+				},
+			},
+		},
+	}
+	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
+	r.ensureRunState()
+
+	worker, err := r.isolatedRunner(TaskExecutionPaths{
+		TaskID:    "api",
+		Name:      "001-api",
+		Workspace: isolatedDir,
+		PlanFile:  isolatedPlanPath,
+		Isolated:  true,
+	}, cfg.Workflows["implement"].Steps)
+	if err != nil {
+		t.Fatalf("isolatedRunner returned error: %v", err)
+	}
+	worker.recordRuntimeStep(TemplateData{
+		WorkflowName: "implement",
+		Workspace:    isolatedDir,
+		PlanFile:     isolatedPlanPath,
+		Task:         plan.Task{ID: "api"},
+	}, cfg.Workflows["implement"].Steps[0], 0, 1)
+
+	state, err := runstate.Load(runstate.Path(dir))
+	if err != nil {
+		t.Fatalf("Load run state returned error: %v", err)
+	}
+	if _, ok := runstate.ActiveTasksForPlan(state, rootPlanPath)["api"]; !ok {
+		t.Fatalf("expected active task to be associated with root plan, state=%#v", state)
+	}
+	if _, ok := runstate.ActiveTasksForPlan(state, isolatedPlanPath)["api"]; ok {
+		t.Fatalf("did not expect isolated plan path to own root-visible runtime state")
 	}
 }
 
@@ -743,11 +881,34 @@ tasks:
 	if err == nil {
 		t.Fatal("expected Run to fail when tmux is unavailable")
 	}
-	if !strings.Contains(err.Error(), "tmux is required for parallel TUI execution") {
+	if !strings.Contains(err.Error(), "tmux is required for vibedrive TUI execution") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(agent.prompts) != 0 {
 		t.Fatalf("expected no serial fallback prompts, got %q", strings.Join(agent.prompts, "\n"))
+	}
+}
+
+func TestTmuxStatusScriptUsesActiveOnlyView(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{
+		cfg: &config.Config{
+			Path:      filepath.Join(dir, "vibedrive.yaml"),
+			Workspace: filepath.Join(dir, "work space"),
+			PlanFile:  filepath.Join(dir, "work space", "vibedrive-plan.yaml"),
+		},
+		executablePath: filepath.Join(dir, "vibedrive"),
+	}
+
+	script := r.tmuxStatusScript()
+	for _, want := range []string{
+		"view --active-only",
+		"--workspace",
+		"--plan",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("expected tmux status script to contain %q, got %q", want, script)
+		}
 	}
 }
 
@@ -922,6 +1083,57 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 	}
 	if !strings.Contains(secondNote.Notes, "did not apply cleanly") {
 		t.Fatalf("expected merge conflict note, got %q", secondNote.Notes)
+	}
+	recovery, ok := r.parallelRecoveryArtifact("second")
+	if !ok {
+		t.Fatal("expected rejected worker patch to be preserved for recovery")
+	}
+	patch := mustReadRunnerFile(t, recovery.PatchPath)
+	if !strings.Contains(patch, "second") || !strings.Contains(patch, "shared.txt") {
+		t.Fatalf("expected preserved patch to contain rejected worker change, got:\n%s", patch)
+	}
+	if _, statErr := os.Stat(recovery.MetadataPath); statErr != nil {
+		t.Fatalf("expected recovery metadata to be preserved, stat err=%v", statErr)
+	}
+	if !strings.Contains(secondNote.Notes, recovery.PatchPath) {
+		t.Fatalf("expected task note to mention recovery patch %q, got %q", recovery.PatchPath, secondNote.Notes)
+	}
+}
+
+func TestParallelRecoveryPromptIsPrependedForCoder(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Workspace: dir,
+		Parallel: config.ParallelConfig{
+			ArtifactRoot: filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+	}
+	r := &Runner{cfg: cfg}
+	recovery := parallelRecoveryArtifactForTask(cfg, "api")
+	if err := os.MkdirAll(recovery.Dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(recovery.PatchPath, []byte("diff --git a/api.txt b/api.txt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile patch returned error: %v", err)
+	}
+	if err := os.WriteFile(recovery.MetadataPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile metadata returned error: %v", err)
+	}
+
+	data := TemplateData{
+		Task:          plan.Task{ID: "api"},
+		TaskNotesPath: filepath.Join(dir, ".vibedrive", "task-notes.yaml"),
+	}
+	prompt := r.withParallelRecoveryPrompt("Execute task api.", data, config.AgentCodex, config.Step{Actor: config.StepActorCoder})
+	for _, want := range []string{"Parallel recovery context", recovery.PatchPath, recovery.MetadataPath, "Execute task api."} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected recovery prompt to contain %q, got:\n%s", want, prompt)
+		}
+	}
+
+	reviewerPrompt := r.withParallelRecoveryPrompt("Review task api.", data, config.AgentClaude, config.Step{Actor: config.StepActorReviewer})
+	if strings.Contains(reviewerPrompt, "Parallel recovery context") {
+		t.Fatalf("expected reviewer prompt not to include recovery context, got:\n%s", reviewerPrompt)
 	}
 }
 
@@ -1152,8 +1364,98 @@ tasks:
 	if !strings.Contains(err.Error(), `step "review" failed: step "review" did not produce required output`) {
 		t.Fatalf("expected missing required output error, got %q", err)
 	}
-	if got := strings.Join(codexAgent.prompts, "\n"); got != "review scaffold" {
+	if len(codexAgent.prompts) != 2 {
+		t.Fatalf("expected original and repair prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if codexAgent.prompts[0] != "review scaffold" {
+		t.Fatalf("expected first prompt to review, got %q", codexAgent.prompts[0])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "finished without creating these required output files") {
+		t.Fatalf("expected repair prompt to explain missing output, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "reviews/scaffold.json") {
+		t.Fatalf("expected repair prompt to name missing review artifact, got %q", codexAgent.prompts[1])
+	}
+	if got := codexAgent.prompts[len(codexAgent.prompts)-1]; got == "finish task scaffold" {
 		t.Fatalf("expected runner to stop before later steps, got prompts:\n%s", got)
+	}
+}
+
+func TestRunAsksAgentToRepairMissingRequiredOutput(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		Coder:                config.AgentCodex,
+		Reviewer:             config.AgentCodex,
+		MaxStalledIterations: 1,
+		DefaultWorkflow:      "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "review",
+						Type:            config.StepTypeAgent,
+						Actor:           config.StepActorReviewer,
+						Prompt:          "review {{ .Task.ID }}",
+						RequiredOutputs: []string{"{{ .ReviewPath }}"},
+					},
+					{Name: "finish", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	reviewPath := automation.ReviewPath(dir, "scaffold")
+	codexAgent := &fakeCodex{
+		planPath: planPath,
+		onRun: func(prompt string) error {
+			if !strings.Contains(prompt, "finished without creating these required output files") {
+				return nil
+			}
+			if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(reviewPath, []byte(`{"decision":"approved","summary":"ok","findings":[]}`+"\n"), 0o644)
+		},
+	}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		codex:  codexAgent,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(codexAgent.prompts) != 3 {
+		t.Fatalf("expected original, repair, and finish prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if codexAgent.prompts[0] != "review scaffold" {
+		t.Fatalf("expected first prompt to review, got %q", codexAgent.prompts[0])
+	}
+	if !strings.Contains(codexAgent.prompts[1], reviewPath) {
+		t.Fatalf("expected repair prompt to name %s, got %q", reviewPath, codexAgent.prompts[1])
+	}
+	if codexAgent.prompts[2] != "finish task scaffold" {
+		t.Fatalf("expected runner to continue after required output repair, got %q", codexAgent.prompts[2])
 	}
 }
 

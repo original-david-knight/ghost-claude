@@ -15,6 +15,7 @@ import (
 
 	"vibedrive/internal/config"
 	createpkg "vibedrive/internal/create"
+	"vibedrive/internal/runstate"
 )
 
 func TestResolveInitSourceArgsFromFlags(t *testing.T) {
@@ -260,6 +261,163 @@ tasks:
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected view output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func TestViewCommandShowsActiveRuntimeStep(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive.yaml"), []byte(`workspace: .
+plan_file: vibedrive-plan.yaml
+default_workflow: implement
+workflows:
+  implement:
+    steps:
+      - name: execute
+        type: agent
+        actor: coder
+        prompt: execute
+      - name: review
+        type: agent
+        actor: reviewer
+        prompt: review
+      - name: finalize
+        type: exec
+        command:
+          - echo
+          - done
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	if err := os.WriteFile(planPath, []byte(`project:
+  name: demo
+tasks:
+  - id: api
+    title: Build API
+    status: todo
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile plan returned error: %v", err)
+	}
+	if err := runstate.UpsertTask(runstate.Path(dir), runstate.Run{
+		ID:        "run-1",
+		PID:       1234,
+		Workspace: dir,
+		PlanFile:  planPath,
+	}, runstate.Task{
+		ID:        "api",
+		Status:    "in_progress",
+		Workflow:  "implement",
+		StepName:  "review",
+		StepType:  "agent",
+		StepActor: "reviewer",
+		StepIndex: 1,
+		StepTotal: 3,
+		Workspace: dir,
+		PlanFile:  planPath,
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := viewCommand([]string{"--workspace", dir}, &out)
+	if err != nil {
+		t.Fatalf("viewCommand returned error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Statuses: done=0 in_progress=1 blocked=0 manual=0 todo=0",
+		"Active: api step 2/3 review",
+		"[~] api (in_progress) - Build API",
+		"steps (implement): [x] execute(agent:coder) -> [~] review(agent:reviewer) -> [ ] finalize(exec)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected view output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func TestViewCommandActiveOnlyShowsCurrentlyExecutingSteps(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	if err := os.WriteFile(filepath.Join(dir, "vibedrive.yaml"), []byte(`workspace: .
+plan_file: vibedrive-plan.yaml
+default_workflow: implement
+workflows:
+  implement:
+    steps:
+      - name: execute
+        type: agent
+        actor: coder
+        prompt: execute
+      - name: review
+        type: agent
+        actor: reviewer
+        prompt: review
+      - name: finalize
+        type: exec
+        command:
+          - echo
+          - done
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile config returned error: %v", err)
+	}
+	if err := os.WriteFile(planPath, []byte(`project:
+  name: demo
+tasks:
+  - id: api
+    title: Build API
+    status: todo
+  - id: ui
+    title: Build UI
+    status: todo
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile plan returned error: %v", err)
+	}
+	if err := runstate.UpsertTask(runstate.Path(dir), runstate.Run{
+		ID:        "run-1",
+		PID:       1234,
+		Workspace: dir,
+		PlanFile:  planPath,
+	}, runstate.Task{
+		ID:        "api",
+		Status:    "in_progress",
+		Workflow:  "implement",
+		StepName:  "review",
+		StepType:  "agent",
+		StepActor: "reviewer",
+		StepIndex: 1,
+		StepTotal: 3,
+		Workspace: dir,
+		PlanFile:  planPath,
+	}); err != nil {
+		t.Fatalf("UpsertTask returned error: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := viewCommand([]string{"--workspace", dir, "--active-only"}, &out)
+	if err != nil {
+		t.Fatalf("viewCommand returned error: %v", err)
+	}
+
+	output := out.String()
+	for _, want := range []string{
+		"Currently Executing:",
+		"[~] api - Build API",
+		"step 2/3: review(agent:reviewer)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected active-only view output to contain %q, got %q", want, output)
+		}
+	}
+	for _, unwanted := range []string{
+		"Task Graph:",
+		"[ ] ui (todo) - Build UI",
+		"steps (implement):",
+	} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("expected active-only view output to omit %q, got %q", unwanted, output)
 		}
 	}
 }

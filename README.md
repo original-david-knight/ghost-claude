@@ -12,7 +12,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 - **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
 - **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
 - **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). Plans should include any harnesses or instrumentation agents need to verify their own work, such as scripted screenshot capture for UI changes. A task only stays `done` when its commands pass; otherwise it drops back to `in_progress` with a failure note.
-- **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Vibedrive uses that metadata to reduce each agent's context and, when parallel execution is explicitly enabled, to select safe batches. Parallel agent batches run the real TUIs in tmux.
+- **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Init-generated configs enable parallelism by default, and Vibedrive only starts a batch when ready-task boundaries prove it is safe. Parallel agent batches run the real TUIs in tmux.
 - **Replan with memory.** `vibedrive restart` reads the existing plan plus prior task notes and regenerates a fresh plan informed by what the earlier run actually learned.
 
 ## Example
@@ -183,7 +183,7 @@ max_stalled_iterations: 2
 default_workflow: implement
 
 parallel:
-  enabled: false
+  enabled: true
   max_parallelism: 3
   worktree_root: .vibedrive/worktrees
   artifact_root: .vibedrive/task-runs
@@ -368,8 +368,8 @@ The intended use is:
 - each task should end by leaving short notes about what it learned in that phase so the plan can be revised and rerun from a fresh environment
 - `vibedrive restart` re-reads the current plan, source docs, and prior task notes, then rewrites `vibedrive-plan.yaml` for a fresh rerun with every task back at `todo` and clears stale task notes
 - `vibedrive init` can generate the initial plan from one or more `--source` inputs, the single positional source alias, or the workspace's top-level regular files when you omit sources
-- `vibedrive init` runs fresh author, critic, and author-revision agent instances; the critic reviews without editing the plan and the author owns both plan writes
-- generated `init` and `restart` plans should identify components, owned paths, interfaces/contracts, and integration checkpoints before generating executable tasks
+- `vibedrive init` first asks the author agent to write `COMPONENTS.md`, has the critic review that component breakdown, asks the author to revise it, then runs fresh author, critic, and author-revision agent instances for the plan; the critic reviews without editing artifacts and the author owns writes
+- generated `init` and `restart` plans should honor `COMPONENTS.md` by identifying components, owned paths, interfaces/contracts, and integration checkpoints before generating executable tasks
 - boundary metadata such as `component`, `owns_paths`, `reads_contracts`, and `provides_contracts` is meant to reduce the context each agent needs, not merely to make parallel work faster
 - cross-cutting implementation tasks should be split by component or depend on an earlier contract/foundation task that establishes the shared interface or ownership model
 - the scaffolded `init` prompt keeps testing and cleanup work inside implementation tasks unless explicit planning-time risk triggers justify a standalone tech-debt follow-up
@@ -451,6 +451,8 @@ Not selected:
 
 Serial fallback is deliberate. A ready task with no `owns_paths` and no component-owned paths can still run, but it will not be batched with another selected task because the runner cannot prove its write boundary. Ready tasks also remain serial when they list each other in `conflicts_with`, write overlapping `owns_paths`, or both write the same `provides_contracts` file. The inspection command reports those reasons as `missing_ownership_metadata`, `explicit_conflict`, `ownership_conflict`, or `contract_writer_conflict`.
 
+Parallel workers integrate through patches, not an interactive git merge. When a worker patch does not apply cleanly to the root workspace, Vibedrive marks only that task `in_progress`, writes a follow-up note, and preserves the rejected patch plus metadata under `.vibedrive/task-runs/recovery/<task>/`. The next coder prompt for that task includes the recovery patch path and asks the agent to reconcile useful changes against the current workspace instead of blindly applying stale hunks.
+
 Use `vibedrive view` for the broader project snapshot. It prints the current task counts, next ready task, an ASCII dependency graph, and the configured workflow step pipeline for each task:
 
 ```bash
@@ -522,18 +524,18 @@ Task completion comes from `vibedrive-plan.yaml`. Vibedrive does not persist per
 | `max_stalled_iterations` | `2`           | Abort after this many no-progress iterations on the same item.     |
 | `default_workflow`       | unset         | Workflow used when a plan task omits `workflow`.                   |
 | `dry_run`                | `false`       | Render prompts and commands without running anything.              |
-| `parallel`               | serial        | Optional block for isolated parallel task execution. Defaults keep execution serial until explicitly enabled. |
+| `parallel`               | enabled by scaffold | Optional block for isolated parallel task execution. Hand-written configs without this block stay serial. |
 
 ### `parallel` block
 
 | Field             | Default                    | Meaning                                                                 |
 | ----------------- | -------------------------- | ----------------------------------------------------------------------- |
-| `enabled`         | `false`                    | Opts into parallel execution. When false, `max_parallelism` is ignored and the runner stays serial. |
+| `enabled`         | `true` in scaffolded configs | Opts into parallel execution. When false, `max_parallelism` is ignored and the runner stays serial. |
 | `max_parallelism` | `3`                        | Maximum number of safe ready tasks to run in one batch. Must be at least `1`. |
 | `worktree_root`   | `.vibedrive/worktrees`     | Workspace-relative root for isolated git worktrees used by parallel workers. |
-| `artifact_root`   | `.vibedrive/task-runs`     | Workspace-relative root for isolated task results, review artifacts, and task notes from parallel workers. |
+| `artifact_root`   | `.vibedrive/task-runs`     | Workspace-relative root for isolated worker artifacts, including task results, review artifacts, task notes, and rejected-patch recovery files. |
 
-The scaffold writes `parallel.enabled: false` and `max_parallelism: 3`, so existing plans still run exactly one task at a time until parallel execution is explicitly enabled. Setting `parallel.enabled: true` only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries. When a parallel batch includes agent steps, tmux is required so Vibedrive can run one real TUI per worker without corrupting the parent terminal. At batch start, Vibedrive prints the tmux session name and an attach command such as `tmux attach-session -t vibedrive-...`; if tmux is missing, the run fails clearly instead of falling back to serial execution.
+The scaffold writes `parallel.enabled: true` and `max_parallelism: 3`, so new init-generated projects opt into safe parallel batches by default. This only allows batching after `vibedrive plan ready-batch` can prove the selected tasks have compatible boundaries; plans with one ready task still run serially for that iteration. When a parallel batch includes agent steps, tmux is required so Vibedrive can run one real TUI per worker without corrupting the parent terminal. At batch start, Vibedrive prints the tmux session name and an attach command such as `tmux attach-session -t vibedrive-...`; if tmux is missing, the run fails clearly instead of falling back to serial execution.
 
 ### `claude` block
 

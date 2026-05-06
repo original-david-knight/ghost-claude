@@ -22,6 +22,7 @@ import (
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/render"
+	"vibedrive/internal/runstate"
 	"vibedrive/internal/tasknotes"
 	"vibedrive/internal/tmuxagent"
 	"vibedrive/pkg/agentcli/claude"
@@ -40,6 +41,11 @@ type Runner struct {
 	newCodexSession func() (*codex.Session, error)
 	tmux            *tmuxagent.Controller
 	tmuxAnnounced   bool
+
+	runStatePath      string
+	runStateID        string
+	runStateWorkspace string
+	runStatePlanFile  string
 }
 
 type TemplateData struct {
@@ -47,6 +53,7 @@ type TemplateData struct {
 	ExecutablePath string
 	Iteration      int
 	SessionID      string
+	WorkflowName   string
 	TaskResultPath string
 	TaskNotesPath  string
 	ReviewPath     string
@@ -140,8 +147,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	if strings.TrimSpace(r.cfg.PlanFile) == "" {
 		return fmt.Errorf("plan_file is required")
 	}
+	r.ensureRunState()
+	if !r.cfg.DryRun {
+		defer r.clearRuntimeRun()
+	}
+	runTmux := false
+	if !r.cfg.DryRun && r.shouldUseRunTmux() {
+		if err := r.ensureRunTmux(ctx); err != nil {
+			return err
+		}
+		runTmux = true
+	}
+	if runTmux || (r.cfg.EffectiveParallelism() > 1 && !r.cfg.DryRun) {
+		defer r.closeRunTmux()
+	}
 	if r.cfg.EffectiveParallelism() > 1 && !r.cfg.DryRun {
-		defer r.closeParallelTmux()
 		return r.runParallelPlan(ctx)
 	}
 	return r.runPlan(ctx)
@@ -272,6 +292,7 @@ func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File,
 		ConfigPath:     r.cfg.Path,
 		ExecutablePath: r.executablePath,
 		Iteration:      iteration,
+		WorkflowName:   workflowName,
 		TaskResultPath: paths.TaskResultPath,
 		TaskNotesPath:  paths.TaskNotesPath,
 		ReviewPath:     paths.ReviewPath,
@@ -309,6 +330,9 @@ func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File,
 	updatedTask, ok := nextPlan.FindTask(task.ID)
 	if !ok {
 		return false, fmt.Errorf("task %q disappeared from %s during iteration %d", task.ID, r.cfg.PlanFile, iteration)
+	}
+	if updatedTask.IsTerminal() {
+		r.clearParallelRecoveryArtifact(task.ID)
 	}
 
 	nextNotes, err := tasknotes.Load(data.TaskNotesPath)
@@ -348,10 +372,28 @@ type parallelTaskResult struct {
 	Err          error
 }
 
+type parallelRecoveryArtifact struct {
+	Dir              string `json:"-"`
+	PatchPath        string `json:"patch_path"`
+	MetadataPath     string `json:"metadata_path"`
+	InstructionsPath string `json:"instructions_path"`
+}
+
+type parallelRecoveryMetadata struct {
+	TaskID          string `json:"task_id"`
+	WorkerWorkspace string `json:"worker_workspace"`
+	BaseRevision    string `json:"base_revision,omitempty"`
+	Status          string `json:"status,omitempty"`
+	Notes           string `json:"notes,omitempty"`
+	Error           string `json:"error"`
+	CreatedAt       string `json:"created_at"`
+}
+
 type preparedParallelTask struct {
 	Task             plan.Task
 	Paths            TaskExecutionPaths
 	Steps            []config.Step
+	WorkflowName     string
 	IsolatedPlan     *plan.File
 	IsolatedTask     plan.Task
 	InitialSignature string
@@ -410,7 +452,7 @@ func (r *Runner) runParallelBatch(ctx context.Context, currentPlan *plan.File, t
 }
 
 func (r *Runner) prepareParallelTask(ctx context.Context, currentPlan *plan.File, task plan.Task, paths TaskExecutionPaths) (preparedParallelTask, error) {
-	steps, _, err := r.stepsForTask(task)
+	steps, workflowName, err := r.stepsForTask(task)
 	if err != nil {
 		return preparedParallelTask{}, err
 	}
@@ -450,6 +492,7 @@ func (r *Runner) prepareParallelTask(ctx context.Context, currentPlan *plan.File
 		Task:             task,
 		Paths:            paths,
 		Steps:            steps,
+		WorkflowName:     workflowName,
 		IsolatedPlan:     isolatedPlan,
 		IsolatedTask:     isolatedTask,
 		InitialSignature: taskProgressSignature(isolatedTask, currentNotes),
@@ -464,6 +507,7 @@ func (r *Runner) runPreparedParallelTask(ctx context.Context, work preparedParal
 		ConfigPath:     r.cfg.Path,
 		ExecutablePath: r.executablePath,
 		Iteration:      iteration,
+		WorkflowName:   work.WorkflowName,
 		TaskResultPath: work.Paths.TaskResultPath,
 		TaskNotesPath:  work.Paths.TaskNotesPath,
 		ReviewPath:     work.Paths.ReviewPath,
@@ -554,14 +598,16 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 	applied := false
 	if len(bytes.TrimSpace(patch)) > 0 {
 		if err := gitApplyPatch(ctx, r.cfg.Workspace, patch, true, false); err != nil {
-			notes := appendIntegrationNote(result.Notes, "Parallel worker changes did not apply cleanly: "+shortError(err)+".")
+			recovery, recoveryErr := r.writeParallelRecoveryArtifact(result, patch, err)
+			notes := appendParallelRecoveryNote(result.Notes, err, recovery, recoveryErr)
 			if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
 				return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
 			}
 			return err
 		}
 		if err := gitApplyPatch(ctx, r.cfg.Workspace, patch, false, false); err != nil {
-			notes := appendIntegrationNote(result.Notes, "Parallel worker changes did not apply cleanly: "+shortError(err)+".")
+			recovery, recoveryErr := r.writeParallelRecoveryArtifact(result, patch, err)
+			notes := appendParallelRecoveryNote(result.Notes, err, recovery, recoveryErr)
 			if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
 				return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
 			}
@@ -583,6 +629,7 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 		CommitMessage: taskCommitMessage(result.Task),
 	}, r.stdout, r.stderr)
 	if err == nil {
+		r.clearParallelRecoveryArtifact(result.Task.ID)
 		return nil
 	}
 
@@ -622,6 +669,120 @@ func (r *Runner) parallelWorkerPatch(ctx context.Context, result parallelTaskRes
 		return nil, fmt.Errorf("git diff worker changes: %w", err)
 	}
 	return patch, nil
+}
+
+func (r *Runner) writeParallelRecoveryArtifact(result parallelTaskResult, patch []byte, applyErr error) (parallelRecoveryArtifact, error) {
+	artifact := parallelRecoveryArtifactForTask(r.cfg, result.Task.ID)
+	if len(bytes.TrimSpace(patch)) == 0 {
+		return artifact, fmt.Errorf("parallel recovery patch is empty")
+	}
+	if err := os.MkdirAll(artifact.Dir, 0o755); err != nil {
+		return artifact, err
+	}
+	if err := os.WriteFile(artifact.PatchPath, patch, 0o644); err != nil {
+		return artifact, err
+	}
+
+	metadata := parallelRecoveryMetadata{
+		TaskID:          result.Task.ID,
+		WorkerWorkspace: result.Paths.Workspace,
+		BaseRevision:    result.BaseRevision,
+		Status:          result.Status,
+		Notes:           strings.TrimSpace(result.Notes),
+		Error:           shortError(applyErr),
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return artifact, err
+	}
+	if err := os.WriteFile(artifact.MetadataPath, append(data, '\n'), 0o644); err != nil {
+		return artifact, err
+	}
+
+	instructions := fmt.Sprintf(`# Parallel Recovery: %s
+
+The parallel worker completed, but its patch did not apply cleanly to the root workspace.
+
+Files:
+- rejected.patch: worker changes that failed root integration
+- metadata.json: task, base revision, and integration error
+
+On the next Vibedrive run, the coder prompt for this task will include this recovery patch. Reconcile useful changes manually against the current workspace; do not apply the patch blindly.
+`, result.Task.ID)
+	if err := os.WriteFile(artifact.InstructionsPath, []byte(instructions), 0o644); err != nil {
+		return artifact, err
+	}
+	return artifact, nil
+}
+
+func (r *Runner) withParallelRecoveryPrompt(prompt string, data TemplateData, target string, step config.Step) string {
+	if !isAgentTarget(target) {
+		return prompt
+	}
+	if strings.TrimSpace(strings.ToLower(step.Actor)) == config.StepActorReviewer {
+		return prompt
+	}
+
+	artifact, ok := r.parallelRecoveryArtifact(data.Task.ID)
+	if !ok {
+		return prompt
+	}
+
+	recovery := fmt.Sprintf(`Parallel recovery context:
+A previous parallel worker for this task completed, but its patch did not apply cleanly to the root workspace.
+
+Recovery patch: %s
+Recovery metadata: %s
+
+Before making new edits, inspect the recovery patch and reconcile any still-useful changes against the current workspace. Do not apply it blindly; adapt it to the current files and discard stale hunks. Record what you reused or discarded in %s.
+
+`, artifact.PatchPath, artifact.MetadataPath, data.TaskNotesPath)
+	return recovery + strings.TrimLeft(prompt, "\n")
+}
+
+func (r *Runner) parallelRecoveryArtifact(taskID string) (parallelRecoveryArtifact, bool) {
+	artifact := parallelRecoveryArtifactForTask(r.cfg, taskID)
+	info, err := os.Stat(artifact.PatchPath)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return artifact, false
+	}
+	return artifact, true
+}
+
+func (r *Runner) clearParallelRecoveryArtifact(taskID string) {
+	artifact := parallelRecoveryArtifactForTask(r.cfg, taskID)
+	_ = os.RemoveAll(artifact.Dir)
+}
+
+func parallelRecoveryArtifactForTask(cfg *config.Config, taskID string) parallelRecoveryArtifact {
+	root := config.DefaultParallelArtifactRoot
+	if cfg != nil {
+		root = cfg.ParallelArtifactRoot()
+	}
+	key := parallelRecoveryTaskKey(taskID)
+	dir := filepath.Join(root, "recovery", key)
+	return parallelRecoveryArtifact{
+		Dir:              dir,
+		PatchPath:        filepath.Join(dir, "rejected.patch"),
+		MetadataPath:     filepath.Join(dir, "metadata.json"),
+		InstructionsPath: filepath.Join(dir, "README.md"),
+	}
+}
+
+func parallelRecoveryTaskKey(taskID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(taskID)))
+	return taskIDSlug(taskID) + "-" + hex.EncodeToString(sum[:])[:12]
+}
+
+func appendParallelRecoveryNote(notes string, applyErr error, artifact parallelRecoveryArtifact, recoveryErr error) string {
+	suffix := "Parallel worker changes did not apply cleanly: " + shortError(applyErr) + "."
+	if recoveryErr != nil {
+		suffix += " Failed to preserve recovery patch: " + shortError(recoveryErr) + "."
+	} else {
+		suffix += " Recovery patch preserved at " + artifact.PatchPath + "; the next coder run should reconcile useful changes from that patch."
+	}
+	return appendIntegrationNote(notes, suffix)
 }
 
 func (r *Runner) recordParallelTaskStatus(ctx context.Context, task plan.Task, status, notes string) error {
@@ -792,7 +953,103 @@ func (r *Runner) ensureParallelTmux(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) closeParallelTmux() {
+func (r *Runner) shouldUseRunTmux() bool {
+	if r == nil || r.cfg == nil {
+		return false
+	}
+	return (r.claude != nil && r.claude.IsFullscreenTUI()) || (r.codex != nil && r.codex.IsFullscreenTUI())
+}
+
+func (r *Runner) ensureRunTmux(ctx context.Context) error {
+	if r.tmux == nil {
+		r.tmux = r.newRunTmuxController()
+	}
+	if err := r.tmux.Start(ctx); err != nil {
+		return err
+	}
+	if err := r.useRootTmuxClients(); err != nil {
+		return err
+	}
+	if !r.tmuxAnnounced && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "vibedrive tmux session: %s\nattach with: %s\n", r.tmux.SessionName(), r.tmux.AttachCommand())
+		r.tmuxAnnounced = true
+	}
+	if err := r.openRunTmuxClient(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Runner) newRunTmuxController() *tmuxagent.Controller {
+	return tmuxagent.NewController(tmuxagent.Options{
+		SessionName:   tmuxagent.RunSessionName(r.cfg.Workspace, r.cfg.PlanFile, os.Getpid()),
+		Stderr:        r.stderr,
+		StatusCommand: "sh",
+		StatusArgs:    []string{"-lc", r.tmuxStatusScript()},
+		StatusWorkdir: r.cfg.Workspace,
+	})
+}
+
+func (r *Runner) tmuxStatusScript() string {
+	executable := strings.TrimSpace(r.executablePath)
+	if executable == "" {
+		executable = os.Args[0]
+	}
+	args := []string{shellArg(executable), "view", "--active-only"}
+	if strings.TrimSpace(r.cfg.Path) != "" {
+		args = append(args, "--config", shellArg(r.cfg.Path))
+	}
+	args = append(args, "--workspace", shellArg(r.cfg.Workspace), "--plan", shellArg(r.cfg.PlanFile))
+	return fmt.Sprintf("while :; do clear; %s; sleep 1; done", strings.Join(args, " "))
+}
+
+func shellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func (r *Runner) useRootTmuxClients() error {
+	if r.tmux == nil {
+		return nil
+	}
+	if r.claude != nil && r.claude.IsFullscreenTUI() {
+		claudeAgent, err := newTmuxClaudeClient(
+			r.cfg.Claude.Command,
+			r.cfg.Claude.Args,
+			r.cfg.Workspace,
+			r.cfg.Claude.StartupTimeout,
+			r.tmux,
+			"main",
+		)
+		if err != nil {
+			return err
+		}
+		r.claude = claudeAgent
+	}
+	if r.codex != nil && r.codex.IsFullscreenTUI() {
+		codexAgent, err := newTmuxCodexClient(
+			r.cfg.Codex.Command,
+			r.cfg.Codex.Args,
+			r.cfg.Workspace,
+			r.cfg.Codex.StartupTimeout,
+			r.tmux,
+			"main",
+		)
+		if err != nil {
+			return err
+		}
+		r.codex = codexAgent
+	}
+	return nil
+}
+
+func (r *Runner) openRunTmuxClient(ctx context.Context) error {
+	if r.tmux == nil {
+		return nil
+	}
+	return r.tmux.OpenClient(ctx, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func (r *Runner) closeRunTmux() {
 	if r.tmux == nil {
 		return
 	}
@@ -898,6 +1155,7 @@ func gitApplyPatch(ctx context.Context, workspace string, patch []byte, check, r
 
 func workerIntegrationExcludes(paths TaskExecutionPaths) []string {
 	excludes := []string{
+		":(exclude).vibedrive/run-state.json",
 		":(exclude).vibedrive/task-notes.yaml",
 		":(exclude).vibedrive/task-results/**",
 		":(exclude).vibedrive/reviews/**",
@@ -1206,6 +1464,10 @@ func (r *Runner) createCodexSession() (*codex.Session, error) {
 }
 
 func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data TemplateData) error {
+	if !r.cfg.DryRun {
+		defer r.clearRuntimeTask(data.Task.ID)
+	}
+
 	var sharedSession *claude.Session
 	var sharedCodexSession *codex.Session
 	type sessionCloser struct {
@@ -1230,10 +1492,11 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 		return runErr
 	}
 
-	for _, step := range steps {
+	for stepIndex, step := range steps {
 		if step.Disabled {
 			continue
 		}
+		r.recordRuntimeStep(data, step, stepIndex, len(steps))
 
 		err := func() error {
 			var (
@@ -1347,6 +1610,85 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 	return closeSharedSession(nil)
 }
 
+func (r *Runner) ensureRunState() {
+	if r == nil || r.cfg == nil {
+		return
+	}
+	if strings.TrimSpace(r.runStateWorkspace) == "" {
+		r.runStateWorkspace = r.cfg.Workspace
+	}
+	if strings.TrimSpace(r.runStatePlanFile) == "" {
+		r.runStatePlanFile = r.cfg.PlanFile
+	}
+	if strings.TrimSpace(r.runStatePath) == "" {
+		r.runStatePath = runstate.Path(r.runStateWorkspace)
+	}
+	if strings.TrimSpace(r.runStateID) == "" {
+		r.runStateID = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+}
+
+func (r *Runner) recordRuntimeStep(data TemplateData, step config.Step, stepIndex, stepTotal int) {
+	if r == nil || r.cfg == nil || r.cfg.DryRun {
+		return
+	}
+	r.ensureRunState()
+	if strings.TrimSpace(r.runStatePath) == "" || strings.TrimSpace(r.runStateID) == "" {
+		return
+	}
+
+	err := runstate.UpsertTask(r.runStatePath, r.runtimeRun(), runstate.Task{
+		ID:        data.Task.ID,
+		Status:    plan.StatusInProgress,
+		Workflow:  data.WorkflowName,
+		StepName:  step.Name,
+		StepType:  step.Type,
+		StepActor: step.Actor,
+		StepIndex: stepIndex,
+		StepTotal: stepTotal,
+		Workspace: r.runStateWorkspace,
+		PlanFile:  r.runStatePlanFile,
+	})
+	if err != nil && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "warning: failed to update vibedrive run state: %v\n", err)
+	}
+}
+
+func (r *Runner) clearRuntimeTask(taskID string) {
+	if r == nil || r.cfg == nil || r.cfg.DryRun {
+		return
+	}
+	r.ensureRunState()
+	if strings.TrimSpace(r.runStatePath) == "" || strings.TrimSpace(r.runStateID) == "" {
+		return
+	}
+	if err := runstate.ClearTask(r.runStatePath, r.runStateID, taskID); err != nil && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "warning: failed to clear vibedrive run state: %v\n", err)
+	}
+}
+
+func (r *Runner) clearRuntimeRun() {
+	if r == nil || r.cfg == nil || r.cfg.DryRun {
+		return
+	}
+	r.ensureRunState()
+	if strings.TrimSpace(r.runStatePath) == "" || strings.TrimSpace(r.runStateID) == "" {
+		return
+	}
+	if err := runstate.ClearRun(r.runStatePath, r.runStateID); err != nil && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "warning: failed to clear vibedrive run state: %v\n", err)
+	}
+}
+
+func (r *Runner) runtimeRun() runstate.Run {
+	return runstate.Run{
+		ID:        r.runStateID,
+		PID:       os.Getpid(),
+		Workspace: r.runStateWorkspace,
+		PlanFile:  r.runStatePlanFile,
+	}
+}
+
 func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSession *codex.Session, step config.Step, data TemplateData) error {
 	stepCtx := ctx
 	var cancel context.CancelFunc
@@ -1396,6 +1738,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			if err != nil {
 				return fmt.Errorf("render prompt: %w", err)
 			}
+			prompt = r.withParallelRecoveryPrompt(prompt, stepData, target, step)
 
 			if r.shouldLogProgress() {
 				fmt.Fprintf(r.stdout, "\n--> claude step: %s\n", step.Name)
@@ -1414,6 +1757,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			if err != nil {
 				return fmt.Errorf("render prompt: %w", err)
 			}
+			prompt = r.withParallelRecoveryPrompt(prompt, data, target, step)
 
 			if r.shouldLogProgress() {
 				fmt.Fprintf(r.stdout, "\n--> codex step: %s\n", step.Name)
@@ -1487,7 +1831,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			return err
 		}
 	}
-	if err := verifyRequiredOutputs(step.Name, requiredOutputs); err != nil {
+	if err := r.ensureRequiredOutputsAfterStep(stepCtx, target, session, codexSession, step.Name, data.Task.ID, requiredOutputs); err != nil {
 		return err
 	}
 
@@ -1538,6 +1882,37 @@ func (r *Runner) validateTaskNotesAfterAgentStep(ctx context.Context, target str
 	return nil
 }
 
+func (r *Runner) ensureRequiredOutputsAfterStep(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, stepName, taskID string, requiredOutputs []string) error {
+	missing, err := missingRequiredOutputs(requiredOutputs)
+	if err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	missingErr := requiredOutputsMissingError(stepName, missing)
+	if !isAgentTarget(target) {
+		return missingErr
+	}
+
+	if r.shouldLogProgress() {
+		fmt.Fprintf(r.stderr, "warning: step %q did not produce required outputs; asking %s to repair them\n", stepName, target)
+	}
+	if err := r.runAgentPrompt(ctx, target, session, codexSession, stepName, requiredOutputsRepairPrompt(stepName, taskID, missing)); err != nil {
+		return fmt.Errorf("ask %s to create required outputs after step %q: %w", target, stepName, err)
+	}
+
+	missing, err = missingRequiredOutputs(requiredOutputs)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return requiredOutputsMissingError(stepName, missing)
+	}
+	return nil
+}
+
 type taskNotesSnapshot struct {
 	exists bool
 	data   []byte
@@ -1583,6 +1958,19 @@ tasks:
     notes: <brief notes>
 
 Preserve existing task notes and statuses as much as possible. Do not edit vibedrive-plan.yaml or make unrelated changes.`, path, taskID, parseErr, path)
+}
+
+func requiredOutputsRepairPrompt(stepName, taskID string, missing []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Your previous step %q for task %s finished without creating these required output files:\n", stepName, taskID)
+	for _, path := range missing {
+		fmt.Fprintf(&b, "- %s\n", path)
+	}
+	b.WriteString(`
+Create the missing required output files now. Follow the previous step instructions for each file's content and schema.
+If the task is complete, record the appropriate done/approved artifact. If more work is required or the task is blocked, write the required artifact with the accurate in_progress or blocked status instead of leaving it absent.
+Do not edit vibedrive-plan.yaml or make unrelated changes.`)
+	return b.String()
 }
 
 func taskExecutionPaths(cfg *config.Config, taskID string, iteration int, isolated bool) TaskExecutionPaths {
@@ -1795,6 +2183,17 @@ func prepareOutputDirectories(paths []string) error {
 }
 
 func verifyRequiredOutputs(stepName string, paths []string) error {
+	missing, err := missingRequiredOutputs(paths)
+	if err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return requiredOutputsMissingError(stepName, missing)
+}
+
+func missingRequiredOutputs(paths []string) ([]string, error) {
 	missing := make([]string, 0, len(paths))
 	for _, path := range paths {
 		if _, err := os.Stat(path); err != nil {
@@ -1802,10 +2201,13 @@ func verifyRequiredOutputs(stepName string, paths []string) error {
 				missing = append(missing, path)
 				continue
 			}
-			return fmt.Errorf("stat required output %q: %w", path, err)
+			return nil, fmt.Errorf("stat required output %q: %w", path, err)
 		}
 	}
+	return missing, nil
+}
 
+func requiredOutputsMissingError(stepName string, missing []string) error {
 	switch len(missing) {
 	case 0:
 		return nil

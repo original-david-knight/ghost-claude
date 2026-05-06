@@ -9,9 +9,18 @@ import (
 
 	"vibedrive/internal/config"
 	"vibedrive/internal/plan"
+	"vibedrive/internal/runstate"
 )
 
+type RenderOptions struct {
+	ActiveOnly bool
+}
+
 func Render(w io.Writer, file *plan.File, cfg *config.Config) error {
+	return RenderWithOptions(w, file, cfg, RenderOptions{})
+}
+
+func RenderWithOptions(w io.Writer, file *plan.File, cfg *config.Config, opts RenderOptions) error {
 	if file == nil {
 		return fmt.Errorf("plan file is nil")
 	}
@@ -19,8 +28,15 @@ func Render(w io.Writer, file *plan.File, cfg *config.Config) error {
 		return fmt.Errorf("writer is nil")
 	}
 
-	counts := countStatuses(file.Tasks)
-	total := len(file.Tasks)
+	activeTasks := loadActiveTasks(file, cfg)
+	displayFile := fileWithActiveTasks(file, activeTasks)
+	counts := countStatuses(displayFile.Tasks)
+	total := len(displayFile.Tasks)
+
+	if opts.ActiveOnly {
+		renderActiveOnly(w, displayFile, cfg, activeTasks)
+		return nil
+	}
 
 	fmt.Fprintf(w, "Project: %s\n", valueOr(file.Project.Name, "(unnamed)"))
 	if strings.TrimSpace(file.Project.Objective) != "" {
@@ -39,16 +55,64 @@ func Render(w io.Writer, file *plan.File, cfg *config.Config) error {
 		counts[plan.StatusManual],
 		counts[plan.StatusTodo],
 	)
-	fmt.Fprintf(w, "Next: %s\n", nextSummary(file))
+	fmt.Fprintf(w, "Next: %s\n", nextSummary(displayFile))
+	if summary := activeSummary(displayFile.Tasks, activeTasks); summary != "" {
+		fmt.Fprintf(w, "Active: %s\n", summary)
+	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Legend: [x]=done [~]=in_progress [!]=blocked [?]=manual [ ]=todo")
-	fmt.Fprintln(w, "Note: step completion is inferred from the enclosing task status; per-step history is not persisted.")
+	fmt.Fprintln(w, "Note: active step state is shown while vibedrive run is executing; otherwise step completion is inferred from the enclosing task status.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Task Graph:")
 
-	graph := newTaskGraph(file.Tasks)
-	graph.render(w, cfg)
+	graph := newTaskGraph(displayFile.Tasks)
+	graph.render(w, cfg, activeTasks)
 	return nil
+}
+
+func renderActiveOnly(w io.Writer, file *plan.File, cfg *config.Config, activeTasks map[string]runstate.Task) {
+	fmt.Fprintln(w, "Currently Executing:")
+	if len(activeTasks) == 0 {
+		fmt.Fprintln(w, "  none")
+		return
+	}
+
+	for _, item := range orderedActiveTasks(file.Tasks, activeTasks) {
+		title := strings.TrimSpace(item.planTask.Title)
+		if title == "" {
+			title = "(task not in plan)"
+		}
+		fmt.Fprintf(w, "  [~] %s - %s\n", valueOr(item.active.ID, "(unknown)"), title)
+		fmt.Fprintf(w, "      %s\n", activeStepSummary(cfg, item.planTask, item.active))
+	}
+}
+
+func loadActiveTasks(file *plan.File, cfg *config.Config) map[string]runstate.Task {
+	active := map[string]runstate.Task{}
+	if file == nil || cfg == nil {
+		return active
+	}
+
+	state, err := runstate.Load(runstate.Path(cfg.Workspace))
+	if err != nil {
+		return active
+	}
+	return runstate.ActiveTasksForPlan(state, file.Path)
+}
+
+func fileWithActiveTasks(file *plan.File, activeTasks map[string]runstate.Task) *plan.File {
+	if file == nil || len(activeTasks) == 0 {
+		return file
+	}
+
+	displayFile := *file
+	displayFile.Tasks = append([]plan.Task(nil), file.Tasks...)
+	for i := range displayFile.Tasks {
+		if _, ok := activeTasks[displayFile.Tasks[i].ID]; ok {
+			displayFile.Tasks[i].Status = plan.StatusInProgress
+		}
+	}
+	return &displayFile
 }
 
 type statusCounts map[string]int
@@ -107,6 +171,69 @@ func summarizeUnfinished(tasks []plan.Task) string {
 	return strings.Join(parts, ", ")
 }
 
+func activeSummary(tasks []plan.Task, activeTasks map[string]runstate.Task) string {
+	if len(activeTasks) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(activeTasks))
+	for _, item := range orderedActiveTasks(tasks, activeTasks) {
+		parts = append(parts, formatActiveTask(item.active))
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+type activeTaskView struct {
+	active   runstate.Task
+	planTask plan.Task
+}
+
+func orderedActiveTasks(tasks []plan.Task, activeTasks map[string]runstate.Task) []activeTaskView {
+	items := make([]activeTaskView, 0, len(activeTasks))
+	seen := make(map[string]bool, len(activeTasks))
+	for _, task := range tasks {
+		active, ok := activeTasks[task.ID]
+		if !ok {
+			continue
+		}
+		items = append(items, activeTaskView{
+			active:   active,
+			planTask: task,
+		})
+		seen[task.ID] = true
+	}
+
+	ids := make([]string, 0, len(activeTasks)-len(seen))
+	for id := range activeTasks {
+		if !seen[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		items = append(items, activeTaskView{
+			active: activeTasks[id],
+		})
+	}
+	return items
+}
+
+func formatActiveTask(active runstate.Task) string {
+	taskID := strings.TrimSpace(active.ID)
+	if taskID == "" {
+		taskID = "(unknown)"
+	}
+	stepName := strings.TrimSpace(active.StepName)
+	if stepName == "" {
+		return taskID
+	}
+	if active.StepTotal > 0 && active.StepIndex >= 0 {
+		return fmt.Sprintf("%s step %d/%d %s", taskID, active.StepIndex+1, active.StepTotal, stepName)
+	}
+	return fmt.Sprintf("%s step %s", taskID, stepName)
+}
+
 type taskGraph struct {
 	tasks    []plan.Task
 	children map[string][]plan.Task
@@ -138,7 +265,7 @@ func newTaskGraph(tasks []plan.Task) taskGraph {
 	return graph
 }
 
-func (g taskGraph) render(w io.Writer, cfg *config.Config) {
+func (g taskGraph) render(w io.Writer, cfg *config.Config, activeTasks map[string]runstate.Task) {
 	if len(g.tasks) == 0 {
 		fmt.Fprintln(w, "  none")
 		return
@@ -146,17 +273,17 @@ func (g taskGraph) render(w io.Writer, cfg *config.Config) {
 
 	seen := make(map[string]bool, len(g.tasks))
 	for i, task := range g.roots {
-		g.renderTask(w, cfg, task, "", i == len(g.roots)-1, seen, nil)
+		g.renderTask(w, cfg, task, "", i == len(g.roots)-1, seen, nil, activeTasks)
 	}
 	for _, task := range g.tasks {
 		if seen[task.ID] {
 			continue
 		}
-		g.renderTask(w, cfg, task, "", true, seen, nil)
+		g.renderTask(w, cfg, task, "", true, seen, nil, activeTasks)
 	}
 }
 
-func (g taskGraph) renderTask(w io.Writer, cfg *config.Config, task plan.Task, prefix string, last bool, seen map[string]bool, stack map[string]bool) {
+func (g taskGraph) renderTask(w io.Writer, cfg *config.Config, task plan.Task, prefix string, last bool, seen map[string]bool, stack map[string]bool, activeTasks map[string]runstate.Task) {
 	connector := "|-- "
 	childPrefix := prefix + "|   "
 	if last {
@@ -172,7 +299,7 @@ func (g taskGraph) renderTask(w io.Writer, cfg *config.Config, task plan.Task, p
 	}
 	seen[task.ID] = true
 
-	fmt.Fprintf(w, "%s    %s\n", childPrefix, stepSummary(cfg, task))
+	fmt.Fprintf(w, "%s    %s\n", childPrefix, stepSummary(cfg, task, activeTasks[task.ID]))
 
 	if stack == nil {
 		stack = make(map[string]bool)
@@ -187,7 +314,7 @@ func (g taskGraph) renderTask(w io.Writer, cfg *config.Config, task plan.Task, p
 
 	children := g.children[task.ID]
 	for i, child := range children {
-		g.renderTask(w, cfg, child, childPrefix, i == len(children)-1, seen, nextStack)
+		g.renderTask(w, cfg, child, childPrefix, i == len(children)-1, seen, nextStack, activeTasks)
 	}
 }
 
@@ -214,7 +341,7 @@ func statusMarker(status string) string {
 	}
 }
 
-func stepSummary(cfg *config.Config, task plan.Task) string {
+func stepSummary(cfg *config.Config, task plan.Task, active runstate.Task) string {
 	if cfg == nil {
 		return "steps: unavailable (config not loaded)"
 	}
@@ -228,10 +355,55 @@ func stepSummary(cfg *config.Config, task plan.Task) string {
 	}
 
 	labels := make([]string, 0, len(steps))
-	for _, step := range steps {
-		labels = append(labels, fmt.Sprintf("%s %s", statusMarker(task.Status), stepLabel(step)))
+	for i, step := range steps {
+		labels = append(labels, fmt.Sprintf("%s %s", stepStatusMarker(task, active, i), stepLabel(step)))
 	}
 	return fmt.Sprintf("steps (%s): %s", workflowName, strings.Join(labels, " -> "))
+}
+
+func activeStepSummary(cfg *config.Config, task plan.Task, active runstate.Task) string {
+	label := activeStepLabel(cfg, task, active)
+	if active.StepTotal > 0 && active.StepIndex >= 0 {
+		return fmt.Sprintf("step %d/%d: %s", active.StepIndex+1, active.StepTotal, label)
+	}
+	return fmt.Sprintf("step: %s", label)
+}
+
+func activeStepLabel(cfg *config.Config, task plan.Task, active runstate.Task) string {
+	if cfg != nil && strings.TrimSpace(task.ID) != "" {
+		steps, _, err := stepsForTask(cfg, task)
+		if err == nil && active.StepIndex >= 0 && active.StepIndex < len(steps) {
+			return stepLabel(steps[active.StepIndex])
+		}
+	}
+
+	name := strings.TrimSpace(active.StepName)
+	if name == "" {
+		name = "(unknown)"
+	}
+	stepType := strings.TrimSpace(strings.ToLower(active.StepType))
+	actor := strings.TrimSpace(strings.ToLower(active.StepActor))
+	if stepType == config.StepTypeAgent && actor != "" {
+		return fmt.Sprintf("%s(agent:%s)", name, actor)
+	}
+	if stepType != "" {
+		return fmt.Sprintf("%s(%s)", name, stepType)
+	}
+	return name
+}
+
+func stepStatusMarker(task plan.Task, active runstate.Task, stepIndex int) string {
+	if active.ID == task.ID {
+		switch {
+		case stepIndex < active.StepIndex:
+			return statusMarker(plan.StatusDone)
+		case stepIndex == active.StepIndex:
+			return statusMarker(plan.StatusInProgress)
+		default:
+			return statusMarker(plan.StatusTodo)
+		}
+	}
+	return statusMarker(task.Status)
 }
 
 func stepsForTask(cfg *config.Config, task plan.Task) ([]config.Step, string, error) {

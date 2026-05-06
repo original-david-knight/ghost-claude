@@ -20,6 +20,7 @@ func viewCommand(args []string, stdout io.Writer) error {
 	configPath := fs.String("config", "vibedrive.yaml", "Path to the workflow config file")
 	workspace := fs.String("workspace", "", "Workspace directory containing the workflow config or plan")
 	planPath := fs.String("plan", "", "Path to vibedrive-plan.yaml; overrides config plan_file")
+	activeOnly := fs.Bool("active-only", false, "Show only currently executing task steps")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -37,7 +38,9 @@ func viewCommand(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	return view.Render(stdout, file, cfg)
+	return view.RenderWithOptions(stdout, file, cfg, view.RenderOptions{
+		ActiveOnly: *activeOnly,
+	})
 }
 
 func loadViewInputs(configPath, workspace, planPath string) (*config.Config, *plan.File, error) {

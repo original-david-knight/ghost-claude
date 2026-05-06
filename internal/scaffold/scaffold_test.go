@@ -173,7 +173,7 @@ func assertScaffoldedParallelDefaults(t *testing.T, configPath, content string) 
 
 	for _, want := range []string{
 		"parallel:",
-		"enabled: false",
+		"enabled: true",
 		"max_parallelism: 3",
 		"worktree_root: .vibedrive/worktrees",
 		"artifact_root: .vibedrive/task-runs",
@@ -187,10 +187,10 @@ func assertScaffoldedParallelDefaults(t *testing.T, configPath, content string) 
 	if err != nil {
 		t.Fatalf("Load scaffolded config returned error: %v", err)
 	}
-	if cfg.Parallel.Enabled {
-		t.Fatal("expected scaffolded config to keep parallel execution disabled")
+	if !cfg.Parallel.Enabled {
+		t.Fatal("expected scaffolded config to enable parallel execution")
 	}
-	if cfg.EffectiveParallelism() != 1 {
-		t.Fatalf("expected scaffolded config to stay serial by default, got effective parallelism %d", cfg.EffectiveParallelism())
+	if cfg.EffectiveParallelism() != config.DefaultParallelMaxParallelism {
+		t.Fatalf("expected scaffolded config to use default parallelism %d, got %d", config.DefaultParallelMaxParallelism, cfg.EffectiveParallelism())
 	}
 }

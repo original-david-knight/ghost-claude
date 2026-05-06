@@ -43,11 +43,13 @@ type capturedPhasePrompt struct {
 }
 
 type fakePhaseLauncher struct {
-	t            *testing.T
-	feedbackPath string
-	nextID       int
-	events       []phaseEvent
-	prompts      []capturedPhasePrompt
+	t                     *testing.T
+	workspace             string
+	componentFeedbackPath string
+	feedbackPath          string
+	nextID                int
+	events                []phaseEvent
+	prompts               []capturedPhasePrompt
 }
 
 func (f *fakePhaseLauncher) launch(cfg *config.Config, agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error) {
@@ -72,6 +74,20 @@ type fakePhaseRunner struct {
 func (f *fakePhaseRunner) RunPrompt(_ context.Context, prompt string) error {
 	f.parent.events = append(f.parent.events, phaseEvent{Kind: "prompt", Role: f.role, AgentType: f.agentType, ID: f.id})
 	f.parent.prompts = append(f.parent.prompts, capturedPhasePrompt{Role: f.role, AgentType: f.agentType, Prompt: prompt})
+	if f.role == "components" && f.parent.workspace != "" {
+		componentsPath := initComponentsPath(f.parent.workspace)
+		if err := os.WriteFile(componentsPath, []byte("# Components\n\n## app: App\n- Owned paths:\n  - internal/app/**\n"), 0o644); err != nil {
+			f.parent.t.Fatalf("WriteFile returned error: %v", err)
+		}
+	}
+	if f.role == "component-critic" && f.parent.componentFeedbackPath != "" {
+		if err := os.MkdirAll(filepath.Dir(f.parent.componentFeedbackPath), 0o755); err != nil {
+			f.parent.t.Fatalf("MkdirAll returned error: %v", err)
+		}
+		if err := os.WriteFile(f.parent.componentFeedbackPath, []byte("component critic feedback\n"), 0o644); err != nil {
+			f.parent.t.Fatalf("WriteFile returned error: %v", err)
+		}
+	}
 	if f.role == "critic" && f.parent.feedbackPath != "" {
 		if err := os.MkdirAll(filepath.Dir(f.parent.feedbackPath), 0o755); err != nil {
 			f.parent.t.Fatalf("MkdirAll returned error: %v", err)
@@ -91,7 +107,12 @@ func (f *fakePhaseRunner) Close() error {
 func newFakePhaseInitializer(t *testing.T, workspace string) (*Initializer, *fakePhaseLauncher) {
 	t.Helper()
 
-	launcher := &fakePhaseLauncher{t: t, feedbackPath: initCriticFeedbackPath(workspace)}
+	launcher := &fakePhaseLauncher{
+		t:                     t,
+		workspace:             workspace,
+		componentFeedbackPath: initComponentsCriticFeedbackPath(workspace),
+		feedbackPath:          initCriticFeedbackPath(workspace),
+	}
 	init := New(io.Discard, io.Discard)
 	init.launchAgent = launcher.launch
 	return init, launcher
@@ -106,7 +127,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	launcher := &fakePhaseLauncher{t: t, feedbackPath: initCriticFeedbackPath(dir)}
+	launcher := &fakePhaseLauncher{
+		t:                     t,
+		workspace:             dir,
+		componentFeedbackPath: initComponentsCriticFeedbackPath(dir),
+		feedbackPath:          initCriticFeedbackPath(dir),
+	}
 	init := New(io.Discard, io.Discard)
 	init.launchAgent = func(cfg *config.Config, agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error) {
 		if cfg.PlanFile != filepath.Join(dir, "vibedrive-plan.yaml") {
@@ -120,15 +146,24 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 
 	wantEvents := []phaseEvent{
-		{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 1},
-		{Kind: "prompt", Role: "author", AgentType: config.AgentCodex, ID: 1},
-		{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 1},
-		{Kind: "launch", Role: "critic", AgentType: config.AgentClaude, ID: 2},
-		{Kind: "prompt", Role: "critic", AgentType: config.AgentClaude, ID: 2},
-		{Kind: "close", Role: "critic", AgentType: config.AgentClaude, ID: 2},
-		{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 3},
-		{Kind: "prompt", Role: "author", AgentType: config.AgentCodex, ID: 3},
-		{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 3},
+		{Kind: "launch", Role: "components", AgentType: config.AgentCodex, ID: 1},
+		{Kind: "prompt", Role: "components", AgentType: config.AgentCodex, ID: 1},
+		{Kind: "close", Role: "components", AgentType: config.AgentCodex, ID: 1},
+		{Kind: "launch", Role: "component-critic", AgentType: config.AgentClaude, ID: 2},
+		{Kind: "prompt", Role: "component-critic", AgentType: config.AgentClaude, ID: 2},
+		{Kind: "close", Role: "component-critic", AgentType: config.AgentClaude, ID: 2},
+		{Kind: "launch", Role: "components", AgentType: config.AgentCodex, ID: 3},
+		{Kind: "prompt", Role: "components", AgentType: config.AgentCodex, ID: 3},
+		{Kind: "close", Role: "components", AgentType: config.AgentCodex, ID: 3},
+		{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 4},
+		{Kind: "prompt", Role: "author", AgentType: config.AgentCodex, ID: 4},
+		{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 4},
+		{Kind: "launch", Role: "critic", AgentType: config.AgentClaude, ID: 5},
+		{Kind: "prompt", Role: "critic", AgentType: config.AgentClaude, ID: 5},
+		{Kind: "close", Role: "critic", AgentType: config.AgentClaude, ID: 5},
+		{Kind: "launch", Role: "author", AgentType: config.AgentCodex, ID: 6},
+		{Kind: "prompt", Role: "author", AgentType: config.AgentCodex, ID: 6},
+		{Kind: "close", Role: "author", AgentType: config.AgentCodex, ID: 6},
 	}
 	if len(launcher.events) != len(wantEvents) {
 		t.Fatalf("expected %d phase events, got %d: %#v", len(wantEvents), len(launcher.events), launcher.events)
@@ -138,19 +173,67 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 			t.Fatalf("event %d: expected %#v, got %#v", idx, want, launcher.events[idx])
 		}
 	}
-	if len(launcher.prompts) != 3 {
-		t.Fatalf("expected 3 prompts, got %d", len(launcher.prompts))
+	if len(launcher.prompts) != 6 {
+		t.Fatalf("expected 6 prompts, got %d", len(launcher.prompts))
 	}
 
-	createPrompt := launcher.prompts[0].Prompt
-	criticPrompt := launcher.prompts[1].Prompt
-	revisionPrompt := launcher.prompts[2].Prompt
+	componentsPrompt := launcher.prompts[0].Prompt
+	componentCriticPrompt := launcher.prompts[1].Prompt
+	componentRevisionPrompt := launcher.prompts[2].Prompt
+	createPrompt := launcher.prompts[3].Prompt
+	criticPrompt := launcher.prompts[4].Prompt
+	revisionPrompt := launcher.prompts[5].Prompt
 
-	if launcher.prompts[0].Role != "author" || launcher.prompts[1].Role != "critic" || launcher.prompts[2].Role != "author" {
-		t.Fatalf("expected author, critic, author prompt roles, got %#v", launcher.prompts)
+	if launcher.prompts[0].Role != "components" || launcher.prompts[1].Role != "component-critic" || launcher.prompts[2].Role != "components" || launcher.prompts[3].Role != "author" || launcher.prompts[4].Role != "critic" || launcher.prompts[5].Role != "author" {
+		t.Fatalf("expected components, component-critic, components, author, critic, author prompt roles, got %#v", launcher.prompts)
+	}
+	if !strings.Contains(componentsPrompt, "write the result to COMPONENTS.md") {
+		t.Fatalf("expected first prompt to write COMPONENTS.md, got %q", componentsPrompt)
+	}
+	if !strings.Contains(componentsPrompt, "independently workable components") {
+		t.Fatalf("expected first prompt to request independent component breakdown, got %q", componentsPrompt)
+	}
+	if !strings.Contains(componentsPrompt, "Parallelization notes") {
+		t.Fatalf("expected first prompt to require parallelization notes, got %q", componentsPrompt)
+	}
+	if !strings.Contains(componentsPrompt, "do not create vibedrive-plan.yaml in this phase") {
+		t.Fatalf("expected first prompt to avoid plan creation, got %q", componentsPrompt)
+	}
+	if !strings.Contains(componentCriticPrompt, "Review the component breakdown in COMPONENTS.md") {
+		t.Fatalf("expected component critic prompt to review COMPONENTS.md, got %q", componentCriticPrompt)
+	}
+	if !strings.Contains(componentCriticPrompt, "do not change COMPONENTS.md") {
+		t.Fatalf("expected component critic prompt to forbid component edits, got %q", componentCriticPrompt)
+	}
+	if !strings.Contains(componentCriticPrompt, ".vibedrive/init-components-feedback.md") {
+		t.Fatalf("expected component critic prompt to write transient component feedback, got %q", componentCriticPrompt)
+	}
+	if !strings.Contains(componentCriticPrompt, "missing or weak parallelization notes") {
+		t.Fatalf("expected component critic prompt to review parallelization notes, got %q", componentCriticPrompt)
+	}
+	if !strings.Contains(componentRevisionPrompt, "Revise the component breakdown in COMPONENTS.md") {
+		t.Fatalf("expected component revision prompt to revise COMPONENTS.md, got %q", componentRevisionPrompt)
+	}
+	if !strings.Contains(componentRevisionPrompt, ".vibedrive/init-components-feedback.md") {
+		t.Fatalf("expected component revision prompt to read component feedback, got %q", componentRevisionPrompt)
+	}
+	if !strings.Contains(componentRevisionPrompt, "Apply actionable critic feedback directly to COMPONENTS.md") {
+		t.Fatalf("expected component revision prompt to apply feedback to COMPONENTS.md, got %q", componentRevisionPrompt)
+	}
+	if !strings.Contains(componentRevisionPrompt, "do not create vibedrive-plan.yaml in this phase") {
+		t.Fatalf("expected component revision prompt to avoid plan creation, got %q", componentRevisionPrompt)
 	}
 	if !strings.Contains(createPrompt, "Create vibedrive-plan.yaml") {
 		t.Fatalf("expected first prompt to create the plan file, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "component breakdown in COMPONENTS.md") {
+		t.Fatalf("expected plan prompt to read COMPONENTS.md, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "source_docs must include COMPONENTS.md") {
+		t.Fatalf("expected plan prompt to include COMPONENTS.md in source_docs, got %q", createPrompt)
+	}
+	if !strings.Contains(createPrompt, "honor the component ids and boundaries from COMPONENTS.md") {
+		t.Fatalf("expected plan prompt to honor component ids and boundaries, got %q", createPrompt)
 	}
 	if !strings.Contains(createPrompt, "what it learned in that phase") {
 		t.Fatalf("expected first prompt to require per-task phase notes, got %q", createPrompt)
@@ -201,6 +284,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(criticPrompt, "Perform a critical review of the plan") {
 		t.Fatalf("expected second prompt to request a critical plan review, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "Also read COMPONENTS.md") {
+		t.Fatalf("expected critic prompt to read COMPONENTS.md, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "missing, stale, or contradicted use of the component breakdown in COMPONENTS.md") {
+		t.Fatalf("expected critic prompt to check component breakdown use, got %q", criticPrompt)
 	}
 	if !strings.Contains(criticPrompt, "do not change vibedrive-plan.yaml") {
 		t.Fatalf("expected critic prompt to forbid plan edits, got %q", criticPrompt)
@@ -259,6 +348,9 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(revisionPrompt, ".vibedrive/init-critic-feedback.md") {
 		t.Fatalf("expected third prompt to read transient critic feedback, got %q", revisionPrompt)
 	}
+	if !strings.Contains(revisionPrompt, "COMPONENTS.md") {
+		t.Fatalf("expected third prompt to read and preserve COMPONENTS.md, got %q", revisionPrompt)
+	}
 	if !strings.Contains(revisionPrompt, "Apply actionable critic feedback directly to vibedrive-plan.yaml") {
 		t.Fatalf("expected third prompt to apply actionable critic feedback, got %q", revisionPrompt)
 	}
@@ -295,6 +387,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if _, err := os.Stat(launcher.feedbackPath); !os.IsNotExist(err) {
 		t.Fatalf("expected transient critic feedback to be removed, stat err=%v", err)
 	}
+	if _, err := os.Stat(launcher.componentFeedbackPath); !os.IsNotExist(err) {
+		t.Fatalf("expected transient component critic feedback to be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(initComponentsPath(dir)); err != nil {
+		t.Fatalf("expected COMPONENTS.md to be written, stat err=%v", err)
+	}
 }
 
 func TestInitializerRunUsesExistingConfigWithoutForce(t *testing.T) {
@@ -317,7 +415,12 @@ steps:
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 
-	launcher := &fakePhaseLauncher{t: t, feedbackPath: initCriticFeedbackPath(dir)}
+	launcher := &fakePhaseLauncher{
+		t:                     t,
+		workspace:             dir,
+		componentFeedbackPath: initComponentsCriticFeedbackPath(dir),
+		feedbackPath:          initCriticFeedbackPath(dir),
+	}
 	init := New(io.Discard, io.Discard)
 	init.launchAgent = func(cfg *config.Config, agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error) {
 		if cfg.PlanFile != filepath.Join(dir, "vibedrive-plan.yaml") {
@@ -330,8 +433,8 @@ steps:
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(launcher.prompts) != 3 {
-		t.Fatalf("expected 3 prompts, got %d", len(launcher.prompts))
+	if len(launcher.prompts) != 6 {
+		t.Fatalf("expected 6 prompts, got %d", len(launcher.prompts))
 	}
 	if !strings.Contains(launcher.prompts[0].Prompt, "DESIGN.md") {
 		t.Fatalf("expected first prompt to reference DESIGN.md, got %q", launcher.prompts[0].Prompt)
@@ -389,11 +492,14 @@ func TestInitializerRunRegeneratesPlanWithForce(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(launcher.prompts) != 3 {
+	if len(launcher.prompts) != 6 {
 		t.Fatalf("expected forced init to regenerate the plan, got %d prompts", len(launcher.prompts))
 	}
-	if !strings.Contains(launcher.prompts[0].Prompt, "vibedrive-plan.yaml") {
-		t.Fatalf("expected first prompt to mention the plan path, got %q", launcher.prompts[0].Prompt)
+	if !strings.Contains(launcher.prompts[0].Prompt, "COMPONENTS.md") {
+		t.Fatalf("expected first prompt to mention the components path, got %q", launcher.prompts[0].Prompt)
+	}
+	if !strings.Contains(launcher.prompts[3].Prompt, "vibedrive-plan.yaml") {
+		t.Fatalf("expected plan author prompt to mention the plan path, got %q", launcher.prompts[3].Prompt)
 	}
 	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
 		t.Fatalf("expected existing plan file to be removed before prompting, stat err=%v", err)
@@ -410,6 +516,9 @@ func TestInitializerRunUsesWorkspaceFilesWhenSourceOmitted(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "TEST_PLAN.md"), []byte("tests\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "COMPONENTS.md"), []byte("generated components\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
 
 	init, launcher := newFakePhaseInitializer(t, dir)
 
@@ -417,8 +526,8 @@ func TestInitializerRunUsesWorkspaceFilesWhenSourceOmitted(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(launcher.prompts) != 3 {
-		t.Fatalf("expected 3 prompts, got %d", len(launcher.prompts))
+	if len(launcher.prompts) != 6 {
+		t.Fatalf("expected 6 prompts, got %d", len(launcher.prompts))
 	}
 	if !strings.Contains(launcher.prompts[0].Prompt, "- DESIGN.md") {
 		t.Fatalf("expected first prompt to include DESIGN.md as a source, got %q", launcher.prompts[0].Prompt)
@@ -452,8 +561,8 @@ func TestInitializerRunRendersResolvedSourcesInSortedOrder(t *testing.T) {
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(launcher.prompts) != 3 {
-		t.Fatalf("expected 3 prompts, got %d", len(launcher.prompts))
+	if len(launcher.prompts) != 6 {
+		t.Fatalf("expected 6 prompts, got %d", len(launcher.prompts))
 	}
 
 	alphaIndex := strings.Index(launcher.prompts[0].Prompt, "- docs/alpha.md")
@@ -481,10 +590,10 @@ func TestInitializerRunRunsCriticWithFreshInstanceWhenAgentTypesMatch(t *testing
 		t.Fatalf("Run returned error: %v", err)
 	}
 
-	if len(launcher.prompts) != 3 {
-		t.Fatalf("expected 3 prompts, got %d", len(launcher.prompts))
+	if len(launcher.prompts) != 6 {
+		t.Fatalf("expected 6 prompts, got %d", len(launcher.prompts))
 	}
-	wantRoles := []string{"author", "critic", "author"}
+	wantRoles := []string{"components", "component-critic", "components", "author", "critic", "author"}
 	for idx, wantRole := range wantRoles {
 		if launcher.prompts[idx].Role != wantRole {
 			t.Fatalf("prompt %d: expected role %q, got %q", idx, wantRole, launcher.prompts[idx].Role)
@@ -495,9 +604,18 @@ func TestInitializerRunRunsCriticWithFreshInstanceWhenAgentTypesMatch(t *testing
 	}
 
 	if launcher.events[2].Kind != "close" || launcher.events[3].Kind != "launch" || launcher.events[2].ID == launcher.events[3].ID {
-		t.Fatalf("expected first author instance to close before fresh critic launch, got %#v", launcher.events)
+		t.Fatalf("expected component instance to close before fresh component critic launch, got %#v", launcher.events)
 	}
 	if launcher.events[5].Kind != "close" || launcher.events[6].Kind != "launch" || launcher.events[5].ID == launcher.events[6].ID {
+		t.Fatalf("expected component critic instance to close before fresh component revision launch, got %#v", launcher.events)
+	}
+	if launcher.events[8].Kind != "close" || launcher.events[9].Kind != "launch" || launcher.events[8].ID == launcher.events[9].ID {
+		t.Fatalf("expected component revision instance to close before fresh plan author launch, got %#v", launcher.events)
+	}
+	if launcher.events[11].Kind != "close" || launcher.events[12].Kind != "launch" || launcher.events[11].ID == launcher.events[12].ID {
+		t.Fatalf("expected plan author instance to close before fresh plan critic launch, got %#v", launcher.events)
+	}
+	if launcher.events[14].Kind != "close" || launcher.events[15].Kind != "launch" || launcher.events[14].ID == launcher.events[15].ID {
 		t.Fatalf("expected critic instance to close before fresh revision author launch, got %#v", launcher.events)
 	}
 }
@@ -533,6 +651,9 @@ func TestInitializerPrintSourcesResolvesPreviewWithoutWritingConfig(t *testing.T
 	}
 	if strings.Contains(output, "- vibedrive-plan.yaml") {
 		t.Fatalf("expected preview output to exclude the plan file, got %q", output)
+	}
+	if strings.Contains(output, "- COMPONENTS.md") {
+		t.Fatalf("expected preview output to exclude generated components file, got %q", output)
 	}
 	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
 		t.Fatalf("expected PrintSources not to write config, stat err=%v", err)

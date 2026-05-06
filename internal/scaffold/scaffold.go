@@ -13,7 +13,7 @@ max_stalled_iterations: 2
 default_workflow: implement
 
 parallel:
-  enabled: false
+  enabled: true
   max_parallelism: 3
   worktree_root: .vibedrive/worktrees
   artifact_root: .vibedrive/task-runs
@@ -113,6 +113,7 @@ workflows:
 
           Before you stop, write {{ .TaskResultPath }} as JSON with this schema:
           {"status":"done|in_progress|blocked","notes":"brief phase notes"}
+          This file is mandatory; Vibedrive will treat the step as failed if it is absent.
 
           Set status to done only when the implementation work for this task is complete and ready for the configured automated verification commands.
           Set status to in_progress when meaningful progress was made but more work is still required.
@@ -133,6 +134,7 @@ workflows:
 
           Write {{ .ReviewPath }} as JSON with this schema:
           {"decision":"approved|changes_requested","summary":"brief summary","findings":["actionable finding","..."]}
+          This file is mandatory; Vibedrive will treat the step as failed if it is absent.
 
           Use decision=approved with an empty findings list when there are no actionable issues.
           Use decision=changes_requested only when the coder should make follow-up fixes before finalize.
@@ -244,6 +246,7 @@ workflows:
 
           Before you stop, write {{ .TaskResultPath }} as JSON with this schema:
           {"status":"done|in_progress|blocked","notes":"brief phase notes"}
+          This file is mandatory; Vibedrive will treat the step as failed if it is absent.
 
           Set status to done only when the checkpoint work is complete and ready for the configured automated verification commands.
           Set status to in_progress when meaningful progress was made but more work is still required.
@@ -264,6 +267,7 @@ workflows:
 
           Write {{ .ReviewPath }} as JSON with this schema:
           {"decision":"approved|changes_requested","summary":"brief summary","findings":["actionable finding","..."]}
+          This file is mandatory; Vibedrive will treat the step as failed if it is absent.
 
           Use decision=approved with an empty findings list when there are no actionable issues.
           Use decision=changes_requested only when the coder should make follow-up fixes before finalize.

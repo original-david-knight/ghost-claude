@@ -16,6 +16,7 @@ import (
 
 const (
 	tmuxCloseTimeout        = 5 * time.Second
+	tmuxForceCloseTimeout   = 1 * time.Second
 	tmuxStatePollInterval   = 50 * time.Millisecond
 	tmuxSubmitKeyDelay      = 100 * time.Millisecond
 	tmuxSubmitRetryInterval = 2 * time.Second
@@ -172,7 +173,7 @@ func (c *tmuxClaudeClient) ensureSession(ctx context.Context, session *claude.Se
 	defer cancel()
 	if err := state.completeStartup(readyCtx); err != nil {
 		_ = state.close(context.Background())
-		return nil, state.withDiagnostics(ctx, err)
+		return nil, state.withDiagnostics(ctx, fmt.Errorf("wait for claude tmux tui startup (%s): %w", c.startupTimeout, err))
 	}
 	session.Started = true
 	return state, nil
@@ -343,7 +344,7 @@ func (c *tmuxCodexClient) ensureSession(ctx context.Context, session *codex.Sess
 	defer cancel()
 	if err := state.completeStartup(readyCtx); err != nil {
 		_ = state.close(context.Background())
-		return nil, state.withDiagnostics(ctx, err)
+		return nil, state.withDiagnostics(ctx, fmt.Errorf("wait for codex tmux tui startup (%s): %w", c.startupTimeout, err))
 	}
 	session.Started = true
 	return state, nil
@@ -414,6 +415,10 @@ func (s *tmuxCodexSession) completeStartup(ctx context.Context) error {
 		if snapshot.currentState == "idle" {
 			return nil
 		}
+		if text, err := s.pane.Capture(ctx, 80); err == nil && codexReadyScreen(text) {
+			s.recordState("idle")
+			return nil
+		}
 
 		select {
 		case <-ctx.Done():
@@ -427,6 +432,16 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 	title, err := s.pane.Title(ctx)
 	if err != nil {
 		return tmuxTitleSnapshot{}, err
+	}
+	if text, err := s.pane.Capture(ctx, 80); err == nil {
+		if state, ok := codexScreenState(text); ok {
+			s.recordState(state)
+			return tmuxTitleSnapshot{
+				idleTransitions: s.idleTransitions,
+				busyTransitions: s.busyTransitions,
+				currentState:    s.currentState,
+			}, nil
+		}
 	}
 	if state, ok := s.classifyTitle(title); ok {
 		s.recordState(state)
@@ -443,10 +458,126 @@ func (s *tmuxCodexSession) classifyTitle(title string) (string, bool) {
 	if trimmed == "" {
 		return "", false
 	}
-	if trimmed == s.idleTitle {
+	if isCodexBusyTitle(trimmed) {
+		return "busy", true
+	}
+	if codexTitleMatchesIdle(trimmed, s.idleTitle) {
+		return "idle", true
+	}
+	if codexTitleLooksIdleStatus(trimmed) {
 		return "idle", true
 	}
 	return "busy", true
+}
+
+func isCodexBusyTitle(title string) bool {
+	lower := strings.ToLower(strings.TrimSpace(title))
+	if lower == "" {
+		return false
+	}
+	if strings.HasPrefix(lower, "busy ") {
+		return true
+	}
+	for _, marker := range []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"} {
+		if strings.HasPrefix(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexTitleMatchesIdle(title, idleTitle string) bool {
+	title = strings.TrimSpace(title)
+	idleTitle = strings.TrimSpace(idleTitle)
+	if title == "" || idleTitle == "" {
+		return false
+	}
+	if title == idleTitle {
+		return true
+	}
+	if filepath.Base(filepath.Clean(title)) == idleTitle {
+		return true
+	}
+	if codexTitleAbbreviatesIdle(title, idleTitle) {
+		return true
+	}
+	return strings.Contains(title, idleTitle)
+}
+
+func codexTitleAbbreviatesIdle(title, idleTitle string) bool {
+	for _, marker := range []string{"...", "…"} {
+		if !strings.Contains(title, marker) {
+			continue
+		}
+		parts := strings.Split(title, marker)
+		prefix := strings.TrimSpace(parts[0])
+		suffix := strings.TrimSpace(parts[len(parts)-1])
+		if codexIdleTitleHasPrefix(idleTitle, prefix) || codexIdleTitleHasSuffix(idleTitle, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexIdleTitleHasPrefix(idleTitle, prefix string) bool {
+	if !codexIdleFragmentLongEnough(idleTitle, prefix) {
+		return false
+	}
+	if strings.HasPrefix(idleTitle, prefix) {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(prefix))
+	return base != prefix && codexIdleFragmentLongEnough(idleTitle, base) && strings.HasPrefix(idleTitle, base)
+}
+
+func codexIdleTitleHasSuffix(idleTitle, suffix string) bool {
+	if !codexIdleFragmentLongEnough(idleTitle, suffix) {
+		return false
+	}
+	if strings.HasSuffix(idleTitle, suffix) {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(suffix))
+	return base != suffix && codexIdleFragmentLongEnough(idleTitle, base) && strings.HasSuffix(idleTitle, base)
+}
+
+func codexIdleFragmentLongEnough(idleTitle, fragment string) bool {
+	fragment = strings.TrimSpace(fragment)
+	if fragment == "" {
+		return false
+	}
+	required := 8
+	if len(idleTitle) < required {
+		required = len(idleTitle)
+	}
+	return len(fragment) >= required
+}
+
+func codexTitleLooksIdleStatus(title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	return (strings.Contains(title, " · ") || strings.Contains(title, " • ")) && (strings.Contains(title, "/") || strings.Contains(title, "~"))
+}
+
+func codexReadyScreen(text string) bool {
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	return strings.Contains(compact, "openaicodex") &&
+		strings.Contains(compact, "model") &&
+		strings.Contains(compact, "directory") &&
+		strings.Contains(compact, "permissions")
+}
+
+func codexScreenState(text string) (string, bool) {
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	if strings.Contains(compact, "working") && strings.Contains(compact, "interrupt") {
+		return "busy", true
+	}
+	if codexReadyScreen(text) {
+		return "idle", true
+	}
+	return "", false
 }
 
 func (s *tmuxClaudeSession) waitForBusyTransition(ctx context.Context, busyStart int, timeout time.Duration) (bool, error) {
@@ -550,9 +681,15 @@ func (s *tmuxClaudeSession) close(ctx context.Context) error {
 		return nil
 	}
 	if err := s.pane.Paste(ctx, "/exit"); err != nil {
+		if tmuxagent.IsTargetMissingError(err) {
+			return nil
+		}
 		return err
 	}
 	if err := s.pane.SendEnter(ctx); err != nil {
+		if tmuxagent.IsTargetMissingError(err) {
+			return nil
+		}
 		return err
 	}
 	return waitForTmuxClose(ctx, s.pane)
@@ -563,6 +700,9 @@ func (s *tmuxCodexSession) close(ctx context.Context) error {
 		return nil
 	}
 	if err := s.pane.SendCtrlD(ctx); err != nil {
+		if tmuxagent.IsTargetMissingError(err) {
+			return nil
+		}
 		return err
 	}
 	return waitForTmuxClose(ctx, s.pane)
@@ -577,6 +717,9 @@ func waitForTmuxClose(ctx context.Context, pane *tmuxagent.Pane) error {
 	for {
 		dead, err := pane.Dead(closeCtx)
 		if err != nil {
+			if closeCtx.Err() != nil {
+				return forceKillTmuxPane(pane)
+			}
 			return err
 		}
 		if dead {
@@ -584,11 +727,19 @@ func waitForTmuxClose(ctx context.Context, pane *tmuxagent.Pane) error {
 		}
 		select {
 		case <-closeCtx.Done():
-			_ = pane.Kill(context.Background())
-			return closeCtx.Err()
+			return forceKillTmuxPane(pane)
 		case <-ticker.C:
 		}
 	}
+}
+
+func forceKillTmuxPane(pane *tmuxagent.Pane) error {
+	killCtx, cancel := context.WithTimeout(context.Background(), tmuxForceCloseTimeout)
+	defer cancel()
+	if err := pane.Kill(killCtx); err != nil {
+		return fmt.Errorf("force close tmux pane after timeout: %w", err)
+	}
+	return nil
 }
 
 func (s *tmuxClaudeSession) withDiagnostics(ctx context.Context, err error) error {
