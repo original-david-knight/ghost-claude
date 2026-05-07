@@ -209,6 +209,65 @@ tasks:
 	}
 }
 
+func TestRunLeavesSessionIDEmptyForNonTUIClaude(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		MaxStalledIterations: 1,
+		Claude: config.ClaudeConfig{
+			SessionStrategy: config.SessionStrategySessionID,
+		},
+		DefaultWorkflow: "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "render-session", Type: config.StepTypeClaude, Prompt: "session={{ .SessionID }} task={{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	agent := &fakeAgent{
+		planPath: planPath,
+		onRun: func(_ string) error {
+			return updateTask(planPath, "scaffold", plan.StatusDone, "done")
+		},
+	}
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		claude: agent,
+		newSession: func(_ string) (*claude.Session, error) {
+			return &claude.Session{Strategy: config.SessionStrategySessionID, ID: "session-1"}, nil
+		},
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if got := strings.Join(agent.prompts, "\n"); got != "session= task=scaffold" {
+		t.Fatalf("expected non-TUI Claude prompt to render an empty SessionID, got %q", got)
+	}
+}
+
 func TestRunRecordsActiveRuntimeStepState(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")

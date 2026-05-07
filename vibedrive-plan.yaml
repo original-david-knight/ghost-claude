@@ -277,7 +277,7 @@ tasks:
       title: Implement non-interactive claude print transport
       details: |
         Implement transport=print for claude by invoking claude with --print and the rendered prompt. Reuse the existing client interface. Capture stdout/stderr per the diagnostics contract. Reject step types that are TUI-only and document them. Keep the TUI implementation untouched.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - agent-transport-config-contract

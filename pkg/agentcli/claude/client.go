@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	TransportTUI = "tui"
+	TransportTUI   = "tui"
+	TransportPrint = "print"
 
 	SessionStrategySessionID = "session_id"
 	SessionStrategyContinue  = "continue"
@@ -57,8 +58,7 @@ func New(command string, args []string, workdir, transport, startupTimeout strin
 
 	switch client.transport {
 	case TransportTUI:
-	case "print":
-		return nil, fmt.Errorf("claude transport %q is no longer supported; use %q", transport, TransportTUI)
+	case TransportPrint:
 	default:
 		return nil, fmt.Errorf("unsupported claude transport %q", transport)
 	}
@@ -86,6 +86,8 @@ func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string)
 	switch c.transport {
 	case TransportTUI:
 		return c.runTUIPrompt(ctx, session, prompt)
+	case TransportPrint:
+		return c.runPrintPrompt(ctx, prompt)
 	default:
 		return fmt.Errorf("unsupported transport %q", c.transport)
 	}
@@ -95,6 +97,8 @@ func (c *Client) RunInteractivePrompt(ctx context.Context, session *Session, pro
 	switch c.transport {
 	case TransportTUI:
 		return c.runTUIInteractivePrompt(ctx, session, prompt)
+	case TransportPrint:
+		return fmt.Errorf("claude transport %q does not support interactive TUI prompts; use %q", TransportPrint, TransportTUI)
 	default:
 		return fmt.Errorf("unsupported transport %q", c.transport)
 	}

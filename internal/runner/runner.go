@@ -2162,7 +2162,9 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			}
 
 			stepData := data
-			stepData.SessionID = session.ID
+			if r.claude != nil && r.claude.IsFullscreenTUI() {
+				stepData.SessionID = session.ID
+			}
 
 			prompt, err := render.String(step.Prompt, stepData)
 			if err != nil {
@@ -2307,6 +2309,15 @@ func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *cla
 		if session == nil {
 			return fmt.Errorf("claude step %q requires a session", stepName)
 		}
+		ctx = claude.WithDiagnostics(ctx, claude.Diagnostics{
+			Identity: diagnostics.Identity{
+				RunID:    r.runStateID,
+				TaskID:   taskID,
+				StepName: stepName,
+			},
+			ParentStdout: r.parentStdoutArtifact(),
+			ParentStderr: r.parentStderrArtifact(),
+		})
 		return r.claude.RunPrompt(ctx, session, prompt)
 	case config.AgentCodex:
 		if r.codex == nil {
