@@ -2177,7 +2177,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
 				return nil
 			}
-			return r.runAgentPrompt(stepCtx, target, session, codexSession, step.Name, prompt)
+			return r.runAgentPrompt(stepCtx, target, session, codexSession, data.Task.ID, step.Name, prompt)
 		case config.AgentCodex:
 			if r.codex == nil {
 				return fmt.Errorf("codex step %q requires a codex client", step.Name)
@@ -2197,7 +2197,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				fmt.Fprintln(r.stdout, strings.TrimSpace(prompt))
 				return nil
 			}
-			return r.runAgentPrompt(stepCtx, target, session, codexSession, step.Name, prompt)
+			return r.runAgentPrompt(stepCtx, target, session, codexSession, data.Task.ID, step.Name, prompt)
 		case config.StepTypeExec:
 			r.ensureParentDiagnosticTails()
 
@@ -2297,7 +2297,11 @@ func commandOutputSuffix(output string) string {
 	return "\ncommand output:\n" + output
 }
 
-func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, stepName, prompt string) error {
+func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, taskID, stepName, prompt string) error {
+	r.ensureRunState()
+	r.ensureParentDiagnosticTails()
+	ctx = withTmuxDiagnosticsIdentity(ctx, r.runStateID, taskID, stepName)
+	ctx = withTmuxDiagnosticsParentOutput(ctx, r.parentStdoutArtifact(), r.parentStderrArtifact())
 	switch target {
 	case config.AgentClaude:
 		if session == nil {
@@ -2330,7 +2334,7 @@ func (r *Runner) validateTaskNotesAfterAgentStep(ctx context.Context, target str
 		if r.shouldLogProgress() {
 			fmt.Fprintf(r.stderr, "warning: task notes YAML is invalid after step %q; asking %s to repair it\n", stepName, target)
 		}
-		if err := r.runAgentPrompt(ctx, target, session, codexSession, stepName, prompt); err != nil {
+		if err := r.runAgentPrompt(ctx, target, session, codexSession, taskID, stepName, prompt); err != nil {
 			return fmt.Errorf("ask %s to repair task notes YAML after step %q: %w", target, stepName, err)
 		}
 		if _, err := tasknotes.Load(notesPath); err != nil {
@@ -2358,7 +2362,7 @@ func (r *Runner) ensureRequiredOutputsAfterStep(ctx context.Context, target stri
 	if r.shouldLogProgress() {
 		fmt.Fprintf(r.stderr, "warning: step %q did not produce valid required outputs; asking %s to repair them\n", stepName, target)
 	}
-	if err := r.runAgentPrompt(ctx, target, session, codexSession, stepName, requiredOutputsRepairPrompt(stepName, data.Task.ID, issues)); err != nil {
+	if err := r.runAgentPrompt(ctx, target, session, codexSession, data.Task.ID, stepName, requiredOutputsRepairPrompt(stepName, data.Task.ID, issues)); err != nil {
 		return fmt.Errorf("ask %s to create required outputs after step %q: %w", target, stepName, err)
 	}
 

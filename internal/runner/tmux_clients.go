@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"vibedrive/internal/diagnostics"
 	"vibedrive/internal/tmuxagent"
 	"vibedrive/pkg/agentcli/claude"
 	"vibedrive/pkg/agentcli/codex"
@@ -21,6 +22,13 @@ const (
 	tmuxSubmitKeyDelay      = 100 * time.Millisecond
 	tmuxSubmitRetryInterval = 2 * time.Second
 	tmuxSubmitMaxAttempts   = 3
+	tmuxDiagnosticsTimeout  = 5 * time.Second
+)
+
+const (
+	tmuxFailureStartupTimeout = "tmux_startup_timeout"
+	tmuxFailureSubmitTimeout  = "tmux_submit_prompt_timeout"
+	tmuxFailureUnexpectedExit = "tmux_unexpected_exit"
 )
 
 type tmuxClaudeClient struct {
@@ -29,6 +37,7 @@ type tmuxClaudeClient struct {
 	workdir        string
 	startupTimeout time.Duration
 	controller     *tmuxagent.Controller
+	capturer       *diagnostics.Capturer
 	name           string
 
 	mu       sync.Mutex
@@ -41,6 +50,7 @@ type tmuxCodexClient struct {
 	workdir        string
 	startupTimeout time.Duration
 	controller     *tmuxagent.Controller
+	capturer       *diagnostics.Capturer
 	name           string
 
 	mu       sync.Mutex
@@ -54,6 +64,7 @@ type tmuxClaudeSession struct {
 	trustPrompts        int
 	trustPromptDetected bool
 	currentState        string
+	diag                tmuxSessionDiagnostics
 }
 
 type tmuxCodexSession struct {
@@ -64,6 +75,7 @@ type tmuxCodexSession struct {
 	trustPrompts        int
 	trustPromptDetected bool
 	currentState        string
+	diag                tmuxSessionDiagnostics
 }
 
 type tmuxTitleSnapshot struct {
@@ -72,6 +84,41 @@ type tmuxTitleSnapshot struct {
 	trustPrompts    int
 	currentState    string
 }
+
+type tmuxSessionDiagnostics struct {
+	capturer       *diagnostics.Capturer
+	agent          string
+	command        string
+	args           []string
+	workdir        string
+	startupTimeout time.Duration
+
+	titleHistory []diagnostics.TitleEvent
+	titleReadErr string
+
+	lastPromptRaw        []byte
+	lastPromptNormalized []byte
+	lastPromptBracketed  bool
+	lastPromptInputBytes int
+	lastSubmitAttempts   int
+
+	createdAt            time.Time
+	startupStartedAt     time.Time
+	startupCompletedAt   time.Time
+	lastPromptStartedAt  time.Time
+	lastPromptPastedAt   time.Time
+	lastPromptAcceptedAt time.Time
+	lastIdleAt           time.Time
+	lastFailureAt        time.Time
+}
+
+type tmuxDiagnosticsContextValue struct {
+	identity     diagnostics.Identity
+	parentStdout diagnostics.ByteArtifact
+	parentStderr diagnostics.ByteArtifact
+}
+
+type tmuxDiagnosticsContextKey struct{}
 
 func newTmuxClaudeClient(command string, args []string, workdir, startupTimeout string, controller *tmuxagent.Controller, name string) (*tmuxClaudeClient, error) {
 	timeout, err := time.ParseDuration(startupTimeout)
@@ -87,6 +134,7 @@ func newTmuxClaudeClient(command string, args []string, workdir, startupTimeout 
 		workdir:        workdir,
 		startupTimeout: timeout,
 		controller:     controller,
+		capturer:       diagnostics.New(workdir),
 		name:           name,
 		sessions:       make(map[*claude.Session]*tmuxClaudeSession),
 	}, nil
@@ -110,9 +158,86 @@ func newTmuxCodexClient(command string, args []string, workdir, startupTimeout s
 		workdir:        workdir,
 		startupTimeout: timeout,
 		controller:     controller,
+		capturer:       diagnostics.New(workdir),
 		name:           name,
 		sessions:       make(map[*codex.Session]*tmuxCodexSession),
 	}, nil
+}
+
+func withTmuxDiagnosticsIdentity(ctx context.Context, runID, taskID, stepName string) context.Context {
+	value := tmuxDiagnosticsContextFrom(ctx)
+	value.identity = diagnostics.Identity{
+		RunID:    runID,
+		TaskID:   taskID,
+		StepName: stepName,
+	}
+	return context.WithValue(ctx, tmuxDiagnosticsContextKey{}, value)
+}
+
+func withTmuxDiagnosticsParentOutput(ctx context.Context, stdout, stderr diagnostics.ByteArtifact) context.Context {
+	value := tmuxDiagnosticsContextFrom(ctx)
+	value.parentStdout = stdout
+	value.parentStderr = stderr
+	return context.WithValue(ctx, tmuxDiagnosticsContextKey{}, value)
+}
+
+func tmuxDiagnosticsContextFrom(ctx context.Context) tmuxDiagnosticsContextValue {
+	if ctx == nil {
+		return tmuxDiagnosticsContextValue{}
+	}
+	if value, ok := ctx.Value(tmuxDiagnosticsContextKey{}).(tmuxDiagnosticsContextValue); ok {
+		return value
+	}
+	return tmuxDiagnosticsContextValue{}
+}
+
+func tmuxDiagnosticsIdentity(ctx context.Context, agent, failurePath string) diagnostics.Identity {
+	value := tmuxDiagnosticsContextFrom(ctx)
+	id := value.identity
+	if strings.TrimSpace(id.RunID) != "" &&
+		strings.TrimSpace(id.TaskID) != "" &&
+		strings.TrimSpace(id.StepName) != "" {
+		return id
+	}
+	if strings.TrimSpace(agent) == "" {
+		agent = "tmux"
+	}
+	if strings.TrimSpace(failurePath) == "" {
+		failurePath = "tmux_failure"
+	}
+	return diagnostics.Identity{
+		RunID:    "unknown-run",
+		TaskID:   agent + "-tui",
+		StepName: failurePath,
+	}
+}
+
+func tmuxParentArtifacts(ctx context.Context) (diagnostics.ByteArtifact, diagnostics.ByteArtifact) {
+	value := tmuxDiagnosticsContextFrom(ctx)
+	stdout := value.parentStdout
+	if !stdout.Available {
+		stdout = diagnostics.UnavailableBytes()
+	}
+	stderr := value.parentStderr
+	if !stderr.Available {
+		stderr = diagnostics.UnavailableBytes()
+	}
+	return stdout, stderr
+}
+
+func newTmuxSessionDiagnostics(capturer *diagnostics.Capturer, agent, command string, args []string, workdir string, startupTimeout time.Duration) tmuxSessionDiagnostics {
+	if capturer == nil {
+		capturer = diagnostics.New(workdir)
+	}
+	return tmuxSessionDiagnostics{
+		capturer:       capturer,
+		agent:          agent,
+		command:        command,
+		args:           append([]string{}, args...),
+		workdir:        workdir,
+		startupTimeout: startupTimeout,
+		createdAt:      time.Now(),
+	}
 }
 
 func (c *tmuxClaudeClient) RunPrompt(ctx context.Context, session *claude.Session, prompt string) error {
@@ -124,7 +249,7 @@ func (c *tmuxClaudeClient) RunPrompt(ctx context.Context, session *claude.Sessio
 		return err
 	}
 	if err := state.sendPrompt(ctx, prompt); err != nil {
-		return state.withDiagnostics(ctx, err)
+		return state.withDiagnostics(ctx, tmuxPromptFailurePath(err), err)
 	}
 	return nil
 }
@@ -151,7 +276,7 @@ func (c *tmuxClaudeClient) ensureSession(ctx context.Context, session *claude.Se
 	c.mu.Lock()
 	state := c.sessions[session]
 	if state == nil {
-		state = &tmuxClaudeSession{}
+		state = newTmuxClaudeSession(c.capturer, c.command, c.args, c.workdir, c.startupTimeout)
 		c.sessions[session] = state
 	}
 	c.mu.Unlock()
@@ -171,17 +296,27 @@ func (c *tmuxClaudeClient) ensureSession(ctx context.Context, session *claude.Se
 	}
 	state.pane = pane
 
+	state.diag.startupStartedAt = time.Now()
 	readyCtx, cancel := context.WithTimeout(ctx, c.startupTimeout)
 	defer cancel()
 	if err := state.completeStartup(readyCtx); err != nil {
+		diagErr := state.withDiagnostics(ctx, tmuxFailureStartupTimeout, fmt.Errorf("wait for claude tmux tui startup (%s): %w", c.startupTimeout, err))
 		_ = state.close(context.Background())
-		return nil, state.withDiagnostics(ctx, fmt.Errorf("wait for claude tmux tui startup (%s): %w", c.startupTimeout, err))
+		return nil, diagErr
 	}
+	state.diag.startupCompletedAt = time.Now()
 	session.Started = true
 	return state, nil
 }
 
+func newTmuxClaudeSession(capturer *diagnostics.Capturer, command string, args []string, workdir string, startupTimeout time.Duration) *tmuxClaudeSession {
+	return &tmuxClaudeSession{
+		diag: newTmuxSessionDiagnostics(capturer, "claude", command, args, workdir, startupTimeout),
+	}
+}
+
 func (s *tmuxClaudeSession) sendPrompt(ctx context.Context, prompt string) error {
+	s.diag.lastPromptStartedAt = time.Now()
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
@@ -192,6 +327,7 @@ func (s *tmuxClaudeSession) sendPrompt(ctx context.Context, prompt string) error
 	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
 		return fmt.Errorf("wait for claude tmux tui to become idle: %w", err)
 	}
+	s.diag.lastIdleAt = time.Now()
 	return nil
 }
 
@@ -200,16 +336,20 @@ func (s *tmuxClaudeSession) submitPrompt(ctx context.Context, prompt string, bus
 	if normalized == "" {
 		return fmt.Errorf("claude tmux tui prompt is empty after normalization")
 	}
+	payload := normalized
 	if bracketed {
-		normalized = ptyrunner.BracketedPasteStart + normalized + ptyrunner.BracketedPasteEnd
+		payload = ptyrunner.BracketedPasteStart + normalized + ptyrunner.BracketedPasteEnd
 	}
-	if err := s.pane.Paste(ctx, normalized); err != nil {
+	s.recordPromptPayload(prompt, payload, normalized, bracketed)
+	if err := s.pane.Paste(ctx, payload); err != nil {
 		return fmt.Errorf("write prompt to claude tmux tui: %w", err)
 	}
+	s.diag.lastPromptPastedAt = time.Now()
 	if err := ptyrunner.Sleep(ctx, tmuxSubmitKeyDelay); err != nil {
 		return err
 	}
 	for range tmuxSubmitMaxAttempts {
+		s.diag.lastSubmitAttempts++
 		if err := s.pane.SendEnter(ctx); err != nil {
 			return fmt.Errorf("submit prompt to claude tmux tui: %w", err)
 		}
@@ -218,6 +358,7 @@ func (s *tmuxClaudeSession) submitPrompt(ctx context.Context, prompt string, bus
 			return err
 		}
 		if busy {
+			s.diag.lastPromptAcceptedAt = time.Now()
 			return nil
 		}
 	}
@@ -255,15 +396,17 @@ func (s *tmuxClaudeSession) completeStartup(ctx context.Context) error {
 func (s *tmuxClaudeSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, error) {
 	title, err := s.pane.Title(ctx)
 	if err != nil {
+		s.diag.titleReadErr = err.Error()
 		return tmuxTitleSnapshot{}, err
 	}
 	if state, ok := classifyClaudeTmuxTitle(title); ok {
-		s.recordState(state)
+		s.recordState("title", title, state)
 	}
 	if text, err := s.pane.Capture(ctx, 80); err == nil {
 		trustDetected := strings.Contains(ptyrunner.CompactVisibleText([]byte(text)), "yesitrustthisfolder")
 		if trustDetected && !s.trustPromptDetected {
 			s.trustPrompts++
+			s.recordTitleEvent("trust_prompt", "", "trust_prompt")
 		}
 		s.trustPromptDetected = trustDetected
 	}
@@ -295,7 +438,7 @@ func (c *tmuxCodexClient) RunPrompt(ctx context.Context, session *codex.Session,
 		return err
 	}
 	if err := state.sendPrompt(ctx, prompt); err != nil {
-		return state.withDiagnostics(ctx, err)
+		return state.withDiagnostics(ctx, tmuxPromptFailurePath(err), err)
 	}
 	return nil
 }
@@ -323,6 +466,8 @@ func (c *tmuxCodexClient) ensureSession(ctx context.Context, session *codex.Sess
 	state := c.sessions[session]
 	if state == nil {
 		state = newTmuxCodexSession(c.workdir)
+		state.diag = newTmuxSessionDiagnostics(c.capturer, "codex", c.command, c.args, c.workdir, c.startupTimeout)
+		state.recordTitleEvent("transport", "", state.currentState)
 		c.sessions[session] = state
 	}
 	c.mu.Unlock()
@@ -342,12 +487,15 @@ func (c *tmuxCodexClient) ensureSession(ctx context.Context, session *codex.Sess
 	}
 	state.pane = pane
 
+	state.diag.startupStartedAt = time.Now()
 	readyCtx, cancel := context.WithTimeout(ctx, c.startupTimeout)
 	defer cancel()
 	if err := state.completeStartup(readyCtx); err != nil {
+		diagErr := state.withDiagnostics(ctx, tmuxFailureStartupTimeout, fmt.Errorf("wait for codex tmux tui startup (%s): %w", c.startupTimeout, err))
 		_ = state.close(context.Background())
-		return nil, state.withDiagnostics(ctx, fmt.Errorf("wait for codex tmux tui startup (%s): %w", c.startupTimeout, err))
+		return nil, diagErr
 	}
+	state.diag.startupCompletedAt = time.Now()
 	session.Started = true
 	return state, nil
 }
@@ -365,6 +513,7 @@ func newTmuxCodexSession(workdir string) *tmuxCodexSession {
 }
 
 func (s *tmuxCodexSession) sendPrompt(ctx context.Context, prompt string) error {
+	s.diag.lastPromptStartedAt = time.Now()
 	snapshot, err := s.snapshot(ctx)
 	if err != nil {
 		return err
@@ -375,6 +524,7 @@ func (s *tmuxCodexSession) sendPrompt(ctx context.Context, prompt string) error 
 	if err := s.waitForIdleTransition(ctx, snapshot.idleTransitions, snapshot.busyTransitions); err != nil {
 		return fmt.Errorf("wait for codex tmux tui to become idle: %w", err)
 	}
+	s.diag.lastIdleAt = time.Now()
 	return nil
 }
 
@@ -384,13 +534,16 @@ func (s *tmuxCodexSession) submitPrompt(ctx context.Context, prompt string, busy
 		return fmt.Errorf("codex tmux tui prompt is empty after normalization")
 	}
 	payload := ptyrunner.BracketedPasteStart + normalized + ptyrunner.BracketedPasteEnd
+	s.recordPromptPayload(prompt, payload, normalized, true)
 	if err := s.pane.Paste(ctx, payload); err != nil {
 		return fmt.Errorf("write prompt to codex tmux tui: %w", err)
 	}
+	s.diag.lastPromptPastedAt = time.Now()
 	if err := ptyrunner.Sleep(ctx, tmuxSubmitKeyDelay); err != nil {
 		return err
 	}
 	for range tmuxSubmitMaxAttempts {
+		s.diag.lastSubmitAttempts++
 		if err := s.pane.SendEnter(ctx); err != nil {
 			return fmt.Errorf("submit prompt to codex tmux tui: %w", err)
 		}
@@ -399,6 +552,7 @@ func (s *tmuxCodexSession) submitPrompt(ctx context.Context, prompt string, busy
 			return err
 		}
 		if busy {
+			s.diag.lastPromptAcceptedAt = time.Now()
 			return nil
 		}
 	}
@@ -426,7 +580,7 @@ func (s *tmuxCodexSession) completeStartup(ctx context.Context) error {
 			return nil
 		}
 		if text, err := s.pane.Capture(ctx, 80); err == nil && codexReadyScreen(text) {
-			s.recordState("idle")
+			s.recordState("screen", "", "idle")
 			return nil
 		}
 
@@ -441,12 +595,14 @@ func (s *tmuxCodexSession) completeStartup(ctx context.Context) error {
 func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, error) {
 	title, err := s.pane.Title(ctx)
 	if err != nil {
+		s.diag.titleReadErr = err.Error()
 		return tmuxTitleSnapshot{}, err
 	}
 	if text, err := s.pane.Capture(ctx, 80); err == nil {
 		trustDetected := codexTrustPrompt(text)
 		if trustDetected && !s.trustPromptDetected {
 			s.trustPrompts++
+			s.recordTitleEvent("trust_prompt", "", "trust_prompt")
 		}
 		s.trustPromptDetected = trustDetected
 		if trustDetected {
@@ -458,7 +614,7 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 			}, nil
 		}
 		if state, ok := codexScreenState(text); ok {
-			s.recordState(state)
+			s.recordState("screen", title, state)
 			return tmuxTitleSnapshot{
 				idleTransitions: s.idleTransitions,
 				busyTransitions: s.busyTransitions,
@@ -468,7 +624,7 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 		}
 	}
 	if state, ok := s.classifyTitle(title); ok {
-		s.recordState(state)
+		s.recordState("title", title, state)
 	}
 	return tmuxTitleSnapshot{
 		idleTransitions: s.idleTransitions,
@@ -684,7 +840,7 @@ func waitForTmuxIdle(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 	}
 }
 
-func (s *tmuxClaudeSession) recordState(state string) {
+func (s *tmuxClaudeSession) recordState(source, title, state string) {
 	if state == "" || state == s.currentState {
 		return
 	}
@@ -694,9 +850,10 @@ func (s *tmuxClaudeSession) recordState(state string) {
 	} else {
 		s.busyTransitions++
 	}
+	s.recordTitleEvent(source, title, state)
 }
 
-func (s *tmuxCodexSession) recordState(state string) {
+func (s *tmuxCodexSession) recordState(source, title, state string) {
 	if state == "" || state == s.currentState {
 		return
 	}
@@ -706,6 +863,42 @@ func (s *tmuxCodexSession) recordState(state string) {
 	} else {
 		s.busyTransitions++
 	}
+	s.recordTitleEvent(source, title, state)
+}
+
+func (s *tmuxClaudeSession) recordTitleEvent(source, title, state string) {
+	s.diag.titleHistory = appendTmuxTitleEvent(s.diag.titleHistory, diagnostics.TitleEvent{
+		TS:              time.Now(),
+		Source:          source,
+		Title:           title,
+		State:           state,
+		IdleTransitions: s.idleTransitions,
+		BusyTransitions: s.busyTransitions,
+		TrustPrompts:    s.trustPrompts,
+	})
+}
+
+func (s *tmuxCodexSession) recordTitleEvent(source, title, state string) {
+	s.diag.titleHistory = appendTmuxTitleEvent(s.diag.titleHistory, diagnostics.TitleEvent{
+		TS:              time.Now(),
+		Source:          source,
+		Title:           title,
+		State:           state,
+		IdleTransitions: s.idleTransitions,
+		BusyTransitions: s.busyTransitions,
+		TrustPrompts:    s.trustPrompts,
+	})
+}
+
+func appendTmuxTitleEvent(events []diagnostics.TitleEvent, event diagnostics.TitleEvent) []diagnostics.TitleEvent {
+	if strings.TrimSpace(event.Source) == "" {
+		event.Source = "transport"
+	}
+	events = append(events, event)
+	if len(events) > diagnostics.TitleEventLimit {
+		events = events[len(events)-diagnostics.TitleEventLimit:]
+	}
+	return events
 }
 
 func (s *tmuxClaudeSession) close(ctx context.Context) error {
@@ -774,23 +967,212 @@ func forceKillTmuxPane(pane *tmuxagent.Pane) error {
 	return nil
 }
 
-func (s *tmuxClaudeSession) withDiagnostics(ctx context.Context, err error) error {
-	return tmuxPaneDiagnostics(ctx, s.pane, err)
+func (s *tmuxClaudeSession) withDiagnostics(ctx context.Context, failurePath string, err error) error {
+	if err == nil {
+		return nil
+	}
+	s.diag.lastFailureAt = time.Now()
+	return captureTmuxSessionDiagnostics(ctx, s.pane, s.diag, s.tmuxMetadata(), failurePath, err)
 }
 
-func (s *tmuxCodexSession) withDiagnostics(ctx context.Context, err error) error {
-	return tmuxPaneDiagnostics(ctx, s.pane, err)
+func (s *tmuxCodexSession) withDiagnostics(ctx context.Context, failurePath string, err error) error {
+	if err == nil {
+		return nil
+	}
+	s.diag.lastFailureAt = time.Now()
+	return captureTmuxSessionDiagnostics(ctx, s.pane, s.diag, s.tmuxMetadata(), failurePath, err)
 }
 
-func tmuxPaneDiagnostics(ctx context.Context, pane *tmuxagent.Pane, err error) error {
-	if err == nil || pane == nil {
-		return err
+func (s *tmuxClaudeSession) tmuxMetadata() diagnostics.TmuxMetadata {
+	return s.diag.metadata(s.pane, s.idleTransitions, s.busyTransitions, s.trustPrompts, s.currentState)
+}
+
+func (s *tmuxCodexSession) tmuxMetadata() diagnostics.TmuxMetadata {
+	return s.diag.metadata(s.pane, s.idleTransitions, s.busyTransitions, s.trustPrompts, s.currentState)
+}
+
+func captureTmuxSessionDiagnostics(ctx context.Context, pane *tmuxagent.Pane, diag tmuxSessionDiagnostics, metadata diagnostics.TmuxMetadata, failurePath string, err error) error {
+	if err == nil {
+		return nil
 	}
-	output, captureErr := pane.Capture(ctx, 160)
-	if captureErr != nil || strings.TrimSpace(output) == "" {
-		return err
+	if strings.TrimSpace(failurePath) == "" {
+		failurePath = tmuxFailureSubmitTimeout
 	}
-	return fmt.Errorf("%w; last tmux pane output:\n%s", err, strings.TrimSpace(output))
+	capturer := diag.capturer
+	if capturer == nil {
+		capturer = diagnostics.New(diag.workdir)
+	}
+
+	identity := tmuxDiagnosticsIdentity(ctx, diag.agent, failurePath)
+	stepDir, stepDirErr := capturer.StepDir(identity)
+	if stepDirErr != nil {
+		stepDir = capturer.DebugRoot()
+	}
+
+	captureCtx, cancel := context.WithTimeout(context.Background(), tmuxDiagnosticsTimeout)
+	defer cancel()
+
+	paneArtifact := diagnostics.UnavailableBytes()
+	if pane != nil {
+		output, captureErr := pane.Capture(captureCtx, diagnostics.PaneLineLimit)
+		if captureErr != nil {
+			metadata.Extra = mergeMetadataExtra(metadata.Extra, "pane_capture_error", captureErr.Error())
+		} else {
+			paneArtifact = diagnostics.Bytes([]byte(output))
+		}
+	}
+
+	parentStdout, parentStderr := tmuxParentArtifacts(ctx)
+	result, captureErr := capturer.CaptureTmux(diagnostics.TmuxCapture{
+		Identity: identity,
+		Failure: diagnostics.Failure{
+			Path:       failurePath,
+			Message:    err.Error(),
+			CapturedAt: diag.lastFailureAt,
+		},
+		Transport: diagnostics.Transport{
+			Kind:        "tmux",
+			Agent:       diag.agent,
+			Interactive: true,
+		},
+		Pane:              paneArtifact,
+		TitleHistory:      append([]diagnostics.TitleEvent(nil), diag.titleHistory...),
+		TitleHistoryKnown: len(diag.titleHistory) > 0 || diag.titleReadErr == "",
+		TitleHistoryError: diag.titleReadErr,
+		Metadata:          metadata,
+		Prompt:            diag.promptPayload(),
+		ParentStdout:      parentStdout,
+		ParentStderr:      parentStderr,
+	})
+	if result.Dir != "" {
+		stepDir = result.Dir
+	}
+	if captureErr != nil {
+		return fmt.Errorf("%w; tmux diagnostics capture failed for %s: %v", err, stepDir, captureErr)
+	}
+	return fmt.Errorf("%w; tmux diagnostics captured at %s", err, stepDir)
+}
+
+func tmuxPromptFailurePath(err error) string {
+	if err != nil && strings.Contains(err.Error(), "exited unexpectedly") {
+		return tmuxFailureUnexpectedExit
+	}
+	return tmuxFailureSubmitTimeout
+}
+
+func (s *tmuxClaudeSession) recordPromptPayload(input, raw, normalized string, bracketed bool) {
+	s.diag.recordPromptPayload(input, raw, normalized, bracketed)
+}
+
+func (s *tmuxCodexSession) recordPromptPayload(input, raw, normalized string, bracketed bool) {
+	s.diag.recordPromptPayload(input, raw, normalized, bracketed)
+}
+
+func (d *tmuxSessionDiagnostics) recordPromptPayload(input, raw, normalized string, bracketed bool) {
+	d.lastPromptRaw = []byte(raw)
+	d.lastPromptNormalized = []byte(normalized)
+	d.lastPromptBracketed = bracketed
+	d.lastPromptInputBytes = len([]byte(input))
+	d.lastSubmitAttempts = 0
+}
+
+func (d tmuxSessionDiagnostics) promptPayload() diagnostics.PromptPayload {
+	raw := diagnostics.UnavailableBytes()
+	if d.lastPromptRaw != nil {
+		raw = diagnostics.Bytes(d.lastPromptRaw)
+	}
+	normalized := diagnostics.UnavailableBytes()
+	if d.lastPromptNormalized != nil {
+		normalized = diagnostics.Bytes(d.lastPromptNormalized)
+	}
+	return diagnostics.PromptPayload{
+		Raw:               raw,
+		Normalized:        normalized,
+		NormalizationMode: "ptyrunner.NormalizePrompt",
+		BracketedPaste:    d.lastPromptBracketed,
+		ExtraMetadata: map[string]any{
+			"input_bytes":              d.lastPromptInputBytes,
+			"submit_attempts_observed": d.lastSubmitAttempts,
+		},
+	}
+}
+
+func (d tmuxSessionDiagnostics) metadata(pane *tmuxagent.Pane, idleTransitions, busyTransitions, trustPrompts int, finalState string) diagnostics.TmuxMetadata {
+	paneTarget := ""
+	if pane != nil {
+		paneTarget = pane.Target
+	}
+	return diagnostics.TmuxMetadata{
+		PaneTarget:      paneTarget,
+		Agent:           d.agent,
+		Command:         d.command,
+		Args:            append([]string{}, d.args...),
+		Workdir:         d.workdir,
+		StartupTimeout:  d.startupTimeout.String(),
+		IdleTransitions: idleTransitions,
+		BusyTransitions: busyTransitions,
+		TrustPrompts:    trustPrompts,
+		FinalState:      finalState,
+		TitleReadError:  d.titleReadErr,
+		Extra: map[string]any{
+			"timing": d.timingMetadata(),
+			"transition_counters": map[string]any{
+				"idle":          idleTransitions,
+				"busy":          busyTransitions,
+				"trust_prompts": trustPrompts,
+				"final_state":   finalState,
+			},
+		},
+	}
+}
+
+func (d tmuxSessionDiagnostics) timingMetadata() map[string]any {
+	timing := map[string]any{
+		"submit_retry_interval_ms": tmuxSubmitRetryInterval.Milliseconds(),
+		"submit_key_delay_ms":      tmuxSubmitKeyDelay.Milliseconds(),
+		"submit_max_attempts":      tmuxSubmitMaxAttempts,
+		"observed_submit_attempts": d.lastSubmitAttempts,
+	}
+	addTime := func(key string, value time.Time) {
+		if !value.IsZero() {
+			timing[key] = value.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	addTime("session_created_at", d.createdAt)
+	addTime("startup_started_at", d.startupStartedAt)
+	addTime("startup_completed_at", d.startupCompletedAt)
+	addTime("last_prompt_started_at", d.lastPromptStartedAt)
+	addTime("last_prompt_pasted_at", d.lastPromptPastedAt)
+	addTime("last_prompt_accepted_at", d.lastPromptAcceptedAt)
+	addTime("last_idle_at", d.lastIdleAt)
+	addTime("last_failure_at", d.lastFailureAt)
+	if !d.startupStartedAt.IsZero() {
+		end := d.startupCompletedAt
+		if end.IsZero() {
+			end = d.lastFailureAt
+		}
+		if !end.IsZero() {
+			timing["startup_elapsed_ms"] = end.Sub(d.startupStartedAt).Milliseconds()
+		}
+	}
+	if !d.lastPromptStartedAt.IsZero() {
+		end := d.lastIdleAt
+		if end.IsZero() {
+			end = d.lastFailureAt
+		}
+		if !end.IsZero() {
+			timing["last_prompt_elapsed_ms"] = end.Sub(d.lastPromptStartedAt).Milliseconds()
+		}
+	}
+	return timing
+}
+
+func mergeMetadataExtra(extra map[string]any, key string, value any) map[string]any {
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	extra[key] = value
+	return extra
 }
 
 var errCodexTmuxPromptNotAccepted = fmt.Errorf("codex tmux tui did not start processing")

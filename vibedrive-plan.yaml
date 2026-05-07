@@ -140,7 +140,7 @@ tasks:
       title: Capture tmux pane diagnostics on every TUI failure
       details: |
         Today tmuxPaneDiagnostics in internal/runner/tmux_clients.go appends the last 160 lines of pane output into the error string. Replace that with a structured diagnostics call into the new Capturer that writes the full pane snapshot, title-transition history (idle/busy/trust counts plus the recorded states), the prompt payload that was pasted, and timing data into the debug directory. The error message should still include a short hint plus a path to the diagnostics directory for human consumption. Do not change the failure conditions yet; that is the next task.
-      status: in_progress
+      status: done
       workflow: implement
       deps:
         - implement-diagnostics-package

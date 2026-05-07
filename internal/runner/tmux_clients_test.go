@@ -2,12 +2,19 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"vibedrive/internal/diagnostics"
 	"vibedrive/internal/tmuxagent"
+	"vibedrive/pkg/agentcli/claude"
+	"vibedrive/pkg/agentcli/codex"
+	"vibedrive/pkg/ptyrunner"
 )
 
 func TestWaitForTmuxCloseForceKillsPaneWhenCloseContextExpires(t *testing.T) {
@@ -421,4 +428,275 @@ gpt-5.5 xhigh · ~/workspace/planet/.vibedrive/worktrees/001-data-fixtures-and-a
 	if snapshot.currentState != "busy" || snapshot.busyTransitions != 2 {
 		t.Fatalf("expected working screen to record busy transition, got %#v", snapshot)
 	}
+}
+
+func TestTmuxCodexDiagnosticsWrittenOnUnexpectedExit(t *testing.T) {
+	workspace := t.TempDir()
+	var pasted string
+	entered := false
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%1\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte("vibedrive\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				if entered {
+					return []byte("1\n"), nil
+				}
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte("FULL CODEX PANE SNAPSHOT\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(`
+OpenAI Codex (v0.128.0)
+
+model:        gpt-5.5 xhigh
+directory:    /tmp/vibedrive
+permissions: YOLO mode
+`), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				pasted = stdin
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					entered = true
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	client, err := newTmuxCodexClient("codex", nil, workspace, "", controller, "task")
+	if err != nil {
+		t.Fatalf("newTmuxCodexClient returned error: %v", err)
+	}
+
+	ctx := withTmuxDiagnosticsIdentity(context.Background(), "run-1", "task-one", "execute")
+	err = client.RunPrompt(ctx, &codex.Session{}, "hello\nworld")
+	if err == nil {
+		t.Fatal("expected RunPrompt to fail")
+	}
+	dir := filepath.Join(workspace, ".vibedrive", "debug", "run-1", "task-one", "execute")
+	if !strings.Contains(err.Error(), "tmux diagnostics captured at "+dir) {
+		t.Fatalf("expected diagnostics path in error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "last tmux pane output") {
+		t.Fatalf("expected structured diagnostics instead of pane output in error, got %v", err)
+	}
+
+	assertTmuxDiagnosticsBundle(t, dir, tmuxFailureUnexpectedExit, "codex", "FULL CODEX PANE SNAPSHOT")
+	if want := ptyrunner.BracketedPasteStart + "hello world" + ptyrunner.BracketedPasteEnd; pasted != want {
+		t.Fatalf("unexpected pasted payload %q, want %q", pasted, want)
+	}
+	if got := readTextFile(t, filepath.Join(dir, "prompt", "raw.bin")); got != pasted {
+		t.Fatalf("prompt/raw.bin = %q, want pasted payload %q", got, pasted)
+	}
+	if got := readTextFile(t, filepath.Join(dir, "prompt", "normalized.txt")); got != "hello world" {
+		t.Fatalf("prompt/normalized.txt = %q, want normalized prompt", got)
+	}
+}
+
+func TestTmuxClaudeDiagnosticsWrittenOnSubmitTimeout(t *testing.T) {
+	workspace := t.TempDir()
+	var pasted string
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%2\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte("✳ ready\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte("FULL CLAUDE PANE SNAPSHOT\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte("Claude ready\n"), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				pasted = stdin
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	client, err := newTmuxClaudeClient("claude", nil, workspace, "1s", controller, "task")
+	if err != nil {
+		t.Fatalf("newTmuxClaudeClient returned error: %v", err)
+	}
+
+	base := withTmuxDiagnosticsIdentity(context.Background(), "run-2", "task-two", "review")
+	ctx, cancel := context.WithTimeout(base, 180*time.Millisecond)
+	defer cancel()
+	err = client.RunPrompt(ctx, &claude.Session{}, "review\nnow")
+	if err == nil {
+		t.Fatal("expected RunPrompt to fail")
+	}
+	dir := filepath.Join(workspace, ".vibedrive", "debug", "run-2", "task-two", "review")
+	if !strings.Contains(err.Error(), "tmux diagnostics captured at "+dir) {
+		t.Fatalf("expected diagnostics path in error, got %v", err)
+	}
+
+	assertTmuxDiagnosticsBundle(t, dir, tmuxFailureSubmitTimeout, "claude", "FULL CLAUDE PANE SNAPSHOT")
+	if pasted != "review now" {
+		t.Fatalf("unexpected pasted payload %q", pasted)
+	}
+	if got := readTextFile(t, filepath.Join(dir, "prompt", "raw.bin")); got != "review now" {
+		t.Fatalf("prompt/raw.bin = %q, want pasted payload", got)
+	}
+}
+
+func TestTmuxCodexDiagnosticsWrittenOnStartupTimeout(t *testing.T) {
+	workspace := t.TempDir()
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%3\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte("busy vibedrive\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("1\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte("STARTUP TIMEOUT PANE SNAPSHOT\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte("still starting\n"), nil
+			case len(args) > 0 && args[0] == "send-keys":
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	client, err := newTmuxCodexClient("codex", nil, workspace, "1ms", controller, "task")
+	if err != nil {
+		t.Fatalf("newTmuxCodexClient returned error: %v", err)
+	}
+
+	ctx := withTmuxDiagnosticsIdentity(context.Background(), "run-3", "task-three", "startup")
+	err = client.RunPrompt(ctx, &codex.Session{}, "ignored")
+	if err == nil {
+		t.Fatal("expected RunPrompt to fail")
+	}
+	dir := filepath.Join(workspace, ".vibedrive", "debug", "run-3", "task-three", "startup")
+	if !strings.Contains(err.Error(), "tmux diagnostics captured at "+dir) {
+		t.Fatalf("expected diagnostics path in error, got %v", err)
+	}
+
+	manifest := assertTmuxDiagnosticsBundle(t, dir, tmuxFailureStartupTimeout, "codex", "STARTUP TIMEOUT PANE SNAPSHOT")
+	if entry := diagnosticsArtifact(t, manifest, diagnostics.ArtifactPromptRaw); entry.Status != diagnostics.ArtifactStatusUnavailable {
+		t.Fatalf("startup prompt artifact status = %q, want unavailable", entry.Status)
+	}
+}
+
+func assertTmuxDiagnosticsBundle(t *testing.T, dir, failurePath, agent, paneContains string) diagnostics.Manifest {
+	t.Helper()
+	manifest := readDiagnosticsManifest(t, filepath.Join(dir, "manifest.json"))
+	if manifest.Failure.Path != failurePath {
+		t.Fatalf("failure path = %q, want %q", manifest.Failure.Path, failurePath)
+	}
+	if manifest.Transport.Kind != "tmux" || manifest.Transport.Agent != agent || !manifest.Transport.Interactive {
+		t.Fatalf("unexpected transport metadata: %#v", manifest.Transport)
+	}
+	if got := readTextFile(t, filepath.Join(dir, "tmux", "pane.txt")); !strings.Contains(got, paneContains) {
+		t.Fatalf("tmux pane diagnostics did not contain %q:\n%s", paneContains, got)
+	}
+	if got := strings.TrimSpace(readTextFile(t, filepath.Join(dir, "tmux", "title-history.jsonl"))); got == "" {
+		t.Fatal("expected title history diagnostics to be written")
+	}
+	metadata := readTextFile(t, filepath.Join(dir, "tmux", "metadata.json"))
+	for _, want := range []string{`"agent": "` + agent + `"`, `"timing"`, `"transition_counters"`} {
+		if !strings.Contains(metadata, want) {
+			t.Fatalf("metadata missing %q:\n%s", want, metadata)
+		}
+	}
+	for _, kind := range []string{
+		diagnostics.ArtifactTmuxPane,
+		diagnostics.ArtifactTmuxTitles,
+		diagnostics.ArtifactTmuxMetadata,
+		diagnostics.ArtifactParentStdout,
+		diagnostics.ArtifactParentStderr,
+		diagnostics.ArtifactManifest,
+	} {
+		entry := diagnosticsArtifact(t, manifest, kind)
+		if entry.Status == "" {
+			t.Fatalf("manifest missing artifact %q", kind)
+		}
+	}
+	return manifest
+}
+
+func readDiagnosticsManifest(t *testing.T, path string) diagnostics.Manifest {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read manifest %s: %v", path, err)
+	}
+	var manifest diagnostics.Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse manifest %s: %v", path, err)
+	}
+	return manifest
+}
+
+func diagnosticsArtifact(t *testing.T, manifest diagnostics.Manifest, kind string) diagnostics.ArtifactEntry {
+	t.Helper()
+	for _, entry := range manifest.Artifacts {
+		if entry.Kind == kind {
+			return entry
+		}
+	}
+	t.Fatalf("manifest missing artifact %q", kind)
+	return diagnostics.ArtifactEntry{}
+}
+
+func readTextFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func tmuxArgsContain(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
