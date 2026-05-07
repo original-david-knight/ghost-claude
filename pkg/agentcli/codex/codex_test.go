@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -93,6 +94,82 @@ func TestTitleMonitorWaitsForBusyThenIdleBeforeStartupReady(t *testing.T) {
 	monitor.consume(titleChunk("vibedrive"))
 	if !monitor.snapshot().readyForPrompt() {
 		t.Fatal("expected idle after busy to mark startup ready")
+	}
+}
+
+func TestTitleMonitorDetectsCodexTrustPrompt(t *testing.T) {
+	monitor := newTitleMonitor("/tmp/vibedrive")
+
+	monitor.consume([]byte(`Do you trust the contents of this directory?
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+`))
+
+	snapshot := monitor.snapshot()
+	if snapshot.trustPrompts != 1 {
+		t.Fatalf("expected one trust prompt, got %#v", snapshot)
+	}
+
+	monitor.consume([]byte("still showing trust prompt"))
+	if got := monitor.snapshot().trustPrompts; got != 1 {
+		t.Fatalf("expected repeated trust prompt text not to increment, got %d", got)
+	}
+}
+
+func TestStartTUIConfirmsCodexTrustPrompt(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-codex.py")
+	markerPath := filepath.Join(dir, "trusted")
+	writeExecutable(t, scriptPath, fmt.Sprintf(`#!/usr/bin/env python3
+import os
+import sys
+import time
+
+idle = os.path.basename(os.getcwd()) or "codex"
+sys.stdout.write(f"\x1b]0;{idle}\x07")
+sys.stdout.write("""Do you trust the contents of this directory?
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+""")
+sys.stdout.flush()
+
+ch = os.read(0, 1)
+if ch in (b"\r", b"\n"):
+    with open(%q, "w") as marker:
+        marker.write("trusted\n")
+
+sys.stdout.write(f"\x1b]0;busy {idle}\x07")
+sys.stdout.flush()
+time.sleep(0.05)
+sys.stdout.write(f"\x1b]0;{idle}\x07")
+sys.stdout.flush()
+
+while True:
+    ch = os.read(0, 1)
+    if not ch or ch == b"\x04":
+        break
+`, markerPath))
+
+	var stdout bytes.Buffer
+	client, err := New(scriptPath, []string{"--dangerously-bypass-approvals-and-sandbox"}, dir, TransportTUI, "2s", &stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	tui, err := client.startTUI(context.Background())
+	if err != nil {
+		t.Fatalf("startTUI returned error: %v\nstdout:\n%s", err, stdout.String())
+	}
+	defer func() {
+		_ = tui.Close()
+	}()
+
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected trust prompt marker to be written, stat err=%v\nstdout:\n%s", err, stdout.String())
 	}
 }
 

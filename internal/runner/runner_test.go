@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -477,6 +478,36 @@ func TestRunStepLogsCodexPromptPreview(t *testing.T) {
 	}
 }
 
+func TestRunStepExecErrorIncludesCommandOutput(t *testing.T) {
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+
+	r := &Runner{
+		cfg: &config.Config{
+			Workspace: dir,
+		},
+		stdout: io.Discard,
+		stderr: &stderr,
+	}
+
+	err := r.runStep(context.Background(), nil, nil, config.Step{
+		Name:    "fail",
+		Type:    config.StepTypeExec,
+		Command: []string{"sh", "-c", "printf 'verify failed\\n' >&2; exit 7"},
+	}, TemplateData{
+		Task: plan.Task{ID: "scaffold"},
+	})
+	if err == nil {
+		t.Fatal("expected runStep to fail")
+	}
+	if !strings.Contains(err.Error(), "command output:") || !strings.Contains(err.Error(), "verify failed") {
+		t.Fatalf("expected error to include command output, got %v", err)
+	}
+	if !strings.Contains(stderr.String(), "verify failed") {
+		t.Fatalf("expected stderr to receive command output, got %q", stderr.String())
+	}
+}
+
 func TestRunPreparesPlanArtifactDirectories(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
@@ -688,6 +719,245 @@ func TestCleanupTaskExecutionPathsRemovesOnlyOwnedChildren(t *testing.T) {
 	}
 	if _, statErr := os.Stat(ownedWorkspace); statErr != nil {
 		t.Fatalf("expected owned workspace to remain when artifact path is unsafe, stat err=%v", statErr)
+	}
+}
+
+func TestWorkerIntegrationExcludesTargetArtifacts(t *testing.T) {
+	excludes := workerIntegrationExcludes(TaskExecutionPaths{})
+	for _, exclude := range excludes {
+		if exclude == ":(exclude)target/**" {
+			return
+		}
+	}
+	t.Fatalf("expected worker integration excludes to include target artifacts, got %#v", excludes)
+}
+
+func TestParallelWorkerPatchCollectsNewFilesWithIgnoredArtifactsPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(strings.Join([]string{
+		".vibedrive/task-results/",
+		".vibedrive/reviews/",
+		".vibedrive/task-runs/",
+		".vibedrive/worktrees/",
+		"target/",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile .gitignore returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile base returned error: %v", err)
+	}
+	initRunnerGitRepo(t, dir)
+	base := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "rev-parse", "HEAD"))
+
+	worker := filepath.Join(t.TempDir(), "worker")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", worker, "HEAD")
+	for path, content := range map[string]string{
+		filepath.Join(worker, "src", "new.txt"):                                 "worker source\n",
+		filepath.Join(worker, "target", "cache.txt"):                            "ignored artifact\n",
+		filepath.Join(worker, ".vibedrive", "task-runs", "scaffold", "log.txt"): "ignored run log\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll returned error: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile %s returned error: %v", path, err)
+		}
+	}
+
+	r := &Runner{}
+	patch, err := r.parallelWorkerPatch(context.Background(), parallelTaskResult{
+		Task:         plan.Task{ID: "scaffold"},
+		Paths:        TaskExecutionPaths{Workspace: worker},
+		BaseRevision: base,
+	})
+	if err != nil {
+		t.Fatalf("parallelWorkerPatch returned error: %v", err)
+	}
+	if !bytes.Contains(patch, []byte("src/new.txt")) {
+		t.Fatalf("expected patch to include worker source file, got:\n%s", patch)
+	}
+	for _, unwanted := range [][]byte{[]byte("target/cache.txt"), []byte(".vibedrive/task-runs/scaffold/log.txt")} {
+		if bytes.Contains(patch, unwanted) {
+			t.Fatalf("expected patch to exclude ignored artifact %s, got:\n%s", unwanted, patch)
+		}
+	}
+}
+
+func TestIntegrateParallelResultFallsBackForOversizedPatch(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	content := `project:
+  name: demo
+tasks:
+  - id: big
+    title: Big Patch
+    workflow: implement
+    status: todo
+    owns_paths:
+      - big.txt
+    verify_commands:
+      - grep -q worker big.txt
+    commit_message: "feat: finish big patch"
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile big returned error: %v", err)
+	}
+	initRunnerGitRepo(t, dir)
+	base := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "rev-parse", "HEAD"))
+
+	worker := filepath.Join(t.TempDir(), "worker")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", worker, "HEAD")
+	if err := os.WriteFile(filepath.Join(worker, "big.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile worker big returned error: %v", err)
+	}
+
+	oldApply := gitApplyPatchFunc
+	gitApplyPatchFunc = func(context.Context, string, []byte, bool, bool) error {
+		return fmt.Errorf("git apply: exit status 128: error: patch too large")
+	}
+	defer func() {
+		gitApplyPatchFunc = oldApply
+	}()
+
+	cfg := &config.Config{
+		Workspace: dir,
+		PlanFile:  planPath,
+		Parallel: config.ParallelConfig{
+			ArtifactRoot: filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+	}
+	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
+	err := r.integrateParallelResult(context.Background(), parallelTaskResult{
+		Task:         plan.Task{ID: "big", CommitMessage: "feat: finish big patch"},
+		Paths:        TaskExecutionPaths{Workspace: worker},
+		BaseRevision: base,
+		Status:       plan.StatusDone,
+		Notes:        "worker complete",
+	})
+	if err != nil {
+		t.Fatalf("integrateParallelResult returned error: %v", err)
+	}
+
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "big.txt")); got != "worker\n" {
+		t.Fatalf("expected file-sync fallback to copy worker content, got %q", got)
+	}
+	loaded, loadErr := plan.Load(planPath)
+	if loadErr != nil {
+		t.Fatalf("Load returned error: %v", loadErr)
+	}
+	task, _ := loaded.FindTask("big")
+	if task.Status != plan.StatusDone {
+		t.Fatalf("expected big task to be done, got %q", task.Status)
+	}
+	notesFile, notesErr := tasknotes.Load(tasknotes.Path(dir))
+	if notesErr != nil {
+		t.Fatalf("Load task notes returned error: %v", notesErr)
+	}
+	note, ok := notesFile.Find("big")
+	if !ok {
+		t.Fatal("expected big task note")
+	}
+	if !strings.Contains(note.Notes, "safe file-sync fallback") {
+		t.Fatalf("expected note to mention file-sync fallback, got %q", note.Notes)
+	}
+}
+
+func TestApplyParallelWorkerFilesRefusesChangedRootPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile shared returned error: %v", err)
+	}
+	initRunnerGitRepo(t, dir)
+	base := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "rev-parse", "HEAD"))
+
+	worker := filepath.Join(t.TempDir(), "worker")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", worker, "HEAD")
+	if err := os.WriteFile(filepath.Join(worker, "shared.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile worker shared returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("root\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile root shared returned error: %v", err)
+	}
+
+	r := &Runner{cfg: &config.Config{Workspace: dir}}
+	_, err := r.applyParallelWorkerPatchFallback(context.Background(), parallelTaskResult{
+		Task:         plan.Task{ID: "shared"},
+		Paths:        TaskExecutionPaths{Workspace: worker},
+		BaseRevision: base,
+	}, fmt.Errorf("git apply: exit status 128: error: patch too large"))
+	if err == nil {
+		t.Fatal("expected changed root path to block file-sync fallback")
+	}
+	if !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("expected changed-since error, got %v", err)
+	}
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "shared.txt")); got != "root\n" {
+		t.Fatalf("expected root file to remain unchanged, got %q", got)
+	}
+}
+
+func TestRollbackParallelWorkerFileSyncRestoresBaseState(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"changed.txt": "base\n",
+		"delete.txt":  "delete\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile %s returned error: %v", name, err)
+		}
+	}
+	initRunnerGitRepo(t, dir)
+	base := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "rev-parse", "HEAD"))
+
+	worker := filepath.Join(t.TempDir(), "worker")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", worker, "HEAD")
+	if err := os.WriteFile(filepath.Join(worker, "changed.txt"), []byte("worker\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile worker changed returned error: %v", err)
+	}
+	if err := os.Remove(filepath.Join(worker, "delete.txt")); err != nil {
+		t.Fatalf("Remove worker delete returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worker, "new.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile worker new returned error: %v", err)
+	}
+
+	r := &Runner{cfg: &config.Config{Workspace: dir}}
+	application, err := r.applyParallelWorkerPatchFallback(context.Background(), parallelTaskResult{
+		Task:         plan.Task{ID: "files"},
+		Paths:        TaskExecutionPaths{Workspace: worker},
+		BaseRevision: base,
+	}, fmt.Errorf("git apply: exit status 128: error: patch too large"))
+	if err != nil {
+		t.Fatalf("applyParallelWorkerPatchFallback returned error: %v", err)
+	}
+	if !application.FileSync || len(application.FileSyncEntries) != 3 {
+		t.Fatalf("expected three file-sync entries, got %#v", application)
+	}
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "changed.txt")); got != "worker\n" {
+		t.Fatalf("expected changed file to be synced, got %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "delete.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected delete.txt to be removed, stat err=%v", statErr)
+	}
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "new.txt")); got != "new\n" {
+		t.Fatalf("expected new file to be synced, got %q", got)
+	}
+
+	if err := rollbackParallelWorkerFileSync(context.Background(), dir, base, application.FileSyncEntries); err != nil {
+		t.Fatalf("rollbackParallelWorkerFileSync returned error: %v", err)
+	}
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "changed.txt")); got != "base\n" {
+		t.Fatalf("expected changed file to roll back to base, got %q", got)
+	}
+	if got := mustReadRunnerFile(t, filepath.Join(dir, "delete.txt")); got != "delete\n" {
+		t.Fatalf("expected deleted file to be restored, got %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("expected added file to be removed on rollback, stat err=%v", statErr)
 	}
 }
 
@@ -1007,6 +1277,14 @@ printf '{"status":"done","notes":"api complete"}' > "{{ .TaskResultPath }}"
 	if !strings.Contains(uiNote.Notes, "Parallel worker failed") {
 		t.Fatalf("expected worker failure note, got %q", uiNote.Notes)
 	}
+
+	uiPaths := taskExecutionPaths(cfg, "ui", 1, true)
+	if _, statErr := os.Stat(uiPaths.Workspace); statErr != nil {
+		t.Fatalf("expected failed worker workspace to be preserved, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(uiPaths.ArtifactRoot); statErr != nil {
+		t.Fatalf("expected failed worker artifacts to be preserved, stat err=%v", statErr)
+	}
 }
 
 func TestRunMarksOnlyConflictedParallelTaskForFollowUp(t *testing.T) {
@@ -1211,6 +1489,14 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 	}
 	if !strings.Contains(badNote.Notes, "Verification failed while running") {
 		t.Fatalf("expected verification failure note, got %q", badNote.Notes)
+	}
+
+	badPaths := taskExecutionPaths(cfg, "bad", 1, true)
+	if _, statErr := os.Stat(badPaths.Workspace); statErr != nil {
+		t.Fatalf("expected unverified worker workspace to be preserved, stat err=%v", statErr)
+	}
+	if _, statErr := os.Stat(badPaths.ArtifactRoot); statErr != nil {
+		t.Fatalf("expected unverified worker artifacts to be preserved, stat err=%v", statErr)
 	}
 }
 
@@ -1456,6 +1742,173 @@ tasks:
 	}
 	if codexAgent.prompts[2] != "finish task scaffold" {
 		t.Fatalf("expected runner to continue after required output repair, got %q", codexAgent.prompts[2])
+	}
+}
+
+func TestRunAsksAgentToRepairMalformedTaskResultJSON(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		Coder:                config.AgentCodex,
+		Reviewer:             config.AgentCodex,
+		MaxStalledIterations: 1,
+		DefaultWorkflow:      "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "execute",
+						Type:            config.StepTypeAgent,
+						Actor:           config.StepActorCoder,
+						Prompt:          "produce bad task result {{ .Task.ID }}",
+						RequiredOutputs: []string{"{{ .TaskResultPath }}"},
+					},
+					{Name: "finish", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	resultPath := automation.ResultPath(dir, "scaffold")
+	codexAgent := &fakeCodex{
+		planPath: planPath,
+		onRun: func(prompt string) error {
+			if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+				return err
+			}
+			switch {
+			case prompt == "produce bad task result scaffold":
+				return os.WriteFile(resultPath, []byte(`{"status":`), 0o644)
+			case strings.Contains(prompt, "malformed task result JSON"):
+				return os.WriteFile(resultPath, []byte(`{"status":"done","notes":"repaired"}`+"\n"), 0o644)
+			default:
+				return nil
+			}
+		},
+	}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		codex:  codexAgent,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(codexAgent.prompts) != 3 {
+		t.Fatalf("expected original, repair, and finish prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if !strings.Contains(codexAgent.prompts[1], "created these required output files, but they are invalid") {
+		t.Fatalf("expected repair prompt to explain invalid output, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "malformed task result JSON") {
+		t.Fatalf("expected repair prompt to explain malformed JSON, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], resultPath) {
+		t.Fatalf("expected repair prompt to name %s, got %q", resultPath, codexAgent.prompts[1])
+	}
+	if codexAgent.prompts[2] != "finish task scaffold" {
+		t.Fatalf("expected runner to continue after task result repair, got %q", codexAgent.prompts[2])
+	}
+}
+
+func TestRunAsksAgentToRepairMalformedReviewJSON(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		Coder:                config.AgentCodex,
+		Reviewer:             config.AgentCodex,
+		MaxStalledIterations: 1,
+		DefaultWorkflow:      "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "review",
+						Type:            config.StepTypeAgent,
+						Actor:           config.StepActorReviewer,
+						Prompt:          "produce bad review {{ .Task.ID }}",
+						RequiredOutputs: []string{"{{ .ReviewPath }}"},
+					},
+					{Name: "finish", Type: config.StepTypeAgent, Actor: config.StepActorCoder, Prompt: "finish task {{ .Task.ID }}"},
+				},
+			},
+		},
+	}
+
+	reviewPath := automation.ReviewPath(dir, "scaffold")
+	codexAgent := &fakeCodex{
+		planPath: planPath,
+		onRun: func(prompt string) error {
+			if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+				return err
+			}
+			switch {
+			case prompt == "produce bad review scaffold":
+				return os.WriteFile(reviewPath, []byte(`{"decision":`), 0o644)
+			case strings.Contains(prompt, "malformed peer review JSON"):
+				return os.WriteFile(reviewPath, []byte(`{"decision":"approved","summary":"ok","findings":[]}`+"\n"), 0o644)
+			default:
+				return nil
+			}
+		},
+	}
+
+	r := &Runner{
+		cfg:    cfg,
+		stdout: io.Discard,
+		stderr: io.Discard,
+		codex:  codexAgent,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(codexAgent.prompts) != 3 {
+		t.Fatalf("expected original, repair, and finish prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if !strings.Contains(codexAgent.prompts[1], "malformed peer review JSON") {
+		t.Fatalf("expected repair prompt to explain malformed review JSON, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], reviewPath) {
+		t.Fatalf("expected repair prompt to name %s, got %q", reviewPath, codexAgent.prompts[1])
+	}
+	if codexAgent.prompts[2] != "finish task scaffold" {
+		t.Fatalf("expected runner to continue after review repair, got %q", codexAgent.prompts[2])
 	}
 }
 

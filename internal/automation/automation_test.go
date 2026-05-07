@@ -89,6 +89,109 @@ tasks:
 	}
 }
 
+func TestFinalizeIgnoresTargetArtifactsWhenCommitting(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	writeFile(t, filepath.Join(dir, "README.md"), "hello\n")
+	writeFile(t, filepath.Join(dir, "target", "cache.txt"), "base artifact\n")
+	writeFile(t, planPath, `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    status: todo
+`)
+	runCmd(t, dir, "git", "-C", dir, "add", "-A")
+	runCmd(t, dir, "git", "-C", dir, "commit", "-m", "base")
+
+	writeFile(t, filepath.Join(dir, "README.md"), "updated\n")
+	writeFile(t, filepath.Join(dir, "target", "cache.txt"), "generated artifact\n")
+
+	resultPath := ResultPath(dir, "scaffold")
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	writeFile(t, resultPath, `{"status":"done","notes":"finished work"}`)
+
+	err := Finalize(context.Background(), FinalizeOptions{
+		Workspace:     dir,
+		PlanFile:      planPath,
+		TaskID:        "scaffold",
+		ResultPath:    resultPath,
+		CommitMessage: "feat: finish scaffold",
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("Finalize returned error: %v", err)
+	}
+
+	committedFiles := runCmd(t, dir, "git", "-C", dir, "show", "--name-only", "--pretty=format:", "HEAD")
+	if strings.Contains(committedFiles, "target/cache.txt") {
+		t.Fatalf("expected target artifact to stay out of commit, committed files:\n%s", committedFiles)
+	}
+	status := runCmd(t, dir, "git", "-C", dir, "status", "--short", "--", "target/cache.txt")
+	if !strings.Contains(status, "target/cache.txt") {
+		t.Fatalf("expected target artifact change to remain unstaged, got %q", status)
+	}
+}
+
+func TestFinalizeCommitsNewFilesWithIgnoredArtifactsPresent(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+	writeFile(t, filepath.Join(dir, ".gitignore"), strings.Join([]string{
+		".vibedrive/task-results/",
+		".vibedrive/reviews/",
+		".vibedrive/task-runs/",
+		".vibedrive/worktrees/",
+		"target/",
+		"",
+	}, "\n"))
+	writeFile(t, filepath.Join(dir, "README.md"), "hello\n")
+	writeFile(t, planPath, `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    status: todo
+`)
+	runCmd(t, dir, "git", "-C", dir, "add", "-A")
+	runCmd(t, dir, "git", "-C", dir, "commit", "-m", "base")
+
+	writeFile(t, filepath.Join(dir, "README.md"), "updated\n")
+	writeFile(t, filepath.Join(dir, "src", "new.txt"), "new source\n")
+	writeFile(t, filepath.Join(dir, "target", "cache.txt"), "ignored artifact\n")
+	writeFile(t, filepath.Join(dir, ".vibedrive", "task-runs", "scaffold", "log.txt"), "ignored run log\n")
+
+	resultPath := ResultPath(dir, "scaffold")
+	writeFile(t, resultPath, `{"status":"done","notes":"finished work"}`)
+
+	err := Finalize(context.Background(), FinalizeOptions{
+		Workspace:     dir,
+		PlanFile:      planPath,
+		TaskID:        "scaffold",
+		ResultPath:    resultPath,
+		CommitMessage: "feat: finish scaffold",
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("Finalize returned error: %v", err)
+	}
+
+	committedFiles := runCmd(t, dir, "git", "-C", dir, "show", "--name-only", "--pretty=format:", "HEAD")
+	for _, want := range []string{"README.md", "src/new.txt", ".vibedrive/task-notes.yaml"} {
+		if !strings.Contains(committedFiles, want) {
+			t.Fatalf("expected commit to include %s, committed files:\n%s", want, committedFiles)
+		}
+	}
+	for _, unwanted := range []string{"target/cache.txt", ".vibedrive/task-runs/scaffold/log.txt"} {
+		if strings.Contains(committedFiles, unwanted) {
+			t.Fatalf("expected ignored artifact %s to stay out of commit, committed files:\n%s", unwanted, committedFiles)
+		}
+	}
+}
+
 func TestFinalizeMarksTaskInProgressWhenVerificationFails(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)

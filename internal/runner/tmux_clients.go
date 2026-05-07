@@ -57,11 +57,13 @@ type tmuxClaudeSession struct {
 }
 
 type tmuxCodexSession struct {
-	pane            *tmuxagent.Pane
-	idleTitle       string
-	idleTransitions int
-	busyTransitions int
-	currentState    string
+	pane                *tmuxagent.Pane
+	idleTitle           string
+	idleTransitions     int
+	busyTransitions     int
+	trustPrompts        int
+	trustPromptDetected bool
+	currentState        string
 }
 
 type tmuxTitleSnapshot struct {
@@ -407,10 +409,18 @@ func (s *tmuxCodexSession) completeStartup(ctx context.Context) error {
 	ticker := time.NewTicker(tmuxStatePollInterval)
 	defer ticker.Stop()
 
+	handledTrustPrompts := 0
 	for {
 		snapshot, err := s.snapshot(ctx)
 		if err != nil {
 			return err
+		}
+		if snapshot.trustPrompts > handledTrustPrompts {
+			if err := s.pane.SendEnter(ctx); err != nil {
+				return fmt.Errorf("confirm codex trust dialog: %w", err)
+			}
+			handledTrustPrompts = snapshot.trustPrompts
+			continue
 		}
 		if snapshot.currentState == "idle" {
 			return nil
@@ -434,11 +444,25 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 		return tmuxTitleSnapshot{}, err
 	}
 	if text, err := s.pane.Capture(ctx, 80); err == nil {
+		trustDetected := codexTrustPrompt(text)
+		if trustDetected && !s.trustPromptDetected {
+			s.trustPrompts++
+		}
+		s.trustPromptDetected = trustDetected
+		if trustDetected {
+			return tmuxTitleSnapshot{
+				idleTransitions: s.idleTransitions,
+				busyTransitions: s.busyTransitions,
+				trustPrompts:    s.trustPrompts,
+				currentState:    s.currentState,
+			}, nil
+		}
 		if state, ok := codexScreenState(text); ok {
 			s.recordState(state)
 			return tmuxTitleSnapshot{
 				idleTransitions: s.idleTransitions,
 				busyTransitions: s.busyTransitions,
+				trustPrompts:    s.trustPrompts,
 				currentState:    s.currentState,
 			}, nil
 		}
@@ -449,6 +473,7 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 	return tmuxTitleSnapshot{
 		idleTransitions: s.idleTransitions,
 		busyTransitions: s.busyTransitions,
+		trustPrompts:    s.trustPrompts,
 		currentState:    s.currentState,
 	}, nil
 }
@@ -567,6 +592,13 @@ func codexReadyScreen(text string) bool {
 		strings.Contains(compact, "model") &&
 		strings.Contains(compact, "directory") &&
 		strings.Contains(compact, "permissions")
+}
+
+func codexTrustPrompt(text string) bool {
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	return strings.Contains(compact, "doyoutrustthecontentsofthisdirectory") &&
+		strings.Contains(compact, "yescontinue") &&
+		strings.Contains(compact, "noquit")
 }
 
 func codexScreenState(text string) (string, bool) {

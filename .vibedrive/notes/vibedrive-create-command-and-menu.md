@@ -1,1 +1,0 @@
-Implemented create CLI/menu over existing internal/create state and stage runner. Added default agent launch config so create can start without vibedrive.yaml, and planning reuses bootstrap.Run with DESIGN.md as the only source. Verified go test ./..., go build ./..., and help output for create/init/top-level usage.

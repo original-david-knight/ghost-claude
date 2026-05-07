@@ -35,12 +35,16 @@ type titleMonitor struct {
 	parser          ptyrunner.TitleParser
 	idleTransitions int
 	busyTransitions int
+	trustPrompts    int
+	trustDetected   bool
 	currentState    string
+	visibleTail     string
 }
 
 type titleSnapshot struct {
 	idleTransitions int
 	busyTransitions int
+	trustPrompts    int
 	currentState    string
 }
 
@@ -192,8 +196,15 @@ func (s *tuiSession) completeStartup(ctx context.Context) error {
 	ticker := time.NewTicker(statePollInterval)
 	defer ticker.Stop()
 
+	handledTrustPrompts := 0
 	for {
 		snapshot := s.monitor.snapshot()
+		if snapshot.trustPrompts > handledTrustPrompts {
+			if _, err := io.WriteString(s.pty, "\r"); err != nil {
+				return fmt.Errorf("confirm codex trust dialog: %w", err)
+			}
+			handledTrustPrompts = snapshot.trustPrompts
+		}
 		if snapshot.readyForPrompt() {
 			return nil
 		}
@@ -228,6 +239,7 @@ func (m *titleMonitor) consume(chunk []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.recordVisibleTextLocked(chunk)
 	for _, title := range m.parser.Consume(chunk) {
 		state, ok := m.classifyTitle(title)
 		if !ok {
@@ -249,8 +261,23 @@ func (m *titleMonitor) snapshot() titleSnapshot {
 	return titleSnapshot{
 		idleTransitions: m.idleTransitions,
 		busyTransitions: m.busyTransitions,
+		trustPrompts:    m.trustPrompts,
 		currentState:    m.currentState,
 	}
+}
+
+func (m *titleMonitor) recordVisibleTextLocked(chunk []byte) {
+	m.visibleTail += ptyrunner.CompactVisibleText(chunk)
+	const maxVisibleTail = 4096
+	if len(m.visibleTail) > maxVisibleTail {
+		m.visibleTail = m.visibleTail[len(m.visibleTail)-maxVisibleTail:]
+	}
+
+	detected := codexTrustPromptCompact(m.visibleTail)
+	if detected && !m.trustDetected {
+		m.trustPrompts++
+	}
+	m.trustDetected = detected
 }
 
 func (s titleSnapshot) readyForPrompt() bool {
@@ -363,4 +390,14 @@ func titleLooksIdleStatus(title string) bool {
 		return false
 	}
 	return (strings.Contains(title, " · ") || strings.Contains(title, " • ")) && (strings.Contains(title, "/") || strings.Contains(title, "~"))
+}
+
+func codexTrustPrompt(text string) bool {
+	return codexTrustPromptCompact(ptyrunner.CompactVisibleText([]byte(text)))
+}
+
+func codexTrustPromptCompact(compact string) bool {
+	return strings.Contains(compact, "doyoutrustthecontentsofthisdirectory") &&
+		strings.Contains(compact, "yescontinue") &&
+		strings.Contains(compact, "noquit")
 }

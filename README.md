@@ -451,7 +451,7 @@ Not selected:
 
 Serial fallback is deliberate. A ready task with no `owns_paths` and no component-owned paths can still run, but it will not be batched with another selected task because the runner cannot prove its write boundary. Ready tasks also remain serial when they list each other in `conflicts_with`, write overlapping `owns_paths`, or both write the same `provides_contracts` file. The inspection command reports those reasons as `missing_ownership_metadata`, `explicit_conflict`, `ownership_conflict`, or `contract_writer_conflict`.
 
-Parallel workers integrate through patches, not an interactive git merge. When a worker patch does not apply cleanly to the root workspace, Vibedrive marks only that task `in_progress`, writes a follow-up note, and preserves the rejected patch plus metadata under `.vibedrive/task-runs/recovery/<task>/`. The next coder prompt for that task includes the recovery patch path and asks the agent to reconcile useful changes against the current workspace instead of blindly applying stale hunks.
+Parallel workers integrate through patches, not an interactive git merge. If Git rejects a patch because it is too large, Vibedrive first checks that every touched root path is still unchanged from the worker's base revision, then syncs the changed files directly from the worker workspace and continues through normal verification. When a worker patch cannot be applied or safely synced, Vibedrive marks only that task `in_progress`, writes a follow-up note, and preserves the rejected patch plus metadata under `.vibedrive/task-runs/recovery/<task>/`. When a parallel worker fails or its integrated changes fail root verification, Vibedrive leaves that worker workspace and artifact directory in place for inspection until the next run prepares that task again. The next coder prompt for that task includes the recovery patch path and asks the agent to reconcile useful changes against the current workspace instead of blindly applying stale hunks.
 
 Use `vibedrive view` for the broader project snapshot. It prints the current task counts, next ready task, an ASCII dependency graph, and the configured workflow step pipeline for each task:
 
@@ -595,6 +595,7 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `{{ .TaskResultPath }}`
 - `{{ .TaskNotesPath }}`
 - `{{ .ReviewPath }}`
+- `{{ .ArtifactRoot }}`
 - `{{ .Plan }}` — parsed `vibedrive-plan.yaml`
 - `{{ .Task }}` — selected plan task
 - `{{ .Now }}` — current time

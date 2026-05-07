@@ -1,199 +1,366 @@
 project:
-    name: parallel-boundary-planning
-    objective: Teach Vibedrive to decompose projects into loosely coupled, interface-bound components so independent agents can work with smaller, well-defined context.
-    source_docs:
-        - README.md
-        - vibedrive-plan.example.yaml
-    constraint_files:
-        - README.md
+  name: vibedrive-quality-recovery
+  objective: Stop screen-scraping fragility and large-output failures from breaking real runs by making diagnostics first-class, narrowing the orchestration interface to non-interactive transports where possible, and locking new heuristics behind regression tests.
+  source_docs:
+    - README.md
+    - vibedrive-plan.example.yaml
+    - CLAUDE.md
+  constraint_files:
+    - README.md
+    - CLAUDE.md
+  components:
+    - id: diagnostics
+      name: Failure diagnostics capture
+      owned_paths:
+        - internal/diagnostics/**
+        - docs/contracts/diagnostics.md
+      provides_contracts:
+        - docs/contracts/diagnostics.md
+    - id: automation
+      name: Git staging and commit automation
+      owned_paths:
+        - internal/automation/**
+    - id: runner
+      name: Runner orchestration and exec step
+      owned_paths:
+        - internal/runner/runner.go
+        - internal/runner/runner_test.go
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+    - id: tmux-clients
+      name: Tmux-backed agent clients
+      owned_paths:
+        - internal/runner/tmux_clients.go
+        - internal/runner/tmux_clients_test.go
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+        - docs/contracts/agent-transport.md
+    - id: codex-cli
+      name: Codex CLI wrapper
+      owned_paths:
+        - pkg/agentcli/codex/**
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+        - docs/contracts/agent-transport.md
+    - id: claude-cli
+      name: Claude CLI wrapper
+      owned_paths:
+        - pkg/agentcli/claude/**
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+        - docs/contracts/agent-transport.md
+    - id: config-scaffold
+      name: Config schema and scaffold
+      owned_paths:
+        - internal/config/**
+        - internal/scaffold/**
+      provides_contracts:
+        - docs/contracts/agent-transport.md
+
 tasks:
-    - id: schema-component-contract-metadata
-      title: Add component and interface metadata to the plan schema
-      details: Extend the plan model so generated plans can describe component ownership, editable path boundaries, provided contracts, consumed contracts, and explicit task conflicts without relying on free-form details text. Keep the initial fields backward compatible with existing plans, and make sure unknown or omitted metadata does not break current serial execution. Focus on internal/plan first, then update examples only as needed for the new fields to be discoverable.
-      status: done
-      workflow: implement
-      context_files:
-        - internal/plan/plan.go
-        - internal/plan/plan_test.go
-        - vibedrive-plan.example.yaml
-        - README.md
-      acceptance:
-        - Plan YAML can declare project components with owned path globs and provided or consumed contract files.
-        - Tasks can declare component, owns_paths, reads_contracts, provides_contracts, and conflicts_with metadata.
-        - Existing minimal plans and current example plans still load, validate, and save correctly.
-        - Unit tests cover backward compatibility, duplicate component IDs, unknown task dependencies, and malformed ownership metadata.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/plan
-      commit_message: 'feat: add plan boundary metadata'
-    - id: boundary-aware-plan-prompts
-      title: Make init and restart planning prompt for bounded parallel work
-      details: Update bootstrap and restart planning prompts so authors first identify components, interfaces, owned paths, shared contracts, and integration checkpoints before writing executable tasks. The objective is context reduction, not merely speed. Prompts should ask for tasks that can be assigned with narrow read context and explicit edit authority. Critic prompts should reject tasks that are cross-cutting without a preceding contract or foundation task.
-      status: done
-      workflow: implement
-      deps:
-        - schema-component-contract-metadata
-      context_files:
-        - internal/bootstrap/bootstrap.go
-        - internal/bootstrap/bootstrap_test.go
-        - internal/plan/restart.go
-        - internal/plan/restart_test.go
-        - internal/scaffold/scaffold.go
-        - internal/scaffold/scaffold_test.go
-        - README.md
-      acceptance:
-        - Init plan authoring prompts require component, ownership, contract, and integration-boundary analysis before task generation.
-        - Critic prompts check for weak decomposition, excessive context requirements, missing interfaces, ambiguous ownership, and unsafe parallel assumptions.
-        - Restart prompts preserve useful prior task notes while regenerating boundaries from current source docs and observed learnings.
-        - Scaffolded task prompts tell agents to respect declared owns_paths and contract metadata when present.
-        - Tests assert that generated prompts include the new boundary and context-reduction requirements.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/bootstrap ./internal/plan ./internal/scaffold
-      commit_message: 'feat: prompt for bounded parallel task decomposition'
-    - id: plan-parallel-readiness-analysis
-      title: Add plan analysis for safe parallel task batches
-      details: Add pure plan-level analysis that reports which ready tasks can run in the same batch and why other ready tasks must remain serial. Conflict checks should account for dependency status, overlapping owns_paths, explicit conflicts_with, shared contract writers, and tasks that lack enough ownership metadata. Keep this independent from agent execution so it can be tested deterministically before any runner concurrency is introduced.
-      status: done
-      workflow: implement
-      deps:
-        - schema-component-contract-metadata
-      context_files:
-        - internal/plan/plan.go
-        - internal/plan/plan_test.go
-        - cmd/vibedrive/main.go
-        - cmd/vibedrive/main_test.go
-        - README.md
-      acceptance:
-        - Plan code exposes a deterministic ready-batch selection API that can return up to a requested limit.
-        - Batch selection never groups tasks with overlapping edit ownership, contract writer conflicts, explicit conflicts, or unmet dependencies.
-        - Analysis can explain non-selected ready tasks with short machine-readable or human-readable reasons.
-        - A lightweight CLI surface or dry-run output lets users inspect parallel readiness without launching agents.
-        - Unit tests cover independent tasks, dependency-blocked tasks, ownership conflicts, contract conflicts, and missing metadata fallback behavior.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/plan ./cmd/vibedrive
-      commit_message: 'feat: analyze parallel-ready plan tasks'
-    - id: parallel-runner-isolation-design
-      title: Introduce isolated worktree execution design in config and runner scaffolding
-      details: Add the configuration and runner structure needed for parallel task execution while keeping default behavior serial. Parallel execution should be opt-in, bounded by a max parallelism setting, and designed around isolated git worktrees or equivalent separate working directories. This task should establish the config model, validation, worktree naming, artifact path strategy, and tests without needing to complete full concurrent agent orchestration yet.
-      status: done
-      workflow: implement
-      deps:
-        - plan-parallel-readiness-analysis
-      context_files:
-        - internal/config/config.go
-        - internal/config/config_test.go
-        - internal/runner/runner.go
-        - internal/runner/runner_test.go
-        - internal/automation/automation.go
-        - internal/automation/automation_test.go
-        - README.md
-      acceptance:
-        - Config supports an opt-in parallelism setting while preserving the current default serial run behavior.
-        - Runner code has a tested abstraction for per-task isolated workspace paths and artifact paths.
-        - Worktree or workspace naming is deterministic, collision-resistant enough for repeated runs, and cleaned up only when safe.
-        - Tests cover default serial config, invalid parallelism values, and isolated artifact path generation.
-        - No concurrent agent execution is enabled until merge and finalize behavior is implemented.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/config ./internal/runner ./internal/automation
-      commit_message: 'feat: scaffold isolated parallel runner configuration'
-    - id: parallel-batch-execution
-      title: Execute independent ready tasks in isolated parallel workers
-      details: Implement the first working parallel execution path. When parallelism is enabled, the runner should select a safe ready batch, prepare isolated workspaces, run each task's workflow independently, and collect task results without letting workers share a mutable plan file, task notes file, git index, or uncommitted worktree. Preserve serial execution as the default and fallback path.
-      status: done
-      workflow: implement
-      deps:
-        - boundary-aware-plan-prompts
-        - parallel-runner-isolation-design
-      context_files:
-        - internal/runner/runner.go
-        - internal/runner/runner_test.go
-        - internal/tasknotes/tasknotes.go
-        - internal/tasknotes/tasknotes_test.go
-        - internal/automation/automation.go
-        - internal/config/config.go
-        - pkg/agentcli/codex/codex.go
-        - pkg/agentcli/claude/client.go
-      acceptance:
-        - With parallelism disabled or set to one, runner behavior remains equivalent to the current serial loop.
-        - With parallelism greater than one, only tasks selected by the ready-batch analysis can run concurrently.
-        - Each parallel task receives a workspace, result path, review path, and task notes path that cannot conflict with sibling tasks.
-        - Worker failures are reported without corrupting the root plan file or sibling task results.
-        - Tests use fake agents or exec steps to prove concurrent independent tasks run and conflicting tasks remain serial.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/runner ./internal/plan ./internal/tasknotes ./internal/automation
-      commit_message: 'feat: run safe task batches in parallel'
-    - id: parallel-merge-and-finalize
-      title: Merge parallel worker results back through deterministic finalization
-      details: Complete the integration path for parallel task results. The root runner should merge or apply each successful worker result in a deterministic order, run that task's configured verification, update the canonical plan and task notes, and commit each completed task. Merge conflicts or failed verification should mark only the affected task for follow-up while preserving completed sibling work.
-      status: done
-      workflow: implement
-      deps:
-        - parallel-batch-execution
-      context_files:
-        - internal/runner/runner.go
-        - internal/runner/runner_test.go
-        - internal/tasknotes/tasknotes.go
-        - internal/tasknotes/tasknotes_test.go
-        - cmd/vibedrive/main.go
-        - cmd/vibedrive/main_test.go
-        - README.md
-      acceptance:
-        - Successful parallel workers are integrated into the root workspace in a deterministic order.
-        - Each integrated task runs its own verify_commands before the canonical plan records it as done.
-        - Merge conflicts, verification failures, and blocked worker results affect only the relevant task status and notes.
-        - The runner avoids staging transient review artifacts or isolated workspace internals.
-        - Tests cover successful multi-task integration, one worker failure, one merge conflict, and one verification failure.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/runner ./internal/tasknotes ./cmd/vibedrive
-      commit_message: 'feat: finalize parallel worker results deterministically'
-    - id: docs-and-examples-parallel-boundaries
-      title: Document boundary-first planning and parallel execution
-      details: Update user-facing docs and examples to explain how Vibedrive uses components, contracts, owned paths, and conflicts to reduce per-agent context. Documentation should make clear that parallel execution is an outcome of explicit boundaries, not a blanket speed setting. Include examples for serial fallback, boundary analysis, safe parallel batches, and checkpoint placement after integration.
-      status: done
-      workflow: implement
-      deps:
-        - parallel-merge-and-finalize
-      context_files:
-        - README.md
-        - vibedrive.example.yaml
-        - vibedrive-plan.example.yaml
-        - internal/scaffold/scaffold.go
-        - internal/scaffold/scaffold_test.go
-      acceptance:
-        - README documents the new plan metadata fields and the parallelism configuration.
-        - Examples show component ownership, contract files, task-owned paths, and an integration checkpoint.
-        - Documentation explains how to inspect why tasks are or are not parallel-ready.
-        - Scaffold output reflects the new defaults and keeps serial execution as the default.
-        - Tests verify scaffolded config and example plan content where existing test patterns support it.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./internal/scaffold ./internal/config ./internal/plan
-      commit_message: 'docs: explain boundary-first parallel planning'
-    - id: parallel-boundary-checkpoint
-      title: Run full checkpoint for boundary-first parallel planning
-      details: Run the full repository verification after the schema, prompts, analysis, parallel execution, merge/finalize, docs, and examples are complete. Fix any regressions found by the full suite. Pay particular attention to preserving existing serial behavior for users who do not opt into parallel execution.
-      status: done
-      workflow: checkpoint
-      deps:
-        - docs-and-examples-parallel-boundaries
-      context_files:
-        - README.md
-        - internal/plan/plan.go
-        - internal/runner/runner.go
-        - internal/config/config.go
-        - internal/bootstrap/bootstrap.go
-        - internal/scaffold/scaffold.go
-      acceptance:
-        - Full repository tests pass.
-        - Existing documented serial workflow still works with old plans.
-        - New parallel-readiness analysis and opt-in parallel execution are covered by focused tests.
-        - Documentation and examples match the implemented schema and config names.
-        - Leave task notes describing what was learned in this phase and what should change if the plan is rerun from a fresh environment.
-      verify_commands:
-        - go test ./...
-      commit_message: 'chore: verify boundary-first parallel planning'
+  - id: define-diagnostics-contract
+    title: Define the failure-diagnostics capture contract
+    workflow: implement
+    status: todo
+    component: diagnostics
+    owns_paths:
+      - docs/contracts/diagnostics.md
+    provides_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      Specify what gets captured on every step failure and where it goes. At minimum: a per-run debug root under .vibedrive/debug/<run-id>/<task-id>/<step-name>/, with sub-artifacts for full tmux pane captures (capture-pane -p -S -3000), terminal-title transition history with timestamps, the rendered prompt that was pasted (raw bytes and normalized text), the parent process stdout/stderr tail, and a manifest.json describing what was collected. The contract should be transport-agnostic so non-TUI transports (codex exec, claude --print) can populate the same schema with different fields.
+    acceptance:
+      - docs/contracts/diagnostics.md describes the .vibedrive/debug/<run>/<task>/<step>/ directory layout, manifest schema, and required artifacts for tmux failures and exec failures.
+      - The contract names which existing failure paths must call into the diagnostics package (tmux submit-prompt timeout, ensureRequiredOutputsAfterStep failure, exec step non-zero exit, validateTaskNotesAfterAgentStep failure).
+      - The contract specifies bounded sizes (capture lines, output buffer tails) so capture cannot itself cause large-output failures.
+      - Task notes record any open questions about capture size budgets or PII concerns for future tasks.
+    verify_commands:
+      - test -f docs/contracts/diagnostics.md
+    commit_message: 'docs: define failure diagnostics capture contract'
+
+  - id: implement-diagnostics-package
+    title: Implement internal/diagnostics capture package
+    workflow: implement
+    status: todo
+    deps:
+      - define-diagnostics-contract
+    component: diagnostics
+    owns_paths:
+      - internal/diagnostics/**
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      Build the internal/diagnostics package that the runner and tmux clients will call. Provide a Capturer with methods that take a run/task/step identity and write artifacts atomically into .vibedrive/debug/<run-id>/<task-id>/<step-name>/. Include helpers for writing pane snapshots, title-transition logs, prompt payloads, and exec output tails with the bounded sizes defined by the contract. Do not wire callers in this task; only the package and its tests.
+    acceptance:
+      - internal/diagnostics has a Capturer type that produces artifacts matching docs/contracts/diagnostics.md.
+      - Output writes are bounded to the sizes declared in the contract; oversized inputs are truncated with a tail-preferred policy.
+      - Unit tests cover artifact layout, bounded-size truncation, and concurrent capture from multiple goroutines for the same step (sanity check, since parallel batches share a run).
+      - Task notes capture any contract gaps discovered while implementing the package.
+    verify_commands:
+      - go test ./internal/diagnostics
+    commit_message: 'feat: add diagnostics capture package'
+
+  - id: fix-git-commit-output-volume
+    title: Eliminate the broken-pipe class in finalize commits
+    workflow: implement
+    status: todo
+    component: automation
+    owns_paths:
+      - internal/automation/**
+    details: |
+      Two changes in internal/automation/automation.go. First, run git commit with -q so the file-list output stops flooding stdout (the root cause of the meetspace SIGPIPE). Second, broaden transientArtifactExcludes to cover .vibedrive/** entirely (workers should never commit anything inside .vibedrive, including cargo-target), plus **/target/**, **/node_modules/**, and **/__pycache__/** so deeply-nested build dirs don't get staged either. Update automation_test.go to assert -q is passed and that the new excludes apply for both tracked-update and untracked-add paths. Keep backward compatibility: any file outside the excluded paths still gets staged exactly as before.
+    acceptance:
+      - CommitIfNeeded calls git commit with -q (or equivalent quiet flag) so stdout stays small even on commits with thousands of files.
+      - transientArtifactExcludes excludes .vibedrive/** entirely plus **/target/**, **/node_modules/**, and **/__pycache__/**.
+      - Existing tests still pass and a new test verifies that adding files inside .vibedrive/cargo-target and crates/foo/target does not stage them.
+      - Task notes describe any tradeoff (e.g. files a project legitimately wants under .vibedrive/) and how a future task could opt back in.
+    verify_commands:
+      - go test ./internal/automation
+    commit_message: 'fix: keep finalize commits quiet and exclude nested build dirs'
+
+  - id: bound-runner-exec-output
+    title: Cap runner exec output buffer and capture diagnostics on failure
+    workflow: implement
+    status: todo
+    deps:
+      - implement-diagnostics-package
+    component: runner
+    owns_paths:
+      - internal/runner/runner.go
+      - internal/runner/runner_test.go
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      The exec step in internal/runner/runner.go currently writes child stdout/stderr through io.MultiWriter into an unbounded bytes.Buffer. Replace that with a bounded ring/tail buffer (size from the diagnostics contract). On non-zero exit, call the diagnostics Capturer to write the full tail, the rendered command, working directory, and env to the per-step debug directory before returning the wrapped error. Keep the existing user-visible error message format so log readers don't break. Do not modify tmux client code in this task.
+    acceptance:
+      - The exec step's output buffer cannot grow unbounded; tests demonstrate large outputs are truncated to the configured tail size.
+      - On non-zero exit the exec step writes the captured tail and metadata into .vibedrive/debug/... per the diagnostics contract.
+      - Existing exec-step tests continue to pass; a new test verifies bounded buffering and diagnostics capture on failure.
+      - Task notes record any followup runner cleanup the next phase should address.
+    verify_commands:
+      - go test ./internal/runner -run Exec
+    commit_message: 'fix: bound exec output and capture diagnostics on failure'
+
+  - id: wire-tmux-diagnostics
+    title: Capture tmux pane diagnostics on every TUI failure
+    workflow: implement
+    status: todo
+    deps:
+      - implement-diagnostics-package
+    component: tmux-clients
+    owns_paths:
+      - internal/runner/tmux_clients.go
+      - internal/runner/tmux_clients_test.go
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      Today tmuxPaneDiagnostics in internal/runner/tmux_clients.go appends the last 160 lines of pane output into the error string. Replace that with a structured diagnostics call into the new Capturer that writes the full pane snapshot, title-transition history (idle/busy/trust counts plus the recorded states), the prompt payload that was pasted, and timing data into the debug directory. The error message should still include a short hint plus a path to the diagnostics directory for human consumption. Do not change the failure conditions yet; that is the next task.
+    acceptance:
+      - Every tmux client failure path (submit-prompt timeout, startup timeout, unexpected exit) writes a complete diagnostics bundle.
+      - Error messages reference the diagnostics directory path so a human can find the bundle without log diving.
+      - Tests cover that diagnostics are written for both the codex and claude tmux clients on simulated failure.
+      - Task notes capture any patterns observed while wiring this up that should inform the fail-fast task.
+    verify_commands:
+      - go test ./internal/runner -run Tmux
+    commit_message: 'feat: structured tmux diagnostics on TUI failure'
+
+  - id: codex-screen-detector-test-harness
+    title: Add captured-screen golden tests for the Codex detector
+    workflow: implement
+    status: todo
+    deps:
+      - implement-diagnostics-package
+    component: codex-cli
+    owns_paths:
+      - pkg/agentcli/codex/**
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      Capture real terminal recordings from a working codex run and a stuck codex run (use the diagnostics output from a recent failure if available). Save them as fixtures alongside pkg/agentcli/codex/. Write tests that replay each fixture through classifyTitle, isBusyTitle, titleMatchesIdle, codexReadyScreen, codexTrustPrompt, and codexScreenState and assert the expected classifications. The point is to make every screen-scraping heuristic regression-detectable; do not change detector behavior in this task.
+    acceptance:
+      - At least one fixture per detector branch (idle title, busy title, ready screen, trust prompt, working screen, stuck/ambiguous screen).
+      - Tests fail loudly when any classification flips, with diff output that points to the responsible heuristic.
+      - A short README in pkg/agentcli/codex/testdata explains how to capture a new fixture from a real run.
+      - Task notes record any heuristics that turned out to be wrong on real fixtures so the next task can fix them with evidence.
+    verify_commands:
+      - go test ./pkg/agentcli/codex
+    commit_message: 'test: golden fixtures for Codex screen detection'
+
+  - id: claude-screen-detector-test-harness
+    title: Add captured-screen golden tests for the Claude detector
+    workflow: implement
+    status: todo
+    deps:
+      - implement-diagnostics-package
+    component: claude-cli
+    owns_paths:
+      - pkg/agentcli/claude/**
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    details: |
+      Mirror codex-screen-detector-test-harness for claude. Capture working and stuck claude TUI recordings, save fixtures, and write tests that exercise classifyClaudeTmuxTitle and the trust-prompt detection in pkg/agentcli/claude. Do not change detector behavior in this task; the goal is making future changes safe.
+    acceptance:
+      - At least one fixture per detector branch (idle title, busy title, trust prompt, ambiguous/stuck state).
+      - Tests fail loudly when any classification flips.
+      - A short README in pkg/agentcli/claude/testdata explains the fixture-capture process.
+      - Task notes record any detector bugs found via real fixtures.
+    verify_commands:
+      - go test ./pkg/agentcli/claude
+    commit_message: 'test: golden fixtures for Claude screen detection'
+
+  - id: fail-fast-on-unknown-tui-state
+    title: Replace 3-enter retry with structured failure on unknown TUI state
+    workflow: implement
+    status: todo
+    deps:
+      - wire-tmux-diagnostics
+      - codex-screen-detector-test-harness
+      - claude-screen-detector-test-harness
+    component: tmux-clients
+    owns_paths:
+      - internal/runner/tmux_clients.go
+      - internal/runner/tmux_clients_test.go
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+    conflicts_with:
+      - wire-tmux-diagnostics
+    details: |
+      The current submit-prompt loop pastes a prompt and presses Enter up to 3 times waiting for a busy-state transition. If the screen state is unrecognized the agent may have already accepted the prompt, so additional Enters can submit half-written follow-ups or trigger menu items. Change behavior so that when the first Enter does not yield a recognized state transition within the retry window, the client captures full diagnostics and returns an actionable error immediately. Two retries remain only when the FSM positively classified the screen as accepting input. Update fixtures and tests to cover both the happy path and the unknown-state abort.
+    acceptance:
+      - Submit-prompt no longer issues blind retries when the screen state is unclassified; it captures diagnostics and aborts.
+      - The error message points the operator to the captured diagnostics directory and names the unclassified state.
+      - Tests exercise the unknown-state abort using fixtures from the detector test harnesses.
+      - Task notes describe any cases where this stricter policy will surface previously-hidden bugs in agent UIs.
+    verify_commands:
+      - go test ./internal/runner -run Tmux
+    commit_message: 'fix: fail fast on unknown TUI state instead of blind retries'
+
+  - id: agent-transport-config-contract
+    title: Add agent transport selection to config schema and scaffold
+    workflow: implement
+    status: todo
+    component: config-scaffold
+    owns_paths:
+      - internal/config/**
+      - internal/scaffold/**
+      - docs/contracts/agent-transport.md
+    provides_contracts:
+      - docs/contracts/agent-transport.md
+    details: |
+      Today vibedrive.yaml has claude.transport and codex.transport with only "tui" supported. Extend the config to support transport=exec for codex and transport=print for claude, validated by config tests. Document the new transport semantics in docs/contracts/agent-transport.md, including how prompts are passed, how outputs are read, and what step types are compatible. Update the init scaffold so new projects can opt into the non-interactive transports for the orchestrated workflow steps while keeping TUI for any step that needs a human-watchable session. Do not implement the new transports here; this task is the schema, validation, scaffold defaults, and contract.
+    acceptance:
+      - config supports transport=tui|exec for codex and transport=tui|print for claude with clear validation errors for unknown values.
+      - docs/contracts/agent-transport.md specifies how each transport delivers prompts, gathers stdout/stderr, signals completion, and exits.
+      - Scaffolded vibedrive.yaml documents the new options with comments and keeps tui as the default for backward compatibility.
+      - Task notes capture decisions about which orchestration steps should default to non-interactive in the future scaffold.
+    verify_commands:
+      - go test ./internal/config
+      - go test ./internal/scaffold
+    commit_message: 'feat: agent transport selection contract'
+
+  - id: implement-codex-exec-transport
+    title: Implement non-interactive codex exec transport
+    workflow: implement
+    status: todo
+    deps:
+      - agent-transport-config-contract
+      - codex-screen-detector-test-harness
+    component: codex-cli
+    owns_paths:
+      - pkg/agentcli/codex/**
+    reads_contracts:
+      - docs/contracts/agent-transport.md
+      - docs/contracts/diagnostics.md
+    conflicts_with:
+      - codex-screen-detector-test-harness
+    details: |
+      Implement transport=exec for codex by invoking codex's non-interactive subcommand (codex exec) with the rendered prompt. Reuse the existing client interface so the runner does not need to know which transport is in use. Capture stdout/stderr per the diagnostics contract. Reject step types that are documented as TUI-only (and document them in the agent-transport contract if any are discovered). Keep the TUI implementation untouched for the create/init flows that need to remain interactive.
+    acceptance:
+      - codex.transport=exec runs orchestrated agent steps end-to-end via codex exec without launching a TUI.
+      - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
+      - The codex.transport=tui path continues to work with no behavior changes for TUI-only flows.
+      - Task notes record any codex exec features (e.g. session continuity) that the next iteration should leverage.
+    verify_commands:
+      - go test ./pkg/agentcli/codex
+    commit_message: 'feat: non-interactive codex exec transport'
+
+  - id: implement-claude-print-transport
+    title: Implement non-interactive claude print transport
+    workflow: implement
+    status: todo
+    deps:
+      - agent-transport-config-contract
+      - claude-screen-detector-test-harness
+    component: claude-cli
+    owns_paths:
+      - pkg/agentcli/claude/**
+    reads_contracts:
+      - docs/contracts/agent-transport.md
+      - docs/contracts/diagnostics.md
+    conflicts_with:
+      - claude-screen-detector-test-harness
+    details: |
+      Implement transport=print for claude by invoking claude with --print and the rendered prompt. Reuse the existing client interface. Capture stdout/stderr per the diagnostics contract. Reject step types that are TUI-only and document them. Keep the TUI implementation untouched.
+    acceptance:
+      - claude.transport=print runs orchestrated agent steps end-to-end via claude --print without launching a TUI.
+      - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
+      - The claude.transport=tui path continues to work with no behavior changes for TUI-only flows.
+      - Task notes record any --print flags or session-continuation behavior that the next iteration should leverage.
+    verify_commands:
+      - go test ./pkg/agentcli/claude
+    commit_message: 'feat: non-interactive claude print transport'
+
+  - id: pin-agent-cli-versions
+    title: Pin codex and claude CLI versions in config and scaffold
+    workflow: implement
+    status: todo
+    deps:
+      - agent-transport-config-contract
+    component: config-scaffold
+    owns_paths:
+      - internal/config/**
+      - internal/scaffold/**
+    details: |
+      Add optional codex.version and claude.version fields to the config. When set, vibedrive checks the resolved CLI's reported version on startup and refuses to run if it does not match (so a silent codex update cannot shift screen-scraping ground truth under us). Update the scaffold to record the version used at init time so plans are reproducible. Document the new fields and the rationale ("pin to keep TUI heuristics stable across runs") in README.md.
+    acceptance:
+      - config supports codex.version and claude.version with clear error messages when the live CLI version differs.
+      - vibedrive init records the live versions in the scaffolded vibedrive.yaml.
+      - README.md documents the pinning fields and explains why they exist.
+      - Task notes record what to do when an upgrade is intentionally desired (manual version bump path).
+    verify_commands:
+      - go test ./internal/config
+      - go test ./internal/scaffold
+    commit_message: 'feat: pin agent CLI versions to stabilize TUI heuristics'
+
+  - id: integration-checkpoint-quality-recovery
+    title: End-to-end run on a target project verifies the recovery
+    workflow: checkpoint
+    status: todo
+    deps:
+      - fix-git-commit-output-volume
+      - bound-runner-exec-output
+      - fail-fast-on-unknown-tui-state
+      - implement-codex-exec-transport
+      - implement-claude-print-transport
+      - pin-agent-cli-versions
+    reads_contracts:
+      - docs/contracts/diagnostics.md
+      - docs/contracts/agent-transport.md
+    conflicts_with:
+      - fix-git-commit-output-volume
+      - bound-runner-exec-output
+      - fail-fast-on-unknown-tui-state
+      - implement-codex-exec-transport
+      - implement-claude-print-transport
+      - pin-agent-cli-versions
+    details: |
+      Run vibedrive end-to-end against a fresh checkout of a Rust project (meetspace shape) and a non-Rust project (ECSNet shape) using the new defaults. For each project capture a diagnostics bundle from at least one intentional failure (e.g. a verify_commands failure) and confirm the bundle contents match docs/contracts/diagnostics.md. Confirm that finalize commits stay quiet, that no broken-pipe occurs even with build artifacts present, and that an unknown-state TUI failure produces an actionable error with a diagnostics path. If any acceptance criterion fails, this task records the failure and stays in_progress.
+    acceptance:
+      - A Rust-shaped project completes at least one full task iteration end-to-end with the new defaults and no broken-pipe failures.
+      - A non-Rust project completes at least one full task iteration end-to-end with the new defaults.
+      - An intentional failure in each project produces a diagnostics bundle that matches the contract.
+      - Task notes summarize any remaining quality issues observed during the integration run for follow-up planning.
+    verify_commands:
+      - go test ./...
+      - go install ./cmd/vibedrive
+    commit_message: 'chore: verify quality recovery end-to-end'

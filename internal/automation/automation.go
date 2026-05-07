@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -274,9 +275,7 @@ func commitIfNeeded(ctx context.Context, workspace, message string, stdout, stde
 }
 
 func CommitIfNeeded(ctx context.Context, workspace, message string, stdout, stderr io.Writer) error {
-	args := []string{"add", "-A", "--", "."}
-	args = append(args, transientArtifactExcludes()...)
-	if err := runGit(ctx, workspace, stdout, stderr, args...); err != nil {
+	if err := StageAllChangesExcept(ctx, workspace, stdout, stderr, transientArtifactExcludes()...); err != nil {
 		return err
 	}
 
@@ -290,6 +289,41 @@ func CommitIfNeeded(ctx context.Context, workspace, message string, stdout, stde
 	}
 }
 
+func StageAllChangesExcept(ctx context.Context, workspace string, stdout, stderr io.Writer, excludedPathspecs ...string) error {
+	hasHead, err := gitHasHead(ctx, workspace)
+	if err != nil {
+		return err
+	}
+	if hasHead {
+		trackedArgs := append([]string{"add", "-u", "--", "."}, excludedPathspecs...)
+		if err := runGit(ctx, workspace, stdout, stderr, trackedArgs...); err != nil {
+			return err
+		}
+	}
+
+	untrackedArgs := append([]string{"ls-files", "-o", "--exclude-standard", "-z", "--", "."}, excludedPathspecs...)
+	untracked, err := gitOutput(ctx, workspace, untrackedArgs...)
+	if err != nil {
+		return err
+	}
+	if len(untracked) == 0 {
+		return nil
+	}
+	return runGitWithInput(ctx, workspace, untracked, stdout, stderr, "add", "--pathspec-from-file=-", "--pathspec-file-nul")
+}
+
+func gitHasHead(ctx context.Context, workspace string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--verify", "-q", "HEAD")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git rev-parse --verify -q HEAD: %w: %s", err, strings.TrimSpace(string(output)))
+}
+
 func transientArtifactExcludes() []string {
 	return []string{
 		":(exclude).vibedrive/run-state.json",
@@ -297,12 +331,38 @@ func transientArtifactExcludes() []string {
 		":(exclude).vibedrive/reviews/**",
 		":(exclude).vibedrive/task-runs/**",
 		":(exclude).vibedrive/worktrees/**",
+		":(exclude)target/**",
 	}
 }
 
 func runGit(ctx context.Context, workspace string, stdout, stderr io.Writer, args ...string) error {
 	cmdArgs := append([]string{"-C", workspace}, args...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
+}
+
+func gitOutput(ctx context.Context, workspace string, args ...string) ([]byte, error) {
+	cmdArgs := append([]string{"-C", workspace}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	output, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return output, nil
+}
+
+func runGitWithInput(ctx context.Context, workspace string, input []byte, stdout, stderr io.Writer, args ...string) error {
+	cmdArgs := append([]string{"-C", workspace}, args...)
+	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd.Stdin = bytes.NewReader(input)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {

@@ -1,1 +1,0 @@
-Init now runs fresh author, critic, and author-revision instances via internal/agentlaunch. Critic feedback is routed through transient .vibedrive/init-critic-feedback.md and removed after revision; tests cover same-agent roles, phase ordering, prompt split, source behavior, and CLI --critic defaults.

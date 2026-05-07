@@ -305,6 +305,71 @@ Tip: You can resume a previous conversation by running codex resume
 	}
 }
 
+func TestTmuxCodexStartupConfirmsTrustPromptBeforeIdleTitle(t *testing.T) {
+	enterCount := 0
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%1\n"), nil
+			case len(args) > 0 && args[0] == "display-message":
+				return []byte("vibedrive\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if enterCount == 0 {
+					return []byte(`
+Do you trust the contents of this directory? Working with untrusted contents
+comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue
+`), nil
+				}
+				return []byte(`
+OpenAI Codex (v0.128.0)
+
+model:        gpt-5.5 xhigh
+directory:    /tmp/vibedrive
+permissions: YOLO mode
+`), nil
+			case len(args) > 0 && args[0] == "send-keys":
+				enterCount++
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession("/tmp/vibedrive")
+	session.pane = pane
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.completeStartup(ctx); err != nil {
+		t.Fatalf("completeStartup returned error: %v", err)
+	}
+	if enterCount != 1 {
+		t.Fatalf("expected one trust prompt confirmation, got %d", enterCount)
+	}
+}
+
 func TestTmuxCodexSnapshotTreatsWorkingScreenAsBusyWithIdleTitle(t *testing.T) {
 	controller := tmuxagent.NewController(tmuxagent.Options{
 		Command: "tmux",
