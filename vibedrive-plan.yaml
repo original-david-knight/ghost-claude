@@ -204,7 +204,7 @@ tasks:
       title: Replace 3-enter retry with structured failure on unknown TUI state
       details: |
         The current submit-prompt loop pastes a prompt and presses Enter up to 3 times waiting for a busy-state transition. If the screen state is unrecognized the agent may have already accepted the prompt, so additional Enters can submit half-written follow-ups or trigger menu items. Change behavior so that when the first Enter does not yield a recognized state transition within the retry window, the client captures full diagnostics and returns an actionable error immediately. Two retries remain only when the FSM positively classified the screen as accepting input. Update fixtures and tests to cover both the happy path and the unknown-state abort.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - wire-tmux-diagnostics

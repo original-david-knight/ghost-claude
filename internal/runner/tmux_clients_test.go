@@ -430,6 +430,322 @@ gpt-5.5 xhigh · ~/workspace/planet/.vibedrive/worktrees/001-data-fixtures-and-a
 	}
 }
 
+func TestTmuxCodexSubmitRetriesWhenFixtureScreenStillAcceptsInput(t *testing.T) {
+	workspace := t.TempDir()
+	readyFixture, readyScreen := readCodexDetectorFixture(t, "ready-screen")
+	workingFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+
+	enterCount := 0
+	workingScreenConsumed := false
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%4\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				if enterCount >= 2 && !workingScreenConsumed {
+					return []byte(workingFixture.Title + "\n"), nil
+				}
+				return []byte(readyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if enterCount >= 2 && !workingScreenConsumed {
+					workingScreenConsumed = true
+					return []byte(workingScreen), nil
+				}
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				if stdin == "" {
+					t.Fatal("expected prompt payload to be pasted")
+				}
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxCodexSession(readyFixture.Workdir)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 30*time.Second)
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	if err := session.submitPrompt(context.Background(), "retry me", session.busyTransitions); err != nil {
+		t.Fatalf("submitPrompt returned error: %v", err)
+	}
+	if enterCount != 2 {
+		t.Fatalf("expected one classified-idle retry and then acceptance, got %d enter presses", enterCount)
+	}
+}
+
+func TestTmuxCodexSubmitAbortsOnUnclassifiedFixtureScreen(t *testing.T) {
+	workspace := t.TempDir()
+	stuckFixture, stuckScreen := readCodexDetectorFixture(t, "stuck-no-submit")
+
+	enterCount := 0
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%5\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte(stuckFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(stuckScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(stuckScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxCodexSession(stuckFixture.Workdir)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 30*time.Second)
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	ctx := withTmuxDiagnosticsIdentity(context.Background(), "run-unknown", "task-unknown", "execute")
+	err = session.submitPrompt(ctx, "please do work", session.busyTransitions)
+	if err == nil {
+		t.Fatal("expected submitPrompt to fail on unclassified screen")
+	}
+	err = session.withDiagnostics(ctx, tmuxPromptFailurePath(err), err)
+	if enterCount != 1 {
+		t.Fatalf("expected fail-fast after one enter press, got %d", enterCount)
+	}
+	if !strings.Contains(err.Error(), `unclassified TUI state "unknown"`) {
+		t.Fatalf("expected error to name the unknown state, got %v", err)
+	}
+	dir := filepath.Join(workspace, ".vibedrive", "debug", "run-unknown", "task-unknown", "execute")
+	if !strings.Contains(err.Error(), "tmux diagnostics captured at "+dir) {
+		t.Fatalf("expected diagnostics path in error, got %v", err)
+	}
+
+	manifest := assertTmuxDiagnosticsBundle(t, dir, tmuxFailureSubmitUnknownState, "codex", "What is 20 + 21?")
+	metadata := readTextFile(t, filepath.Join(dir, "tmux", "metadata.json"))
+	if !strings.Contains(metadata, `"state": "unknown"`) || !strings.Contains(metadata, `"classified": false`) {
+		t.Fatalf("expected metadata to record the unclassified submit state:\n%s", metadata)
+	}
+	if entry := diagnosticsArtifact(t, manifest, diagnostics.ArtifactPromptRaw); entry.Status != diagnostics.ArtifactStatusWritten {
+		t.Fatalf("prompt artifact status = %q, want written", entry.Status)
+	}
+}
+
+func TestTmuxClaudeSubmitRetriesWhenFixtureTitleStillAcceptsInput(t *testing.T) {
+	workspace := t.TempDir()
+	idleFixture, idleScreen := readClaudeDetectorFixture(t, "idle-title")
+	busyFixture, busyScreen := readClaudeDetectorFixture(t, "busy-title")
+
+	enterCount := 0
+	busyScreenConsumed := false
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%6\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				if enterCount >= 2 && !busyScreenConsumed {
+					return []byte(busyFixture.Title + "\n"), nil
+				}
+				return []byte(idleFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(idleScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if enterCount >= 2 && !busyScreenConsumed {
+					busyScreenConsumed = true
+					return []byte(busyScreen), nil
+				}
+				return []byte(idleScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				if stdin == "" {
+					t.Fatal("expected prompt payload to be pasted")
+				}
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "claude",
+		Command: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second)
+	session.pane = pane
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	if err := session.submitPrompt(context.Background(), "retry me", session.busyTransitions, false); err != nil {
+		t.Fatalf("submitPrompt returned error: %v", err)
+	}
+	if enterCount != 2 {
+		t.Fatalf("expected one classified-idle retry and then acceptance, got %d enter presses", enterCount)
+	}
+}
+
+func TestTmuxClaudeSubmitAbortsOnBusyFixtureScreen(t *testing.T) {
+	workspace := t.TempDir()
+	ambiguousFixture, ambiguousScreen := readClaudeDetectorFixture(t, "ambiguous-permission-error")
+
+	enterCount := 0
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%7\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte(ambiguousFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(ambiguousScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(ambiguousScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				if stdin == "" {
+					t.Fatal("expected prompt payload to be pasted")
+				}
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "claude",
+		Command: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second)
+	session.pane = pane
+	session.currentState = "busy"
+	session.busyTransitions = 1
+	session.recordTitleEvent("transport", "", session.currentState)
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	ctx := withTmuxDiagnosticsIdentity(context.Background(), "run-claude", "task-claude", "review")
+	submitErr := session.submitPrompt(ctx, "please review", session.busyTransitions, false)
+	if submitErr == nil {
+		t.Fatal("expected submitPrompt to fail on busy fixture screen")
+	}
+	if enterCount != 1 {
+		t.Fatalf("expected fail-fast after one enter press, got %d", enterCount)
+	}
+	var stateErr *tmuxSubmitStateError
+	if !errors.As(submitErr, &stateErr) {
+		t.Fatalf("expected submit error to wrap tmuxSubmitStateError, got %T %v", submitErr, submitErr)
+	}
+	if stateErr.agent != "claude" || stateErr.state != "busy" {
+		t.Fatalf("unexpected submit state error: %#v", stateErr)
+	}
+
+	err = session.withDiagnostics(ctx, tmuxPromptFailurePath(submitErr), submitErr)
+	if !errors.As(err, &stateErr) {
+		t.Fatalf("expected diagnostic error to wrap tmuxSubmitStateError, got %T %v", err, err)
+	}
+	dir := filepath.Join(workspace, ".vibedrive", "debug", "run-claude", "task-claude", "review")
+	if !strings.Contains(err.Error(), "tmux diagnostics captured at "+dir) {
+		t.Fatalf("expected diagnostics path in error, got %v", err)
+	}
+
+	manifest := assertTmuxDiagnosticsBundle(t, dir, tmuxFailureSubmitUnknownState, "claude", "argument 'impossible' is invalid")
+	if entry := diagnosticsArtifact(t, manifest, diagnostics.ArtifactPromptRaw); entry.Status != diagnostics.ArtifactStatusWritten {
+		t.Fatalf("prompt artifact status = %q, want written", entry.Status)
+	}
+}
+
 func TestTmuxCodexDiagnosticsWrittenOnUnexpectedExit(t *testing.T) {
 	workspace := t.TempDir()
 	var pasted string
@@ -690,6 +1006,64 @@ func readTextFile(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(data)
+}
+
+type codexDetectorFixture struct {
+	Workdir    string `json:"workdir"`
+	Title      string `json:"title"`
+	ScreenFile string `json:"screen_file"`
+}
+
+func readCodexDetectorFixture(t *testing.T, name string) (codexDetectorFixture, string) {
+	t.Helper()
+	fixtureDir := filepath.Join("..", "..", "pkg", "agentcli", "codex", "testdata", "screens")
+	fixturePath := filepath.Join(fixtureDir, name+".json")
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read Codex fixture %s: %v", fixturePath, err)
+	}
+	var fixture codexDetectorFixture
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("parse Codex fixture %s: %v", fixturePath, err)
+	}
+	if fixture.Workdir == "" || fixture.Title == "" || fixture.ScreenFile == "" {
+		t.Fatalf("Codex fixture %s is missing required fields: %#v", fixturePath, fixture)
+	}
+	screenPath := filepath.Join(fixtureDir, fixture.ScreenFile)
+	screen, err := os.ReadFile(screenPath)
+	if err != nil {
+		t.Fatalf("read Codex fixture screen %s: %v", screenPath, err)
+	}
+	return fixture, string(screen)
+}
+
+type claudeDetectorFixture struct {
+	Workdir    string `json:"workdir"`
+	Title      string `json:"title"`
+	ScreenFile string `json:"screen_file"`
+}
+
+func readClaudeDetectorFixture(t *testing.T, name string) (claudeDetectorFixture, string) {
+	t.Helper()
+	fixtureDir := filepath.Join("..", "..", "pkg", "agentcli", "claude", "testdata", "screens")
+	fixturePath := filepath.Join(fixtureDir, name+".json")
+	raw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read Claude fixture %s: %v", fixturePath, err)
+	}
+	var fixture claudeDetectorFixture
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("parse Claude fixture %s: %v", fixturePath, err)
+	}
+	if fixture.Workdir == "" || fixture.Title == "" || fixture.ScreenFile == "" {
+		t.Fatalf("Claude fixture %s is missing required fields: %#v", fixturePath, fixture)
+	}
+	screenPath := filepath.Join(fixtureDir, fixture.ScreenFile)
+	screen, err := os.ReadFile(screenPath)
+	if err != nil {
+		t.Fatalf("read Claude fixture screen %s: %v", screenPath, err)
+	}
+	return fixture, string(screen)
 }
 
 func tmuxArgsContain(args []string, want string) bool {
