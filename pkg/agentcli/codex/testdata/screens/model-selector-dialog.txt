@@ -1,0 +1,29 @@
+
+
+› Summarize recent commits
+
+  gpt-5.5 xhigh · ~/workspace/vibedrive/.vibedrive/worktrees/003-codex-screen-detector-test-harness-1f2457693a42
+
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.129.0)                               │
+│                                                          │
+│ model:       gpt-5.5 xhigh   /model to change            │
+│ directory:   ~/workspace/vibedrive/…/worktrees/…57693a42 │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+
+  Select Model and Effort
+  Access legacy models by running codex -m <model_name> or in your config.toml
+
+› 1. gpt-5.5 (current)    Frontier model for complex coding, research, and real-world work.
+  2. gpt-5.4              Strong model for everyday coding.
+  3. gpt-5.4-mini         Small, fast, and cost-efficient model for simpler coding tasks.
+  4. gpt-5.3-codex        Coding-optimized model.
+  5. gpt-5.3-codex-spark  Ultra-fast coding model.
+  6. gpt-5.2              Optimized for professional work and long-running agents.
+
+  Press enter to confirm or esc to go back
+

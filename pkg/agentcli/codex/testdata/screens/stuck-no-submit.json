@@ -1,0 +1,22 @@
+{
+  "name": "stuck-no-submit",
+  "branch": "stuck/ambiguous screen",
+  "source": "TUI-style pane text reconstructed from the 2026-05-07 task note failure where Codex did not start processing after 3 enter presses and no diagnostics bundle was present",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/001-codex-screen-detector-test-harness-cf0a277a0c22",
+  "title": "gpt-5.5 xhigh · ~/workspace/vibedrive/.vibedrive/wo...",
+  "screen_file": "stuck-no-submit.txt",
+  "want": {
+    "classifyTitle": {
+      "state": "idle",
+      "ok": true
+    },
+    "isBusyTitle": false,
+    "titleMatchesIdle": false,
+    "codexReadyScreen": false,
+    "codexTrustPrompt": false,
+    "codexScreenState": {
+      "state": "",
+      "ok": false
+    }
+  }
+}

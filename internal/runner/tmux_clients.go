@@ -743,11 +743,7 @@ func codexTitleLooksIdleStatus(title string) bool {
 }
 
 func codexReadyScreen(text string) bool {
-	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
-	return strings.Contains(compact, "openaicodex") &&
-		strings.Contains(compact, "model") &&
-		strings.Contains(compact, "directory") &&
-		strings.Contains(compact, "permissions")
+	return codex.ReadyScreen(text)
 }
 
 func codexTrustPrompt(text string) bool {
@@ -758,14 +754,7 @@ func codexTrustPrompt(text string) bool {
 }
 
 func codexScreenState(text string) (string, bool) {
-	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
-	if strings.Contains(compact, "working") && strings.Contains(compact, "interrupt") {
-		return "busy", true
-	}
-	if codexReadyScreen(text) {
-		return "idle", true
-	}
-	return "", false
+	return codex.ScreenState(text)
 }
 
 func (s *tmuxClaudeSession) waitForBusyTransition(ctx context.Context, busyStart int, timeout time.Duration) (bool, error) {

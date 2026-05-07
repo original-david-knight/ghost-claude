@@ -1,0 +1,22 @@
+{
+  "name": "idle-title",
+  "branch": "idle title",
+  "source": "tmux capture from codex-cli 0.129.0 idle pane in the 003-codex-screen-detector-test-harness worktree on 2026-05-07",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/003-codex-screen-detector-test-harness-1f2457693a42",
+  "title": "003-codex-screen-dete...",
+  "screen_file": "idle-title.txt",
+  "want": {
+    "classifyTitle": {
+      "state": "idle",
+      "ok": true
+    },
+    "isBusyTitle": false,
+    "titleMatchesIdle": true,
+    "codexReadyScreen": true,
+    "codexTrustPrompt": false,
+    "codexScreenState": {
+      "state": "idle",
+      "ok": true
+    }
+  }
+}

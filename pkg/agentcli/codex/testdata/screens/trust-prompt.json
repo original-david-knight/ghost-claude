@@ -1,0 +1,22 @@
+{
+  "name": "trust-prompt",
+  "branch": "trust prompt",
+  "source": "tmux capture from codex-cli 0.129.0 first startup in an untrusted temporary directory on 2026-05-07",
+  "workdir": "/tmp/tmp.hoVsFbew1j/work",
+  "title": "cosmic",
+  "screen_file": "trust-prompt.txt",
+  "want": {
+    "classifyTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "isBusyTitle": false,
+    "titleMatchesIdle": false,
+    "codexReadyScreen": false,
+    "codexTrustPrompt": true,
+    "codexScreenState": {
+      "state": "",
+      "ok": false
+    }
+  }
+}

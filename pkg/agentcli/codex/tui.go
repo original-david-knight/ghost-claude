@@ -401,3 +401,32 @@ func codexTrustPromptCompact(compact string) bool {
 		strings.Contains(compact, "yescontinue") &&
 		strings.Contains(compact, "noquit")
 }
+
+func codexReadyScreen(text string) bool {
+	return ReadyScreen(text)
+}
+
+// ReadyScreen reports whether captured Codex screen text looks ready for a prompt.
+func ReadyScreen(text string) bool {
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	return strings.Contains(compact, "openaicodex") &&
+		strings.Contains(compact, "model") &&
+		strings.Contains(compact, "directory") &&
+		strings.Contains(compact, "permissions")
+}
+
+func codexScreenState(text string) (string, bool) {
+	return ScreenState(text)
+}
+
+// ScreenState classifies captured Codex screen text as idle or busy when known.
+func ScreenState(text string) (string, bool) {
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	if strings.Contains(compact, "working") && strings.Contains(compact, "interrupt") {
+		return "busy", true
+	}
+	if codexReadyScreen(text) {
+		return "idle", true
+	}
+	return "", false
+}

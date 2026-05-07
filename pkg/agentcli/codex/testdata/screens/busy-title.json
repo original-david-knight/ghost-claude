@@ -1,0 +1,22 @@
+{
+  "name": "busy-title",
+  "branch": "busy title",
+  "source": "tmux capture from codex-cli 0.129.0 while the title showed a spinner before the visible working marker rendered in the 003-codex-screen-detector-test-harness worktree on 2026-05-07",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/003-codex-screen-detector-test-harness-1f2457693a42",
+  "title": "⠼ 003-codex-screen-dete...",
+  "screen_file": "busy-title.txt",
+  "want": {
+    "classifyTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "isBusyTitle": true,
+    "titleMatchesIdle": false,
+    "codexReadyScreen": true,
+    "codexTrustPrompt": false,
+    "codexScreenState": {
+      "state": "idle",
+      "ok": true
+    }
+  }
+}

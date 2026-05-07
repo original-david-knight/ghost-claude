@@ -1,0 +1,22 @@
+{
+  "name": "working-screen",
+  "branch": "working screen",
+  "source": "tmux capture from codex-cli 0.129.0 while a one-line prompt was running in the 003-codex-screen-detector-test-harness worktree on 2026-05-07",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/003-codex-screen-detector-test-harness-1f2457693a42",
+  "title": "⠼ 003-codex-screen-dete...",
+  "screen_file": "working-screen.txt",
+  "want": {
+    "classifyTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "isBusyTitle": true,
+    "titleMatchesIdle": false,
+    "codexReadyScreen": true,
+    "codexTrustPrompt": false,
+    "codexScreenState": {
+      "state": "busy",
+      "ok": true
+    }
+  }
+}
