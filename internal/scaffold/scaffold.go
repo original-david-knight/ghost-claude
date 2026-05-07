@@ -20,8 +20,11 @@ parallel:
 
 claude:
   command: claude
+  # transport: tui keeps a human-watchable Claude session.
+  # Change to print for non-interactive orchestrated agent steps.
   transport: tui
   startup_timeout: 30s
+  # args are CLI flags; transport selects --print when transport is print.
   args:
     - --effort
     - max
@@ -30,14 +33,20 @@ claude:
 
 codex:
   command: codex
+  # transport: tui keeps a human-watchable Codex session.
+  # Change to exec for non-interactive orchestrated agent steps.
   transport: tui
   startup_timeout: 30s
+  # args are CLI flags; do not include Codex subcommands such as exec here.
   args:
     - --dangerously-bypass-approvals-and-sandbox
     - -c
     - model_reasoning_effort="xhigh"
 
 workflows:
+  # Future non-interactive defaults: execute-task and address-peer-review can
+  # use codex.transport=exec, and peer-review can use claude.transport=print.
+  # Keep transport=tui for steps that need a live, human-watchable session.
   implement:
     steps:
       - name: execute-task

@@ -5,3 +5,6 @@ tasks:
     - id: fix-git-commit-output-volume
       status: done
       notes: 'CommitIfNeeded now uses git commit -q and transient staging excludes all .vibedrive plus root/nested target, node_modules, and __pycache__ paths for tracked and untracked changes. Tradeoff: legitimate project files under .vibedrive are no longer auto-committed; a future task could add an explicit allowlist/config opt-in.'
+    - id: agent-transport-config-contract
+      status: done
+      notes: 'Config now accepts claude transport tui|print and codex transport tui|exec; scaffold keeps tui defaults and documents future non-interactive defaults: coder execute/address/checkpoint steps via codex exec, reviewer peer-review/checkpoint steps via claude print, finalize stays exec. New transports remain client implementation follow-ups.'

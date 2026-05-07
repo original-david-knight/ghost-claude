@@ -17,8 +17,10 @@ const (
 	StepTypeAgent  = "agent"
 	StepTypeExec   = "exec"
 
-	ClaudeTransportTUI = "tui"
-	CodexTransportTUI  = "tui"
+	ClaudeTransportTUI   = "tui"
+	ClaudeTransportPrint = "print"
+	CodexTransportTUI    = "tui"
+	CodexTransportExec   = "exec"
 
 	SessionStrategySessionID = "session_id"
 	SessionStrategyContinue  = "continue"
@@ -140,6 +142,8 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Claude.Transport == "" {
 		cfg.Claude.Transport = ClaudeTransportTUI
+	} else {
+		cfg.Claude.Transport = normalize(cfg.Claude.Transport)
 	}
 	if cfg.Claude.StartupTimeout == "" {
 		cfg.Claude.StartupTimeout = defaultStartupTimeout
@@ -154,6 +158,8 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Codex.Transport == "" {
 		cfg.Codex.Transport = CodexTransportTUI
+	} else {
+		cfg.Codex.Transport = normalize(cfg.Codex.Transport)
 	}
 	if cfg.Codex.StartupTimeout == "" {
 		cfg.Codex.StartupTimeout = defaultStartupTimeout
@@ -229,10 +235,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("reviewer %q is not supported", c.Reviewer)
 	}
 
-	switch normalize(c.Claude.Transport) {
-	case ClaudeTransportTUI:
-	case "print":
-		return fmt.Errorf("claude.transport %q is no longer supported; use %q or remove the transport setting", c.Claude.Transport, ClaudeTransportTUI)
+	claudeTransport := normalize(c.Claude.Transport)
+	if claudeTransport == "" {
+		claudeTransport = ClaudeTransportTUI
+	}
+	switch claudeTransport {
+	case ClaudeTransportTUI, ClaudeTransportPrint:
 	default:
 		return fmt.Errorf("unsupported claude.transport %q", c.Claude.Transport)
 	}
@@ -253,9 +261,7 @@ func (c *Config) Validate() error {
 	}
 
 	switch codexTransport {
-	case CodexTransportTUI:
-	case "exec":
-		return fmt.Errorf("codex.transport %q is no longer supported; use %q or remove the transport setting", c.Codex.Transport, CodexTransportTUI)
+	case CodexTransportTUI, CodexTransportExec:
 	default:
 		return fmt.Errorf("unsupported codex.transport %q", c.Codex.Transport)
 	}
@@ -546,6 +552,11 @@ func validateCodexArgs(transport string, args []string) error {
 			return fmt.Errorf("codex.args subcommand %q is non-interactive and is not supported for agent steps; remove it or use an interactive Codex TUI subcommand", subcommand)
 		}
 		return fmt.Errorf("codex.transport %q does not support subcommand %q", transport, subcommand)
+	case CodexTransportExec:
+		if subcommand == "" {
+			return nil
+		}
+		return fmt.Errorf("codex.transport %q selects non-interactive exec mode; remove codex.args subcommand %q", transport, subcommand)
 	default:
 		return fmt.Errorf("unsupported codex.transport %q", transport)
 	}

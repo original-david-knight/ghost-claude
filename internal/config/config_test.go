@@ -420,32 +420,95 @@ steps:
 	}
 }
 
-func TestLoadRejectsNonTUITransportSettings(t *testing.T) {
+func TestLoadAcceptsConfiguredAgentTransports(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `claude:
+  transport: print
+codex:
+  transport: exec
+steps:
+  - name: implement
+    type: codex
+    prompt: implement
+  - name: review
+    type: claude
+    prompt: review
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.Transport != ClaudeTransportPrint {
+		t.Fatalf("expected claude transport %q, got %q", ClaudeTransportPrint, cfg.Claude.Transport)
+	}
+	if cfg.Codex.Transport != CodexTransportExec {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportExec, cfg.Codex.Transport)
+	}
+}
+
+func TestLoadNormalizesConfiguredAgentTransports(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `claude:
+  transport: " PRINT "
+codex:
+  transport: " EXEC "
+steps:
+  - name: implement
+    type: codex
+    prompt: implement
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.Transport != ClaudeTransportPrint {
+		t.Fatalf("expected claude transport %q, got %q", ClaudeTransportPrint, cfg.Claude.Transport)
+	}
+	if cfg.Codex.Transport != CodexTransportExec {
+		t.Fatalf("expected codex transport %q, got %q", CodexTransportExec, cfg.Codex.Transport)
+	}
+}
+
+func TestLoadRejectsUnknownTransportSettings(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
 		want    string
 	}{
 		{
-			name: "claude print",
+			name: "claude stream",
 			content: `claude:
-  transport: print
+  transport: stream
 steps:
   - name: inspect
     prompt: inspect
 `,
-			want: `claude.transport "print" is no longer supported`,
+			want: `unsupported claude.transport "stream"`,
 		},
 		{
-			name: "codex exec",
+			name: "codex pty",
 			content: `codex:
-  transport: exec
+  transport: pty
 steps:
   - name: inspect
     type: codex
     prompt: inspect
 `,
-			want: `codex.transport "exec" is no longer supported`,
+			want: `unsupported codex.transport "pty"`,
 		},
 	}
 
@@ -459,12 +522,38 @@ steps:
 
 			_, err := Load(configPath)
 			if err == nil {
-				t.Fatal("expected Load to reject non-TUI transport")
+				t.Fatal("expected Load to reject unknown transport")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsCodexSubcommandWithExecTransport(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `codex:
+  transport: exec
+  args:
+    - exec
+steps:
+  - name: inspect
+    type: codex
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	_, err := Load(configPath)
+	if err == nil {
+		t.Fatal("expected Load to reject redundant exec subcommand")
+	}
+	if !strings.Contains(err.Error(), `codex.transport "exec" selects non-interactive exec mode; remove codex.args subcommand "exec"`) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

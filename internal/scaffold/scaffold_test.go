@@ -28,6 +28,7 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 		t.Fatalf("expected plan mode sample config, got %q", string(configContent))
 	}
 	assertScaffoldedParallelDefaults(t, configPath, string(configContent))
+	assertScaffoldedTransportComments(t, string(configContent))
 	if !strings.Contains(string(configContent), "codex:") {
 		t.Fatalf("expected scaffolded config to define codex, got %q", string(configContent))
 	}
@@ -127,6 +128,7 @@ func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 		t.Fatalf("expected sample config content, got %q", string(configContent))
 	}
 	assertScaffoldedParallelDefaults(t, configPath, string(configContent))
+	assertScaffoldedTransportComments(t, string(configContent))
 	if !strings.Contains(string(configContent), "type: agent") || !strings.Contains(string(configContent), "actor: coder") {
 		t.Fatalf("expected scaffolded config to use runtime-resolved coder steps, got %q", string(configContent))
 	}
@@ -192,5 +194,24 @@ func assertScaffoldedParallelDefaults(t *testing.T, configPath, content string) 
 	}
 	if cfg.EffectiveParallelism() != config.DefaultParallelMaxParallelism {
 		t.Fatalf("expected scaffolded config to use default parallelism %d, got %d", config.DefaultParallelMaxParallelism, cfg.EffectiveParallelism())
+	}
+}
+
+func assertScaffoldedTransportComments(t *testing.T, content string) {
+	t.Helper()
+
+	for _, want := range []string{
+		"transport: tui keeps a human-watchable Claude session",
+		"Change to print for non-interactive orchestrated agent steps",
+		"transport: tui keeps a human-watchable Codex session",
+		"Change to exec for non-interactive orchestrated agent steps",
+		"do not include Codex subcommands such as exec",
+		"execute-task and address-peer-review can",
+		"peer-review can use claude.transport=print",
+		"Keep transport=tui for steps that need a live, human-watchable session",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected scaffolded config to document transport option %q, got %q", want, content)
+		}
 	}
 }

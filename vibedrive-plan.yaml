@@ -230,7 +230,7 @@ tasks:
       title: Add agent transport selection to config schema and scaffold
       details: |
         Today vibedrive.yaml has claude.transport and codex.transport with only "tui" supported. Extend the config to support transport=exec for codex and transport=print for claude, validated by config tests. Document the new transport semantics in docs/contracts/agent-transport.md, including how prompts are passed, how outputs are read, and what step types are compatible. Update the init scaffold so new projects can opt into the non-interactive transports for the orchestrated workflow steps while keeping TUI for any step that needs a human-watchable session. Do not implement the new transports here; this task is the schema, validation, scaffold defaults, and contract.
-      status: todo
+      status: done
       workflow: implement
       component: config-scaffold
       owns_paths:
