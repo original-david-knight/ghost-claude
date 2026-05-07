@@ -245,7 +245,7 @@ func (m *titleMonitor) Consume(chunk []byte) {
 	}
 
 	recentVisible := m.text.consume(chunk)
-	trustDetected := strings.Contains(recentVisible, "yesitrustthisfolder")
+	trustDetected := claudeTrustPromptCompact(recentVisible)
 	if trustDetected && !m.trustPromptDetected {
 		m.trustPrompts++
 	}
@@ -264,6 +264,10 @@ func (m *titleMonitor) snapshot() titleSnapshot {
 }
 
 func classifyTitle(title string) (string, bool) {
+	return classifyClaudeTmuxTitle(title)
+}
+
+func classifyClaudeTmuxTitle(title string) (string, bool) {
 	trimmed := strings.TrimSpace(title)
 	if trimmed == "" {
 		return "", false
@@ -272,6 +276,14 @@ func classifyTitle(title string) (string, bool) {
 		return "idle", true
 	}
 	return "busy", true
+}
+
+func claudeTrustPrompt(text string) bool {
+	return claudeTrustPromptCompact(ptyrunner.CompactVisibleText([]byte(text)))
+}
+
+func claudeTrustPromptCompact(compact string) bool {
+	return strings.Contains(compact, "yesitrustthisfolder")
 }
 
 func (p *visibleTextParser) consume(chunk []byte) string {

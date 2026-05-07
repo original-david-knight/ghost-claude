@@ -183,7 +183,7 @@ tasks:
       title: Add captured-screen golden tests for the Claude detector
       details: |
         Mirror codex-screen-detector-test-harness for claude. Capture working and stuck claude TUI recordings, save fixtures, and write tests that exercise classifyClaudeTmuxTitle and the trust-prompt detection in pkg/agentcli/claude. Do not change detector behavior in this task; the goal is making future changes safe.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - implement-diagnostics-package

@@ -1,0 +1,24 @@
+{
+  "name": "ambiguous-permission-error",
+  "branch": "stuck/ambiguous state",
+  "source": "tmux capture from claude-code 2.1.132 after an invalid permission mode left the pane unusable on 2026-05-07",
+  "workdir": "/tmp/tmp.oOaSRl2a5g/work",
+  "title": "cosmic",
+  "screen_file": "ambiguous-permission-error.txt",
+  "want": {
+    "classifyClaudeTmuxTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "classifyTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "claudeTrustPrompt": false,
+    "titleMonitorSnapshot": {
+      "idleTransitions": 0,
+      "busyTransitions": 1,
+      "trustPrompts": 0
+    }
+  }
+}

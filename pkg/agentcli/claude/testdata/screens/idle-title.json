@@ -1,0 +1,24 @@
+{
+  "name": "idle-title",
+  "branch": "idle title",
+  "source": "tmux capture from claude-code 2.1.132 idle pane in this worktree on 2026-05-07",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/001-claude-screen-detector-test-harness-406583e13bd3",
+  "title": "✳ Claude Code",
+  "screen_file": "idle-title.txt",
+  "want": {
+    "classifyClaudeTmuxTitle": {
+      "state": "idle",
+      "ok": true
+    },
+    "classifyTitle": {
+      "state": "idle",
+      "ok": true
+    },
+    "claudeTrustPrompt": false,
+    "titleMonitorSnapshot": {
+      "idleTransitions": 1,
+      "busyTransitions": 0,
+      "trustPrompts": 0
+    }
+  }
+}

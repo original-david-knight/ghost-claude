@@ -1,0 +1,24 @@
+{
+  "name": "busy-title",
+  "branch": "busy title",
+  "source": "tmux capture from claude-code 2.1.132 while a Bash sleep tool was running in this worktree on 2026-05-07",
+  "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/001-claude-screen-detector-test-harness-406583e13bd3",
+  "title": "⠐ Run sleep command and verify output",
+  "screen_file": "working-screen.txt",
+  "want": {
+    "classifyClaudeTmuxTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "classifyTitle": {
+      "state": "busy",
+      "ok": true
+    },
+    "claudeTrustPrompt": false,
+    "titleMonitorSnapshot": {
+      "idleTransitions": 0,
+      "busyTransitions": 1,
+      "trustPrompts": 0
+    }
+  }
+}
