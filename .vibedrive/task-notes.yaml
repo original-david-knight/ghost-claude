@@ -8,3 +8,6 @@ tasks:
     - id: agent-transport-config-contract
       status: done
       notes: 'Config now accepts claude transport tui|print and codex transport tui|exec; scaffold keeps tui defaults and documents future non-interactive defaults: coder execute/address/checkpoint steps via codex exec, reviewer peer-review/checkpoint steps via claude print, finalize stays exec. New transports remain client implementation follow-ups.'
+    - id: implement-diagnostics-package
+      status: done
+      notes: 'Implemented internal/diagnostics with atomic captures, contract size bounds, path-safe identity segments, manifest entries for written/unavailable/not-applicable artifacts, and same-step concurrency locking. Contract gap noted: manifest is listed as an artifact, so the package computes a stable manifest self-entry size.'

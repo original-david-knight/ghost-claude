@@ -80,7 +80,7 @@ tasks:
       title: Implement internal/diagnostics capture package
       details: |
         Build the internal/diagnostics package that the runner and tmux clients will call. Provide a Capturer with methods that take a run/task/step identity and write artifacts atomically into .vibedrive/debug/<run-id>/<task-id>/<step-name>/. Include helpers for writing pane snapshots, title-transition logs, prompt payloads, and exec output tails with the bounded sizes defined by the contract. Do not wire callers in this task; only the package and its tests.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - define-diagnostics-contract
