@@ -323,7 +323,7 @@ tasks:
       title: End-to-end run on a target project verifies the recovery
       details: |
         Run vibedrive end-to-end against a fresh checkout of a Rust project (meetspace shape) and a non-Rust project (ECSNet shape) using the new defaults. For each project capture a diagnostics bundle from at least one intentional failure (e.g. a verify_commands failure) and confirm the bundle contents match docs/contracts/diagnostics.md. Confirm that finalize commits stay quiet, that no broken-pipe occurs even with build artifacts present, and that an unknown-state TUI failure produces an actionable error with a diagnostics path. If any acceptance criterion fails, this task records the failure and stays in_progress.
-      status: todo
+      status: done
       workflow: checkpoint
       deps:
         - fix-git-commit-output-volume
