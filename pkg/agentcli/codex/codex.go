@@ -10,6 +10,7 @@ import (
 
 const (
 	TransportTUI          = "tui"
+	TransportExec         = "exec"
 	defaultStartupTimeout = 30 * time.Second
 )
 
@@ -42,13 +43,6 @@ func New(command string, args []string, workdir, transport, startupTimeout strin
 	if len(baseArgs) == 0 {
 		baseArgs = defaultArgs()
 	}
-	if subcommand := Subcommand(baseArgs); !IsInteractiveSubcommand(subcommand) {
-		if IsNonInteractiveSubcommand(subcommand) {
-			return nil, fmt.Errorf("codex args subcommand %q is non-interactive and is not supported for TUI agent steps", subcommand)
-		}
-		return nil, fmt.Errorf("codex args subcommand %q is not supported for TUI agent steps", subcommand)
-	}
-
 	timeout := defaultStartupTimeout
 	if strings.TrimSpace(startupTimeout) != "" {
 		parsedTimeout, err := time.ParseDuration(startupTimeout)
@@ -70,8 +64,16 @@ func New(command string, args []string, workdir, transport, startupTimeout strin
 
 	switch client.transport {
 	case TransportTUI:
-	case "exec":
-		return nil, fmt.Errorf("codex transport %q is no longer supported; use %q", transport, TransportTUI)
+		if subcommand := Subcommand(baseArgs); !IsInteractiveSubcommand(subcommand) {
+			if IsNonInteractiveSubcommand(subcommand) {
+				return nil, fmt.Errorf("codex args subcommand %q is non-interactive and is not supported for TUI agent steps", subcommand)
+			}
+			return nil, fmt.Errorf("codex args subcommand %q is not supported for TUI agent steps", subcommand)
+		}
+	case TransportExec:
+		if subcommand := Subcommand(baseArgs); subcommand != "" {
+			return nil, fmt.Errorf("codex transport %q selects non-interactive exec mode; remove codex args subcommand %q", client.transport, subcommand)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported codex transport %q", transport)
 	}
@@ -87,6 +89,8 @@ func (c *Client) RunPrompt(ctx context.Context, session *Session, prompt string)
 	switch c.transport {
 	case TransportTUI:
 		return c.runTUIPrompt(ctx, session, prompt)
+	case TransportExec:
+		return c.runExecPrompt(ctx, prompt)
 	default:
 		return fmt.Errorf("unsupported transport %q", c.transport)
 	}
@@ -96,6 +100,8 @@ func (c *Client) RunInteractivePrompt(ctx context.Context, session *Session, pro
 	switch c.transport {
 	case TransportTUI:
 		return c.runTUIInteractivePrompt(ctx, session, prompt)
+	case TransportExec:
+		return fmt.Errorf("codex transport %q does not support interactive TUI prompts; use %q", TransportExec, TransportTUI)
 	default:
 		return fmt.Errorf("unsupported transport %q", c.transport)
 	}

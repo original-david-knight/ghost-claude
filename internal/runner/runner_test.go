@@ -34,6 +34,7 @@ type fakeAgent struct {
 	planPath        string
 	closeEvents     *[]string
 	closeLabel      string
+	fullscreen      bool
 	onRun           func(string) error
 }
 
@@ -62,7 +63,7 @@ func (f *fakeAgent) Close(session *claude.Session) error {
 }
 
 func (f *fakeAgent) IsFullscreenTUI() bool {
-	return false
+	return f.fullscreen
 }
 
 type fakeCodex struct {
@@ -71,6 +72,7 @@ type fakeCodex struct {
 	planPath        string
 	closeEvents     *[]string
 	closeLabel      string
+	fullscreen      bool
 	onRun           func(string) error
 }
 
@@ -98,7 +100,7 @@ func (f *fakeCodex) Close(_ *codex.Session) error {
 }
 
 func (f *fakeCodex) IsFullscreenTUI() bool {
-	return false
+	return f.fullscreen
 }
 
 func TestNewRejectsPinnedAgentVersionMismatch(t *testing.T) {
@@ -707,6 +709,108 @@ exit 7
 	entry := runnerArtifactEntry(t, manifest, diagnostics.ArtifactExecStdout)
 	if !entry.Truncated || entry.LimitBytes != diagnostics.ExecOutputLimit || entry.OriginalBytes <= diagnostics.ExecOutputLimit || entry.SHA256 == "" {
 		t.Fatalf("stdout manifest entry missing bounded tail metadata: %#v", entry)
+	}
+}
+
+func TestRunStepCodexExecTransportRunsRenderedPrompt(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-codex.py")
+	capturePath := filepath.Join(dir, "capture.json")
+	script := `#!/usr/bin/env python3
+import json
+import os
+import sys
+
+prompt = sys.stdin.read()
+with open(os.environ["CODEX_CAPTURE"], "w") as capture:
+    json.dump({"args": sys.argv[1:], "prompt": prompt}, capture)
+sys.stdout.write("codex exec complete\n")
+sys.stdout.flush()
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	t.Setenv("CODEX_CAPTURE", capturePath)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	codexAgent, err := codex.New(scriptPath, []string{"--model", "test"}, dir, codex.TransportExec, "1s", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("codex.New returned error: %v", err)
+	}
+	r := &Runner{
+		cfg: &config.Config{
+			Workspace: dir,
+		},
+		stdout: &stdout,
+		stderr: &stderr,
+		codex:  codexAgent,
+	}
+
+	err = r.runStep(context.Background(), nil, &codex.Session{}, config.Step{
+		Name:   "implement",
+		Type:   config.StepTypeCodex,
+		Prompt: "implement {{ .Task.ID }} in {{ .Workspace }}",
+	}, TemplateData{
+		Task:      plan.Task{ID: "scaffold"},
+		Workspace: dir,
+	})
+	if err != nil {
+		t.Fatalf("runStep returned error: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	var capture struct {
+		Args   []string `json:"args"`
+		Prompt string   `json:"prompt"`
+	}
+	readRunnerJSONFile(t, capturePath, &capture)
+	if strings.Join(capture.Args, "\x00") != strings.Join([]string{"exec", "--model", "test"}, "\x00") {
+		t.Fatalf("unexpected codex argv: %#v", capture.Args)
+	}
+	wantPrompt := "implement scaffold in " + dir
+	if capture.Prompt != wantPrompt {
+		t.Fatalf("prompt = %q, want %q", capture.Prompt, wantPrompt)
+	}
+	if strings.Contains(stdout.String(), "\x1b]0;") {
+		t.Fatalf("expected non-TUI exec output, got terminal title sequence in %q", stdout.String())
+	}
+}
+
+func TestParallelBatchNeedsTmuxOnlyForFullscreenAgents(t *testing.T) {
+	cfg := &config.Config{
+		Workspace:       t.TempDir(),
+		DefaultWorkflow: "implement",
+		Coder:           config.AgentCodex,
+		Reviewer:        config.AgentClaude,
+		Codex: config.CodexConfig{
+			Transport: config.CodexTransportExec,
+		},
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{Name: "implement", Type: config.StepTypeCodex, Prompt: "implement"},
+				},
+			},
+		},
+	}
+	task := plan.Task{ID: "scaffold", Workflow: "implement"}
+
+	r := &Runner{cfg: cfg, codex: &fakeCodex{}}
+	needsTmux, err := r.parallelBatchNeedsTmux([]plan.Task{task})
+	if err != nil {
+		t.Fatalf("parallelBatchNeedsTmux returned error: %v", err)
+	}
+	if needsTmux {
+		t.Fatal("expected codex exec transport not to require parallel tmux")
+	}
+
+	r.codex = &fakeCodex{fullscreen: true}
+	needsTmux, err = r.parallelBatchNeedsTmux([]plan.Task{task})
+	if err != nil {
+		t.Fatalf("parallelBatchNeedsTmux returned error: %v", err)
+	}
+	if !needsTmux {
+		t.Fatal("expected fullscreen codex transport to require parallel tmux")
 	}
 }
 
@@ -1333,7 +1437,7 @@ tasks:
 		},
 	}
 
-	agent := &fakeAgent{planPath: planPath}
+	agent := &fakeAgent{planPath: planPath, fullscreen: true}
 	r := &Runner{
 		cfg:    cfg,
 		stdout: io.Discard,

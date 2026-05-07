@@ -1129,7 +1129,7 @@ func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (
 	if needsClaude {
 		var claudeAgent claudeClient
 		var err error
-		if r.tmux != nil {
+		if r.tmux != nil && r.agentTargetNeedsTmux(config.AgentClaude) {
 			claudeAgent, err = newTmuxClaudeClient(
 				workerCfg.Claude.Command,
 				workerCfg.Claude.Args,
@@ -1157,7 +1157,7 @@ func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (
 	if needsCodex {
 		var codexAgent codexClient
 		var err error
-		if r.tmux != nil {
+		if r.tmux != nil && r.agentTargetNeedsTmux(config.AgentCodex) {
 			codexAgent, err = newTmuxCodexClient(
 				workerCfg.Codex.Command,
 				workerCfg.Codex.Args,
@@ -1212,15 +1212,40 @@ func (r *Runner) parallelBatchNeedsTmux(tasks []plan.Task) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		needsClaude, needsCodex, err := r.agentTargetsForSteps(steps)
-		if err != nil {
-			return false, err
-		}
-		if needsClaude || needsCodex {
-			return true, nil
+		for _, step := range steps {
+			if step.Disabled {
+				continue
+			}
+			target, err := r.stepAgent(step)
+			if err != nil {
+				return false, err
+			}
+			if r.agentTargetNeedsTmux(target) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+func (r *Runner) agentTargetNeedsTmux(target string) bool {
+	if r == nil || r.cfg == nil {
+		return false
+	}
+	switch target {
+	case config.AgentClaude:
+		if r.claude != nil {
+			return r.claude.IsFullscreenTUI()
+		}
+		return strings.EqualFold(strings.TrimSpace(r.cfg.Claude.Transport), config.ClaudeTransportTUI)
+	case config.AgentCodex:
+		if r.codex != nil {
+			return r.codex.IsFullscreenTUI()
+		}
+		return strings.EqualFold(strings.TrimSpace(r.cfg.Codex.Transport), config.CodexTransportTUI)
+	default:
+		return false
+	}
 }
 
 func (r *Runner) ensureParallelTmux(ctx context.Context) error {
@@ -2323,6 +2348,15 @@ func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *cla
 		if r.codex == nil {
 			return fmt.Errorf("codex step %q requires a codex client", stepName)
 		}
+		ctx = codex.WithDiagnostics(ctx, codex.Diagnostics{
+			Identity: diagnostics.Identity{
+				RunID:    r.runStateID,
+				TaskID:   taskID,
+				StepName: stepName,
+			},
+			ParentStdout: r.parentStdoutArtifact(),
+			ParentStderr: r.parentStderrArtifact(),
+		})
 		return r.codex.RunPrompt(ctx, codexSession, prompt)
 	default:
 		return fmt.Errorf("step %q does not target an agent", stepName)

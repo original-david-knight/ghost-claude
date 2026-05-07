@@ -252,7 +252,7 @@ tasks:
       title: Implement non-interactive codex exec transport
       details: |
         Implement transport=exec for codex by invoking codex's non-interactive subcommand (codex exec) with the rendered prompt. Reuse the existing client interface so the runner does not need to know which transport is in use. Capture stdout/stderr per the diagnostics contract. Reject step types that are documented as TUI-only (and document them in the agent-transport contract if any are discovered). Keep the TUI implementation untouched for the create/init flows that need to remain interactive.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - agent-transport-config-contract
