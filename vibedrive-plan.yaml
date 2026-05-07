@@ -118,7 +118,7 @@ tasks:
       title: Cap runner exec output buffer and capture diagnostics on failure
       details: |
         The exec step in internal/runner/runner.go currently writes child stdout/stderr through io.MultiWriter into an unbounded bytes.Buffer. Replace that with a bounded ring/tail buffer (size from the diagnostics contract). On non-zero exit, call the diagnostics Capturer to write the full tail, the rendered command, working directory, and env to the per-step debug directory before returning the wrapped error. Keep the existing user-visible error message format so log readers don't break. Do not modify tmux client code in this task.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - implement-diagnostics-package

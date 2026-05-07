@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 
 	"vibedrive/internal/automation"
 	"vibedrive/internal/config"
+	"vibedrive/internal/diagnostics"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/runstate"
 	"vibedrive/internal/tasknotes"
@@ -526,6 +528,126 @@ func TestRunStepExecErrorIncludesCommandOutput(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "verify failed") {
 		t.Fatalf("expected stderr to receive command output, got %q", stderr.String())
+	}
+}
+
+func TestRunStepExecFailureCapturesBoundedDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	loops := diagnostics.ExecOutputLimit/1024 + 8
+	chunk := strings.Repeat("x", 1024)
+	script := fmt.Sprintf(`chunk='%s'
+printf 'STDOUT-BEGIN\n'
+i=0
+while [ "$i" -lt %d ]; do
+  printf '%%s' "$chunk"
+  i=$((i + 1))
+done
+printf 'STDOUT-TAIL\n'
+printf 'STDERR-BEGIN\n' >&2
+i=0
+while [ "$i" -lt %d ]; do
+  printf '%%s' "$chunk" >&2
+  i=$((i + 1))
+done
+printf 'STDERR-TAIL\n' >&2
+exit 7
+`, chunk, loops, loops)
+
+	r := &Runner{
+		cfg: &config.Config{
+			Workspace: dir,
+		},
+		stdout: io.Discard,
+		stderr: io.Discard,
+	}
+
+	err := r.runStep(context.Background(), nil, nil, config.Step{
+		Name:    "execute",
+		Type:    config.StepTypeExec,
+		Command: []string{"sh", "-c", script},
+		Env: map[string]string{
+			"API_TOKEN": "secret",
+			"MODE":      "failure",
+		},
+	}, TemplateData{
+		Task: plan.Task{ID: "big-output"},
+	})
+	if err == nil {
+		t.Fatal("expected runStep to fail")
+	}
+	if !strings.Contains(err.Error(), "run command: exit status 7\ncommand output:\n") {
+		t.Fatalf("expected existing command error format, got %v", err)
+	}
+	if (!strings.Contains(err.Error(), "STDOUT-TAIL") && !strings.Contains(err.Error(), "STDERR-TAIL")) ||
+		strings.Contains(err.Error(), "STDOUT-BEGIN") ||
+		strings.Contains(err.Error(), "STDERR-BEGIN") {
+		t.Fatalf("expected visible command output to use the bounded tail, got %v", err)
+	}
+
+	stepDir, err := diagnostics.New(dir).StepDir(diagnostics.Identity{
+		RunID:    r.runStateID,
+		TaskID:   "big-output",
+		StepName: "execute",
+	})
+	if err != nil {
+		t.Fatalf("StepDir returned error: %v", err)
+	}
+
+	stdoutTail := mustReadRunnerBytes(t, filepath.Join(stepDir, "exec", "stdout-tail.txt"))
+	if len(stdoutTail) != diagnostics.ExecOutputLimit {
+		t.Fatalf("stdout tail length = %d, want %d", len(stdoutTail), diagnostics.ExecOutputLimit)
+	}
+	if bytes.Contains(stdoutTail, []byte("STDOUT-BEGIN")) || !bytes.HasSuffix(stdoutTail, []byte("STDOUT-TAIL\n")) {
+		t.Fatalf("stdout diagnostics did not preserve only the tail")
+	}
+
+	stderrTail := mustReadRunnerBytes(t, filepath.Join(stepDir, "exec", "stderr-tail.txt"))
+	if len(stderrTail) != diagnostics.ExecOutputLimit {
+		t.Fatalf("stderr tail length = %d, want %d", len(stderrTail), diagnostics.ExecOutputLimit)
+	}
+	if bytes.Contains(stderrTail, []byte("STDERR-BEGIN")) || !bytes.HasSuffix(stderrTail, []byte("STDERR-TAIL\n")) {
+		t.Fatalf("stderr diagnostics did not preserve only the tail")
+	}
+
+	combinedTail := mustReadRunnerBytes(t, filepath.Join(stepDir, "exec", "combined-tail.txt"))
+	if len(combinedTail) != diagnostics.ExecOutputLimit {
+		t.Fatalf("combined tail length = %d, want %d", len(combinedTail), diagnostics.ExecOutputLimit)
+	}
+	if bytes.Contains(combinedTail, []byte("STDOUT-BEGIN")) ||
+		bytes.Contains(combinedTail, []byte("STDERR-BEGIN")) ||
+		(!bytes.Contains(combinedTail, []byte("STDOUT-TAIL\n")) && !bytes.Contains(combinedTail, []byte("STDERR-TAIL\n"))) {
+		t.Fatalf("combined diagnostics did not preserve the observed output tail")
+	}
+
+	var command diagnostics.ExecCommand
+	readRunnerJSONFile(t, filepath.Join(stepDir, "exec", "command.json"), &command)
+	if strings.Join(command.Argv, "\x00") != strings.Join([]string{"sh", "-c", script}, "\x00") {
+		t.Fatalf("command argv was not captured: %#v", command.Argv)
+	}
+	if command.WorkingDir != dir {
+		t.Fatalf("working_dir = %q, want %q", command.WorkingDir, dir)
+	}
+	if command.ExitCode == nil || *command.ExitCode != 7 {
+		t.Fatalf("exit_code = %#v, want 7", command.ExitCode)
+	}
+	if command.Env.Step["MODE"] != "failure" {
+		t.Fatalf("MODE env was not captured: %#v", command.Env.Step)
+	}
+	if command.Env.Step["API_TOKEN"] != "[REDACTED]" {
+		t.Fatalf("API_TOKEN env was not redacted: %#v", command.Env.Step)
+	}
+	if len(command.Env.InheritedKeys) == 0 {
+		t.Fatal("expected inherited environment keys in command metadata")
+	}
+
+	var manifest diagnostics.Manifest
+	readRunnerJSONFile(t, filepath.Join(stepDir, "manifest.json"), &manifest)
+	if manifest.Failure.Path != "exec_step_non_zero_exit" || manifest.Transport.Kind != "exec" {
+		t.Fatalf("unexpected diagnostics manifest: %#v", manifest)
+	}
+	entry := runnerArtifactEntry(t, manifest, diagnostics.ArtifactExecStdout)
+	if !entry.Truncated || entry.LimitBytes != diagnostics.ExecOutputLimit || entry.OriginalBytes <= diagnostics.ExecOutputLimit || entry.SHA256 == "" {
+		t.Fatalf("stdout manifest entry missing bounded tail metadata: %#v", entry)
 	}
 }
 
@@ -2411,6 +2533,37 @@ func mustReadRunnerFile(t *testing.T, path string) string {
 		t.Fatalf("ReadFile(%q) returned error: %v", path, err)
 	}
 	return string(data)
+}
+
+func mustReadRunnerBytes(t *testing.T, path string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", path, err)
+	}
+	return data
+}
+
+func readRunnerJSONFile(t *testing.T, path string, target any) {
+	t.Helper()
+
+	data := mustReadRunnerBytes(t, path)
+	if err := json.Unmarshal(data, target); err != nil {
+		t.Fatalf("Unmarshal(%q) returned error: %v", path, err)
+	}
+}
+
+func runnerArtifactEntry(t *testing.T, manifest diagnostics.Manifest, kind string) diagnostics.ArtifactEntry {
+	t.Helper()
+
+	for _, entry := range manifest.Artifacts {
+		if entry.Kind == kind {
+			return entry
+		}
+	}
+	t.Fatalf("artifact %q not found in manifest: %#v", kind, manifest.Artifacts)
+	return diagnostics.ArtifactEntry{}
 }
 
 func writeRunnerVersionCommand(t *testing.T, dir, name, version string) string {

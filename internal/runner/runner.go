@@ -20,6 +20,7 @@ import (
 
 	"vibedrive/internal/automation"
 	"vibedrive/internal/config"
+	"vibedrive/internal/diagnostics"
 	"vibedrive/internal/plan"
 	"vibedrive/internal/render"
 	"vibedrive/internal/runstate"
@@ -41,6 +42,9 @@ type Runner struct {
 	newCodexSession func() (*codex.Session, error)
 	tmux            *tmuxagent.Controller
 	tmuxAnnounced   bool
+
+	parentStdoutTail *diagnostics.TailBuffer
+	parentStderrTail *diagnostics.TailBuffer
 
 	runStatePath      string
 	runStateID        string
@@ -153,6 +157,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("plan_file is required")
 	}
 	r.ensureRunState()
+	r.ensureParentDiagnosticTails()
 	if !r.cfg.DryRun {
 		defer r.clearRuntimeRun()
 	}
@@ -1974,6 +1979,146 @@ func (r *Runner) runtimeRun() runstate.Run {
 	}
 }
 
+func (r *Runner) ensureParentDiagnosticTails() {
+	if r == nil {
+		return
+	}
+	if r.stdout != nil && r.parentStdoutTail == nil {
+		tail := diagnostics.NewTailBuffer(diagnostics.ParentOutputLimit)
+		r.stdout = io.MultiWriter(r.stdout, tail)
+		r.parentStdoutTail = tail
+	}
+	if r.stderr != nil && r.parentStderrTail == nil {
+		tail := diagnostics.NewTailBuffer(diagnostics.ParentOutputLimit)
+		r.stderr = io.MultiWriter(r.stderr, tail)
+		r.parentStderrTail = tail
+	}
+}
+
+func (r *Runner) diagnosticsWorkspace() string {
+	if r != nil && strings.TrimSpace(r.runStateWorkspace) != "" {
+		return r.runStateWorkspace
+	}
+	if r != nil && r.cfg != nil && strings.TrimSpace(r.cfg.Workspace) != "" {
+		return r.cfg.Workspace
+	}
+	return "."
+}
+
+func (r *Runner) parentStdoutArtifact() diagnostics.ByteArtifact {
+	if r == nil || r.parentStdoutTail == nil {
+		return diagnostics.UnavailableBytes()
+	}
+	return r.parentStdoutTail.Snapshot().Bytes()
+}
+
+func (r *Runner) parentStderrArtifact() diagnostics.ByteArtifact {
+	if r == nil || r.parentStderrTail == nil {
+		return diagnostics.UnavailableBytes()
+	}
+	return r.parentStderrTail.Snapshot().Bytes()
+}
+
+func (r *Runner) captureExecFailure(
+	err error,
+	command []string,
+	workdir string,
+	envMap map[string]string,
+	stdoutSnapshot diagnostics.TailSnapshot,
+	stderrSnapshot diagnostics.TailSnapshot,
+	combinedSnapshot diagnostics.TailSnapshot,
+	stepCtx context.Context,
+	step config.Step,
+	data TemplateData,
+) {
+	r.ensureRunState()
+	exitCode, signal := execFailureStatus(err)
+	execCommand := diagnostics.ExecCommand{
+		Argv:       append([]string(nil), command...),
+		WorkingDir: workdir,
+		ExitCode:   exitCode,
+		Signal:     signal,
+		TimedOut:   errors.Is(stepCtx.Err(), context.DeadlineExceeded),
+		Env: diagnostics.ExecEnvironment{
+			Step:          copyStringMap(envMap),
+			InheritedKeys: inheritedEnvKeys(os.Environ()),
+		},
+	}
+	if errors.Is(stepCtx.Err(), context.Canceled) && !execCommand.TimedOut {
+		execCommand.Extra = map[string]any{"cancelled": true}
+	}
+
+	_, captureErr := diagnostics.New(r.diagnosticsWorkspace()).CaptureExec(diagnostics.ExecCapture{
+		Identity: diagnostics.Identity{
+			RunID:    r.runStateID,
+			TaskID:   data.Task.ID,
+			StepName: step.Name,
+		},
+		Failure: diagnostics.Failure{
+			Path:    "exec_step_non_zero_exit",
+			Message: fmt.Sprintf("run command: %v", err),
+		},
+		Transport:    diagnostics.Transport{Kind: "exec"},
+		Command:      execCommand,
+		Stdout:       stdoutSnapshot.Bytes(),
+		Stderr:       stderrSnapshot.Bytes(),
+		Combined:     combinedSnapshot.Bytes(),
+		ParentStdout: r.parentStdoutArtifact(),
+		ParentStderr: r.parentStderrArtifact(),
+	})
+	if captureErr != nil && r.stderr != nil {
+		fmt.Fprintf(r.stderr, "warning: failed to capture exec diagnostics: %v\n", captureErr)
+	}
+}
+
+func execFailureStatus(err error) (*int, string) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return nil, ""
+	}
+	exitCode := exitErr.ExitCode()
+	if exitCode >= 0 {
+		return &exitCode, ""
+	}
+	if exitErr.ProcessState == nil {
+		return nil, ""
+	}
+	const signalPrefix = "signal: "
+	state := exitErr.ProcessState.String()
+	if strings.HasPrefix(state, signalPrefix) {
+		return nil, strings.TrimPrefix(state, signalPrefix)
+	}
+	return nil, ""
+}
+
+func inheritedEnvKeys(env []string) []string {
+	seen := make(map[string]struct{}, len(env))
+	keys := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
 func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSession *codex.Session, step config.Step, data TemplateData) error {
 	stepCtx := ctx
 	var cancel context.CancelFunc
@@ -2054,6 +2199,8 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			}
 			return r.runAgentPrompt(stepCtx, target, session, codexSession, step.Name, prompt)
 		case config.StepTypeExec:
+			r.ensureParentDiagnosticTails()
+
 			command, err := render.Strings(step.Command, data)
 			if err != nil {
 				return fmt.Errorf("render command: %w", err)
@@ -2089,16 +2236,18 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 
 			cmd := exec.CommandContext(stepCtx, command[0], command[1:]...)
 			cmd.Dir = workdir
-			var output bytes.Buffer
+			stdoutTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
+			stderrTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
+			combinedTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
 			if r.stdout != nil {
-				cmd.Stdout = io.MultiWriter(r.stdout, &output)
+				cmd.Stdout = io.MultiWriter(r.stdout, stdoutTail, combinedTail)
 			} else {
-				cmd.Stdout = &output
+				cmd.Stdout = io.MultiWriter(stdoutTail, combinedTail)
 			}
 			if r.stderr != nil {
-				cmd.Stderr = io.MultiWriter(r.stderr, &output)
+				cmd.Stderr = io.MultiWriter(r.stderr, stderrTail, combinedTail)
 			} else {
-				cmd.Stderr = &output
+				cmd.Stderr = io.MultiWriter(stderrTail, combinedTail)
 			}
 			cmd.Env = os.Environ()
 			for key, value := range envMap {
@@ -2106,7 +2255,11 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			}
 
 			if err := cmd.Run(); err != nil {
-				return fmt.Errorf("run command: %w%s", err, commandOutputSuffix(output.String()))
+				stdoutSnapshot := stdoutTail.Snapshot()
+				stderrSnapshot := stderrTail.Snapshot()
+				combinedSnapshot := combinedTail.Snapshot()
+				r.captureExecFailure(err, command, workdir, envMap, stdoutSnapshot, stderrSnapshot, combinedSnapshot, stepCtx, step, data)
+				return fmt.Errorf("run command: %w%s", err, commandOutputSuffix(string(combinedSnapshot.Data)))
 			}
 			return nil
 		default:

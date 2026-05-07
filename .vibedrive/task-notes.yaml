@@ -14,3 +14,6 @@ tasks:
     - id: pin-agent-cli-versions
       status: done
       notes: 'Addressed review: moved version enforcement from config.Load to runner.New so read-only config consumers can inspect pins; added tests for loader purity, claude/codex mismatches, unreadable commands, and runner startup enforcement. Edited internal/runner outside owns_paths because startup enforcement belongs there. Intentional upgrades: update the CLI, run <cli> --version, manually bump vibedrive.yaml, then rerun verification.'
+    - id: bound-runner-exec-output
+      status: done
+      notes: 'Exec steps now use diagnostics TailBuffer for stdout, stderr, and combined output, and capture exec diagnostics on command failure without changing the returned error format. Followup: future tmux/agent diagnostics should reuse the runner parent stdout/stderr tail capture instead of introducing separate parent-output buffers.'
