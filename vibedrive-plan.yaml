@@ -162,7 +162,7 @@ tasks:
       title: Add captured-screen golden tests for the Codex detector
       details: |
         Capture real terminal recordings from a working codex run and a stuck codex run (use the diagnostics output from a recent failure if available). Save them as fixtures alongside pkg/agentcli/codex/. Write tests that replay each fixture through classifyTitle, isBusyTitle, titleMatchesIdle, codexReadyScreen, codexTrustPrompt, and codexScreenState and assert the expected classifications. The point is to make every screen-scraping heuristic regression-detectable; do not change detector behavior in this task.
-      status: todo
+      status: in_progress
       workflow: implement
       deps:
         - implement-diagnostics-package

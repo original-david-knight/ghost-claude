@@ -20,3 +20,6 @@ tasks:
     - id: wire-tmux-diagnostics
       status: in_progress
       notes: 'Wired tmux TUI failures to diagnostics.Capturer for startup timeout, submit timeout, and unexpected exit. Added title-state history, prompt payload capture, pane snapshots, timing/counter metadata, and errors pointing at the debug directory. Touched internal/runner/runner.go outside owns_paths only to pass run/task/step identity into tmux clients via context. Pattern for fail-fast task: current submit loops still retry after unclassified/no-busy states; diagnostics now expose prompt attempt counts and state history for that decision. Parallel worker changes did not apply cleanly: git apply: exit status 1: error: patch failed: internal/runner/runner.go:2052 error: internal/runner/runner.go: patch does not apply. Recovery patch preserved at /home/david/workspace/vibedrive/.vibedrive/task-runs/recovery/wire-tmux-diagnostics-79568bb6d2f9/rejected.patch; the next coder run should reconcile useful changes from that patch.'
+    - id: codex-screen-detector-test-harness
+      status: in_progress
+      notes: 'Parallel worker failed: step "execute-task" failed: ask codex to create required outputs after step "execute-task": codex tmux tui did not start processing after 3 enter presses; last tmux pane output: 20 + 21 + gpt-5.5 xhigh · ~/workspace/vibedrive/.vibedrive/wo....'
