@@ -453,6 +453,169 @@ steps:
 	}
 }
 
+func TestLoadAcceptsPinnedAgentVersions(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+	claudeCommand := writeVersionCommand(t, dir, "fake-claude", "claude 1.2.3")
+	codexCommand := writeVersionCommand(t, dir, "fake-codex", "codex-cli 4.5.6")
+
+	content := fmt.Sprintf(`claude:
+  command: %q
+  version: "claude 1.2.3"
+codex:
+  command: %q
+  version: "codex-cli 4.5.6"
+steps:
+  - name: inspect
+    prompt: inspect
+`, claudeCommand, codexCommand)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.Version != "claude 1.2.3" {
+		t.Fatalf("expected claude version pin, got %q", cfg.Claude.Version)
+	}
+	if cfg.Codex.Version != "codex-cli 4.5.6" {
+		t.Fatalf("expected codex version pin, got %q", cfg.Codex.Version)
+	}
+}
+
+func TestLoadDoesNotResolvePinnedAgentVersions(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := fmt.Sprintf(`codex:
+  command: %q
+  version: "codex-cli 4.5.6"
+steps:
+  - name: inspect
+    type: codex
+    prompt: inspect
+`, filepath.Join(dir, "missing-codex"))
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Codex.Version != "codex-cli 4.5.6" {
+		t.Fatalf("expected codex version pin to load, got %q", cfg.Codex.Version)
+	}
+}
+
+func TestCheckPinnedAgentVersionsRejectsMismatchedAgentVersions(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         func(string) *Config
+		wantMessage string
+	}{
+		{
+			name: "claude",
+			cfg: func(dir string) *Config {
+				return &Config{
+					Workspace: dir,
+					Claude: ClaudeConfig{
+						Command: writeVersionCommand(t, dir, "fake-claude", "claude 1.2.4"),
+						Version: "claude 1.2.3",
+					},
+				}
+			},
+			wantMessage: `claude.version "claude 1.2.3" does not match live claude CLI version "claude 1.2.4"`,
+		},
+		{
+			name: "codex",
+			cfg: func(dir string) *Config {
+				return &Config{
+					Workspace: dir,
+					Codex: CodexConfig{
+						Command: writeVersionCommand(t, dir, "fake-codex", "codex-cli 4.5.7"),
+						Version: "codex-cli 4.5.6",
+					},
+				}
+			},
+			wantMessage: `codex.version "codex-cli 4.5.6" does not match live codex CLI version "codex-cli 4.5.7"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			err := tt.cfg(dir).CheckPinnedAgentVersions()
+			if err == nil {
+				t.Fatalf("expected CheckPinnedAgentVersions to reject mismatched %s.version", tt.name)
+			}
+			for _, want := range []string{
+				tt.wantMessage,
+				"update " + tt.name + ".version only after intentionally upgrading the CLI",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("expected error to contain %q, got %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckPinnedAgentVersionsReportsVersionReadFailures(t *testing.T) {
+	dir := t.TempDir()
+	missingCommand := filepath.Join(dir, "missing-codex")
+
+	cfg := &Config{
+		Workspace: dir,
+		Codex: CodexConfig{
+			Command: missingCommand,
+			Version: "codex-cli 4.5.6",
+		},
+	}
+
+	err := cfg.CheckPinnedAgentVersions()
+	if err == nil {
+		t.Fatal("expected CheckPinnedAgentVersions to reject unreadable codex command")
+	}
+	for _, want := range []string{
+		`codex.version is pinned to "codex-cli 4.5.6" but failed to read the live CLI version`,
+		missingCommand,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to contain %q, got %v", want, err)
+		}
+	}
+}
+
+func TestCheckPinnedAgentVersionsUsesWorkspaceForRelativeCommands(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+	writeVersionCommand(t, dir, filepath.Join("bin", "fake-codex"), "codex-cli 4.5.6")
+
+	content := `codex:
+  command: ./bin/fake-codex
+  version: "codex-cli 4.5.6"
+steps:
+  - name: inspect
+    type: codex
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if err := cfg.CheckPinnedAgentVersions(); err != nil {
+		t.Fatalf("CheckPinnedAgentVersions returned error: %v", err)
+	}
+}
+
 func TestLoadNormalizesConfiguredAgentTransports(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
@@ -661,4 +824,18 @@ func TestLoadRejectsPrimaryActorAlias(t *testing.T) {
 	if _, err := Load(configPath); err == nil {
 		t.Fatal("expected Load to reject the primary actor alias")
 	}
+}
+
+func writeVersionCommand(t *testing.T, dir, name, version string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncat <<'VIBEDRIVE_VERSION'\n%s\nVIBEDRIVE_VERSION\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	return path
 }

@@ -302,7 +302,7 @@ tasks:
       title: Pin codex and claude CLI versions in config and scaffold
       details: |
         Add optional codex.version and claude.version fields to the config. When set, vibedrive checks the resolved CLI's reported version on startup and refuses to run if it does not match (so a silent codex update cannot shift screen-scraping ground truth under us). Update the scaffold to record the version used at init time so plans are reproducible. Document the new fields and the rationale ("pin to keep TUI heuristics stable across runs") in README.md.
-      status: todo
+      status: done
       workflow: implement
       deps:
         - agent-transport-config-contract

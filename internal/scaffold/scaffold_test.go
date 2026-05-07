@@ -12,6 +12,7 @@ import (
 func TestWriteWritesSampleConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
+	defer stubMissingAgentVersions()()
 
 	if err := Write(configPath, false); err != nil {
 		t.Fatalf("Write returned error: %v", err)
@@ -87,6 +88,43 @@ func TestWriteWritesSampleConfig(t *testing.T) {
 	}
 }
 
+func TestWritePinsLiveAgentVersions(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	restore := stubVersionResolver(func(command string) (string, error) {
+		switch command {
+		case "claude":
+			return "claude 1.2.3", nil
+		case "codex":
+			return "codex-cli 4.5.6", nil
+		default:
+			return "", os.ErrNotExist
+		}
+	})
+	defer restore()
+
+	if err := Write(configPath, false); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+
+	configContent, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	content := string(configContent)
+	for _, want := range []string{
+		`version: "claude 1.2.3"`,
+		`version: "codex-cli 4.5.6"`,
+		"version pins the exact claude --version output to keep TUI heuristics stable",
+		"version pins the exact codex --version output to keep TUI heuristics stable",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected scaffolded config to contain %q, got %q", want, content)
+		}
+	}
+}
+
 func TestWriteSkipsExistingConfigWithoutForce(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
@@ -111,6 +149,7 @@ func TestWriteSkipsExistingConfigWithoutForce(t *testing.T) {
 func TestWriteOverwritesWhenForceIsSet(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
+	defer stubMissingAgentVersions()()
 
 	if err := os.WriteFile(configPath, []byte("old config\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
@@ -214,4 +253,18 @@ func assertScaffoldedTransportComments(t *testing.T, content string) {
 			t.Fatalf("expected scaffolded config to document transport option %q, got %q", want, content)
 		}
 	}
+}
+
+func stubVersionResolver(resolve func(string) (string, error)) func() {
+	old := resolveVersion
+	resolveVersion = resolve
+	return func() {
+		resolveVersion = old
+	}
+}
+
+func stubMissingAgentVersions() func() {
+	return stubVersionResolver(func(string) (string, error) {
+		return "", os.ErrNotExist
+	})
 }

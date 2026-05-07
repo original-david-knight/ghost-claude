@@ -92,6 +92,10 @@ type codexClient interface {
 }
 
 func New(cfg *config.Config, stdout, stderr io.Writer) (*Runner, error) {
+	if err := cfg.CheckPinnedAgentVersions(); err != nil {
+		return nil, err
+	}
+
 	claudeAgent, err := claude.New(
 		cfg.Claude.Command,
 		cfg.Claude.Args,

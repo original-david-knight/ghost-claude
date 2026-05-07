@@ -4,9 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+
+	"vibedrive/internal/config"
 )
 
-const sampleConfig = `workspace: .
+const sampleConfigTemplate = `workspace: .
 plan_file: vibedrive-plan.yaml
 max_iterations: 0
 max_stalled_iterations: 2
@@ -20,6 +24,7 @@ parallel:
 
 claude:
   command: claude
+%s
   # transport: tui keeps a human-watchable Claude session.
   # Change to print for non-interactive orchestrated agent steps.
   transport: tui
@@ -33,6 +38,7 @@ claude:
 
 codex:
   command: codex
+%s
   # transport: tui keeps a human-watchable Codex session.
   # Change to exec for non-interactive orchestrated agent steps.
   transport: tui
@@ -321,6 +327,8 @@ workflows:
           - "{{- if .Task.CommitMessage -}}{{ .Task.CommitMessage }}{{- else -}}{{ .Task.Title }}{{- end -}}"
 `
 
+var resolveVersion = config.ResolveCLIVersion
+
 func Write(configPath string, force bool) error {
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
@@ -331,12 +339,38 @@ func Write(configPath string, force bool) error {
 		}
 	}
 
-	if err := writeFile(configPath, []byte(sampleConfig)); err != nil {
+	if err := writeFile(configPath, sampleConfig()); err != nil {
 		return err
 	}
 	fmt.Printf("Wrote %s\n", configPath)
 
 	return nil
+}
+
+func sampleConfig() []byte {
+	return []byte(fmt.Sprintf(
+		sampleConfigTemplate,
+		renderPinnedVersionComment("claude", scaffoldedVersion("claude")),
+		renderPinnedVersionComment("codex", scaffoldedVersion("codex")),
+	))
+}
+
+func scaffoldedVersion(command string) string {
+	version, err := resolveVersion(command)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(version)
+}
+
+func renderPinnedVersionComment(agent, version string) string {
+	lines := []string{
+		fmt.Sprintf("  # version pins the exact %s --version output to keep TUI heuristics stable.", agent),
+	}
+	if strings.TrimSpace(version) != "" {
+		lines = append(lines, "  version: "+strconv.Quote(strings.TrimSpace(version)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func writeFile(path string, data []byte) error {

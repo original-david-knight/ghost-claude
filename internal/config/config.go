@@ -69,6 +69,7 @@ type ParallelConfig struct {
 
 type ClaudeConfig struct {
 	Command         string   `yaml:"command"`
+	Version         string   `yaml:"version"`
 	Args            []string `yaml:"args"`
 	Transport       string   `yaml:"transport"`
 	StartupTimeout  string   `yaml:"startup_timeout"`
@@ -77,6 +78,7 @@ type ClaudeConfig struct {
 
 type CodexConfig struct {
 	Command        string   `yaml:"command"`
+	Version        string   `yaml:"version"`
 	Args           []string `yaml:"args"`
 	Transport      string   `yaml:"transport"`
 	StartupTimeout string   `yaml:"startup_timeout"`
@@ -140,6 +142,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Claude.Command == "" {
 		cfg.Claude.Command = "claude"
 	}
+	cfg.Claude.Version = strings.TrimSpace(cfg.Claude.Version)
 	if cfg.Claude.Transport == "" {
 		cfg.Claude.Transport = ClaudeTransportTUI
 	} else {
@@ -156,6 +159,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Codex.Command == "" {
 		cfg.Codex.Command = "codex"
 	}
+	cfg.Codex.Version = strings.TrimSpace(cfg.Codex.Version)
 	if cfg.Codex.Transport == "" {
 		cfg.Codex.Transport = CodexTransportTUI
 	} else {

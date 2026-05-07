@@ -11,3 +11,6 @@ tasks:
     - id: implement-diagnostics-package
       status: done
       notes: 'Implemented internal/diagnostics with atomic captures, contract size bounds, path-safe identity segments, manifest entries for written/unavailable/not-applicable artifacts, and same-step concurrency locking. Contract gap noted: manifest is listed as an artifact, so the package computes a stable manifest self-entry size.'
+    - id: pin-agent-cli-versions
+      status: done
+      notes: 'Addressed review: moved version enforcement from config.Load to runner.New so read-only config consumers can inspect pins; added tests for loader purity, claude/codex mismatches, unreadable commands, and runner startup enforcement. Edited internal/runner outside owns_paths because startup enforcement belongs there. Intentional upgrades: update the CLI, run <cli> --version, manually bump vibedrive.yaml, then rerun verification.'

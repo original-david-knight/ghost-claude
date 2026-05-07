@@ -190,6 +190,7 @@ parallel:
 
 claude:
   command: claude
+  version: "claude 1.2.3"
   transport: tui
   startup_timeout: 30s
   session_strategy: session_id
@@ -201,6 +202,7 @@ claude:
 
 codex:
   command: codex
+  version: "codex-cli 4.5.6"
   transport: tui
   startup_timeout: 30s
   args:
@@ -258,6 +260,8 @@ workflows:
           - --message
           - "{{- if .Task.CommitMessage -}}{{ .Task.CommitMessage }}{{- else -}}{{ .Task.Title }}{{- end -}}"
 ```
+
+`claude.version` and `codex.version` are optional pins for the exact output of `<command> --version`. `vibedrive init` records the live versions in the scaffolded `vibedrive.yaml` when those CLIs are available. On startup, if a pin is set, vibedrive checks the resolved CLI and refuses to run when the reported version differs. These pins exist to keep TUI heuristics stable across runs; a silent agent CLI update can change screen titles or layout text that Vibedrive uses to drive the TUI. When an upgrade is intentional, update the CLI, run `claude --version` or `codex --version`, replace the matching `*.version` value in `vibedrive.yaml`, and rerun the usual verification.
 
 ### `vibedrive-plan.yaml`
 

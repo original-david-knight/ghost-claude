@@ -99,6 +99,27 @@ func (f *fakeCodex) IsFullscreenTUI() bool {
 	return false
 }
 
+func TestNewRejectsPinnedAgentVersionMismatch(t *testing.T) {
+	dir := t.TempDir()
+	claudeCommand := writeRunnerVersionCommand(t, dir, "fake-claude", "claude 1.2.4")
+
+	cfg := &config.Config{
+		Workspace: dir,
+		Claude: config.ClaudeConfig{
+			Command: claudeCommand,
+			Version: "claude 1.2.3",
+		},
+	}
+
+	_, err := New(cfg, io.Discard, io.Discard)
+	if err == nil {
+		t.Fatal("expected New to reject mismatched claude.version")
+	}
+	if !strings.Contains(err.Error(), `claude.version "claude 1.2.3" does not match live claude CLI version "claude 1.2.4"`) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunExecutesReadyPlanTasksByDependencyOrder(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
@@ -2390,6 +2411,20 @@ func mustReadRunnerFile(t *testing.T, path string) string {
 		t.Fatalf("ReadFile(%q) returned error: %v", path, err)
 	}
 	return string(data)
+}
+
+func writeRunnerVersionCommand(t *testing.T, dir, name, version string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncat <<'VIBEDRIVE_VERSION'\n%s\nVIBEDRIVE_VERSION\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	return path
 }
 
 func updateTask(path, taskID, status, notes string) error {
