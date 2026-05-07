@@ -283,7 +283,7 @@ func CommitIfNeeded(ctx context.Context, workspace, message string, stdout, stde
 	if err := cmd.Run(); err == nil {
 		return nil
 	} else if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return runGit(ctx, workspace, stdout, stderr, "commit", "-m", message)
+		return runGit(ctx, workspace, stdout, stderr, "commit", "-q", "-m", message)
 	} else {
 		return fmt.Errorf("git diff --cached --quiet: %w", err)
 	}
@@ -326,12 +326,10 @@ func gitHasHead(ctx context.Context, workspace string) (bool, error) {
 
 func transientArtifactExcludes() []string {
 	return []string{
-		":(exclude).vibedrive/run-state.json",
-		":(exclude).vibedrive/task-results/**",
-		":(exclude).vibedrive/reviews/**",
-		":(exclude).vibedrive/task-runs/**",
-		":(exclude).vibedrive/worktrees/**",
-		":(exclude)target/**",
+		":(exclude,glob).vibedrive/**",
+		":(exclude,glob)**/target/**",
+		":(exclude,glob)**/node_modules/**",
+		":(exclude,glob)**/__pycache__/**",
 	}
 }
 

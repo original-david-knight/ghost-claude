@@ -101,7 +101,7 @@ tasks:
       title: Eliminate the broken-pipe class in finalize commits
       details: |
         Two changes in internal/automation/automation.go. First, run git commit with -q so the file-list output stops flooding stdout (the root cause of the meetspace SIGPIPE). Second, broaden transientArtifactExcludes to cover .vibedrive/** entirely (workers should never commit anything inside .vibedrive, including cargo-target), plus **/target/**, **/node_modules/**, and **/__pycache__/** so deeply-nested build dirs don't get staged either. Update automation_test.go to assert -q is passed and that the new excludes apply for both tracked-update and untracked-add paths. Keep backward compatibility: any file outside the excluded paths still gets staged exactly as before.
-      status: todo
+      status: done
       workflow: implement
       component: automation
       owns_paths:

@@ -89,6 +89,30 @@ tasks:
 	}
 }
 
+func TestCommitIfNeededUsesQuietCommitFlag(t *testing.T) {
+	dir := t.TempDir()
+	logPath := installFakeGit(t)
+
+	var stdout strings.Builder
+	var stderr strings.Builder
+	err := CommitIfNeeded(context.Background(), dir, "quiet-commit", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("CommitIfNeeded returned error: %v\nstderr: %s", err, stderr.String())
+	}
+	if stdout.String() != "" {
+		t.Fatalf("expected quiet commit to produce no stdout, got %q", stdout.String())
+	}
+
+	invocations := readFakeGitInvocations(t, logPath)
+	want := []string{"-C", dir, "commit", "-q", "-m", "quiet-commit"}
+	for _, got := range invocations {
+		if equalStringSlices(got, want) {
+			return
+		}
+	}
+	t.Fatalf("expected git commit invocation %v, got %v", want, invocations)
+}
+
 func TestFinalizeIgnoresTargetArtifactsWhenCommitting(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
@@ -136,6 +160,60 @@ tasks:
 	}
 }
 
+func TestStageAllChangesExceptExcludesTransientArtifactsForTrackedAndUntrackedFiles(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	trackedExcluded := []string{
+		".vibedrive/cargo-target/tracked.txt",
+		"crates/foo/target/tracked.txt",
+		"crates/foo/node_modules/pkg/tracked.js",
+		"services/api/__pycache__/tracked.pyc",
+	}
+	untrackedExcluded := []string{
+		".vibedrive/cargo-target/untracked.txt",
+		"crates/foo/target/untracked.txt",
+		"crates/foo/node_modules/pkg/untracked.js",
+		"services/api/__pycache__/untracked.pyc",
+	}
+	writeFile(t, filepath.Join(dir, "src", "tracked.txt"), "base source\n")
+	for _, path := range trackedExcluded {
+		writeFile(t, filepath.Join(dir, path), "base artifact\n")
+	}
+	runCmd(t, dir, "git", "-C", dir, "add", "-A")
+	runCmd(t, dir, "git", "-C", dir, "commit", "-m", "base")
+
+	writeFile(t, filepath.Join(dir, "src", "tracked.txt"), "updated source\n")
+	writeFile(t, filepath.Join(dir, "src", "new.txt"), "new source\n")
+	for _, path := range trackedExcluded {
+		writeFile(t, filepath.Join(dir, path), "updated artifact\n")
+	}
+	for _, path := range untrackedExcluded {
+		writeFile(t, filepath.Join(dir, path), "new artifact\n")
+	}
+
+	err := StageAllChangesExcept(context.Background(), dir, os.Stdout, os.Stderr, transientArtifactExcludes()...)
+	if err != nil {
+		t.Fatalf("StageAllChangesExcept returned error: %v", err)
+	}
+
+	staged := runCmd(t, dir, "git", "-C", dir, "diff", "--cached", "--name-only")
+	for _, want := range []string{"src/tracked.txt", "src/new.txt"} {
+		if !containsLine(staged, want) {
+			t.Fatalf("expected %s to be staged, staged files:\n%s", want, staged)
+		}
+	}
+	for _, unwanted := range append(trackedExcluded, untrackedExcluded...) {
+		if containsLine(staged, unwanted) {
+			t.Fatalf("expected excluded artifact %s to stay unstaged, staged files:\n%s", unwanted, staged)
+		}
+		status := runCmd(t, dir, "git", "-C", dir, "status", "--short", "--", unwanted)
+		if !strings.Contains(status, unwanted) {
+			t.Fatalf("expected excluded artifact %s to remain in working tree, got %q", unwanted, status)
+		}
+	}
+}
+
 func TestFinalizeCommitsNewFilesWithIgnoredArtifactsPresent(t *testing.T) {
 	dir := t.TempDir()
 	initGitRepo(t, dir)
@@ -180,15 +258,19 @@ tasks:
 	}
 
 	committedFiles := runCmd(t, dir, "git", "-C", dir, "show", "--name-only", "--pretty=format:", "HEAD")
-	for _, want := range []string{"README.md", "src/new.txt", ".vibedrive/task-notes.yaml"} {
+	for _, want := range []string{"README.md", "src/new.txt"} {
 		if !strings.Contains(committedFiles, want) {
 			t.Fatalf("expected commit to include %s, committed files:\n%s", want, committedFiles)
 		}
 	}
-	for _, unwanted := range []string{"target/cache.txt", ".vibedrive/task-runs/scaffold/log.txt"} {
+	for _, unwanted := range []string{"target/cache.txt", ".vibedrive/task-notes.yaml", ".vibedrive/task-runs/scaffold/log.txt"} {
 		if strings.Contains(committedFiles, unwanted) {
 			t.Fatalf("expected ignored artifact %s to stay out of commit, committed files:\n%s", unwanted, committedFiles)
 		}
+	}
+	status := runCmd(t, dir, "git", "-C", dir, "status", "--short", "--", ".vibedrive/task-notes.yaml")
+	if !strings.Contains(status, ".vibedrive/task-notes.yaml") {
+		t.Fatalf("expected task notes under .vibedrive to remain uncommitted, got %q", status)
 	}
 }
 
@@ -446,6 +528,108 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
+}
+
+func installFakeGit(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	logPath := filepath.Join(dir, "git.log")
+	scriptPath := filepath.Join(binDir, "git")
+	script := `#!/bin/sh
+{
+	echo BEGIN
+	for arg in "$@"; do
+		printf '%s\n' "$arg"
+	done
+} >> "$FAKE_GIT_LOG"
+
+if [ "$1" = "-C" ]; then
+	shift 2
+fi
+
+case "$1" in
+	rev-parse)
+		exit 0
+		;;
+	add)
+		exit 0
+		;;
+	ls-files)
+		exit 0
+		;;
+	diff)
+		exit 1
+		;;
+	commit)
+		exit 0
+		;;
+	*)
+		echo "unexpected git command: $*" >&2
+		exit 2
+		;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile fake git returned error: %v", err)
+	}
+	t.Setenv("FAKE_GIT_LOG", logPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readFakeGitInvocations(t *testing.T, path string) [][]string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile fake git log returned error: %v", err)
+	}
+
+	var invocations [][]string
+	var current []string
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line == "BEGIN" {
+			if current != nil {
+				invocations = append(invocations, current)
+			}
+			current = []string{}
+			continue
+		}
+		if current == nil {
+			t.Fatalf("malformed fake git log: %q", string(data))
+		}
+		current = append(current, line)
+	}
+	if current != nil {
+		invocations = append(invocations, current)
+	}
+	return invocations
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsLine(text, want string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 func runCmd(t *testing.T, dir string, name string, args ...string) string {

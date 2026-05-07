@@ -2,3 +2,6 @@ tasks:
     - id: define-diagnostics-contract
       status: done
       notes: 'Added docs/contracts/diagnostics.md with debug layout, manifest schema, tmux and exec required artifacts, caller obligations, and bounded capture sizes. Open questions: validate the 64KiB/256KiB/1MiB budgets on real failures; prompts and output tails can contain PII, so future work should decide whether redaction/configurable capture is needed beyond env redaction.'
+    - id: fix-git-commit-output-volume
+      status: done
+      notes: 'CommitIfNeeded now uses git commit -q and transient staging excludes all .vibedrive plus root/nested target, node_modules, and __pycache__ paths for tracked and untracked changes. Tradeoff: legitimate project files under .vibedrive are no longer auto-committed; a future task could add an explicit allowlist/config opt-in.'
