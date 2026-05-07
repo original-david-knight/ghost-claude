@@ -1,0 +1,4 @@
+tasks:
+    - id: define-diagnostics-contract
+      status: done
+      notes: 'Added docs/contracts/diagnostics.md with debug layout, manifest schema, tmux and exec required artifacts, caller obligations, and bounded capture sizes. Open questions: validate the 64KiB/256KiB/1MiB budgets on real failures; prompts and output tails can contain PII, so future work should decide whether redaction/configurable capture is needed beyond env redaction.'

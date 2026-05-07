@@ -1,366 +1,353 @@
 project:
-  name: vibedrive-quality-recovery
-  objective: Stop screen-scraping fragility and large-output failures from breaking real runs by making diagnostics first-class, narrowing the orchestration interface to non-interactive transports where possible, and locking new heuristics behind regression tests.
-  source_docs:
-    - README.md
-    - vibedrive-plan.example.yaml
-    - CLAUDE.md
-  constraint_files:
-    - README.md
-    - CLAUDE.md
-  components:
-    - id: diagnostics
-      name: Failure diagnostics capture
-      owned_paths:
-        - internal/diagnostics/**
+    name: vibedrive-quality-recovery
+    objective: Stop screen-scraping fragility and large-output failures from breaking real runs by making diagnostics first-class, narrowing the orchestration interface to non-interactive transports where possible, and locking new heuristics behind regression tests.
+    source_docs:
+        - README.md
+        - vibedrive-plan.example.yaml
+        - CLAUDE.md
+    constraint_files:
+        - README.md
+        - CLAUDE.md
+    components:
+        - id: diagnostics
+          name: Failure diagnostics capture
+          owned_paths:
+            - internal/diagnostics/**
+            - docs/contracts/diagnostics.md
+          provides_contracts:
+            - docs/contracts/diagnostics.md
+        - id: automation
+          name: Git staging and commit automation
+          owned_paths:
+            - internal/automation/**
+        - id: runner
+          name: Runner orchestration and exec step
+          owned_paths:
+            - internal/runner/runner.go
+            - internal/runner/runner_test.go
+          reads_contracts:
+            - docs/contracts/diagnostics.md
+        - id: tmux-clients
+          name: Tmux-backed agent clients
+          owned_paths:
+            - internal/runner/tmux_clients.go
+            - internal/runner/tmux_clients_test.go
+          reads_contracts:
+            - docs/contracts/diagnostics.md
+            - docs/contracts/agent-transport.md
+        - id: codex-cli
+          name: Codex CLI wrapper
+          owned_paths:
+            - pkg/agentcli/codex/**
+          reads_contracts:
+            - docs/contracts/diagnostics.md
+            - docs/contracts/agent-transport.md
+        - id: claude-cli
+          name: Claude CLI wrapper
+          owned_paths:
+            - pkg/agentcli/claude/**
+          reads_contracts:
+            - docs/contracts/diagnostics.md
+            - docs/contracts/agent-transport.md
+        - id: config-scaffold
+          name: Config schema and scaffold
+          owned_paths:
+            - internal/config/**
+            - internal/scaffold/**
+          provides_contracts:
+            - docs/contracts/agent-transport.md
+tasks:
+    - id: define-diagnostics-contract
+      title: Define the failure-diagnostics capture contract
+      details: |
+        Specify what gets captured on every step failure and where it goes. At minimum: a per-run debug root under .vibedrive/debug/<run-id>/<task-id>/<step-name>/, with sub-artifacts for full tmux pane captures (capture-pane -p -S -3000), terminal-title transition history with timestamps, the rendered prompt that was pasted (raw bytes and normalized text), the parent process stdout/stderr tail, and a manifest.json describing what was collected. The contract should be transport-agnostic so non-TUI transports (codex exec, claude --print) can populate the same schema with different fields.
+      status: done
+      workflow: implement
+      component: diagnostics
+      owns_paths:
         - docs/contracts/diagnostics.md
       provides_contracts:
         - docs/contracts/diagnostics.md
-    - id: automation
-      name: Git staging and commit automation
-      owned_paths:
+      acceptance:
+        - docs/contracts/diagnostics.md describes the .vibedrive/debug/<run>/<task>/<step>/ directory layout, manifest schema, and required artifacts for tmux failures and exec failures.
+        - The contract names which existing failure paths must call into the diagnostics package (tmux submit-prompt timeout, ensureRequiredOutputsAfterStep failure, exec step non-zero exit, validateTaskNotesAfterAgentStep failure).
+        - The contract specifies bounded sizes (capture lines, output buffer tails) so capture cannot itself cause large-output failures.
+        - Task notes record any open questions about capture size budgets or PII concerns for future tasks.
+      verify_commands:
+        - test -f docs/contracts/diagnostics.md
+      commit_message: 'docs: define failure diagnostics capture contract'
+    - id: implement-diagnostics-package
+      title: Implement internal/diagnostics capture package
+      details: |
+        Build the internal/diagnostics package that the runner and tmux clients will call. Provide a Capturer with methods that take a run/task/step identity and write artifacts atomically into .vibedrive/debug/<run-id>/<task-id>/<step-name>/. Include helpers for writing pane snapshots, title-transition logs, prompt payloads, and exec output tails with the bounded sizes defined by the contract. Do not wire callers in this task; only the package and its tests.
+      status: todo
+      workflow: implement
+      deps:
+        - define-diagnostics-contract
+      component: diagnostics
+      owns_paths:
+        - internal/diagnostics/**
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+      acceptance:
+        - internal/diagnostics has a Capturer type that produces artifacts matching docs/contracts/diagnostics.md.
+        - Output writes are bounded to the sizes declared in the contract; oversized inputs are truncated with a tail-preferred policy.
+        - Unit tests cover artifact layout, bounded-size truncation, and concurrent capture from multiple goroutines for the same step (sanity check, since parallel batches share a run).
+        - Task notes capture any contract gaps discovered while implementing the package.
+      verify_commands:
+        - go test ./internal/diagnostics
+      commit_message: 'feat: add diagnostics capture package'
+    - id: fix-git-commit-output-volume
+      title: Eliminate the broken-pipe class in finalize commits
+      details: |
+        Two changes in internal/automation/automation.go. First, run git commit with -q so the file-list output stops flooding stdout (the root cause of the meetspace SIGPIPE). Second, broaden transientArtifactExcludes to cover .vibedrive/** entirely (workers should never commit anything inside .vibedrive, including cargo-target), plus **/target/**, **/node_modules/**, and **/__pycache__/** so deeply-nested build dirs don't get staged either. Update automation_test.go to assert -q is passed and that the new excludes apply for both tracked-update and untracked-add paths. Keep backward compatibility: any file outside the excluded paths still gets staged exactly as before.
+      status: todo
+      workflow: implement
+      component: automation
+      owns_paths:
         - internal/automation/**
-    - id: runner
-      name: Runner orchestration and exec step
-      owned_paths:
+      acceptance:
+        - CommitIfNeeded calls git commit with -q (or equivalent quiet flag) so stdout stays small even on commits with thousands of files.
+        - transientArtifactExcludes excludes .vibedrive/** entirely plus **/target/**, **/node_modules/**, and **/__pycache__/**.
+        - Existing tests still pass and a new test verifies that adding files inside .vibedrive/cargo-target and crates/foo/target does not stage them.
+        - Task notes describe any tradeoff (e.g. files a project legitimately wants under .vibedrive/) and how a future task could opt back in.
+      verify_commands:
+        - go test ./internal/automation
+      commit_message: 'fix: keep finalize commits quiet and exclude nested build dirs'
+    - id: bound-runner-exec-output
+      title: Cap runner exec output buffer and capture diagnostics on failure
+      details: |
+        The exec step in internal/runner/runner.go currently writes child stdout/stderr through io.MultiWriter into an unbounded bytes.Buffer. Replace that with a bounded ring/tail buffer (size from the diagnostics contract). On non-zero exit, call the diagnostics Capturer to write the full tail, the rendered command, working directory, and env to the per-step debug directory before returning the wrapped error. Keep the existing user-visible error message format so log readers don't break. Do not modify tmux client code in this task.
+      status: todo
+      workflow: implement
+      deps:
+        - implement-diagnostics-package
+      component: runner
+      owns_paths:
         - internal/runner/runner.go
         - internal/runner/runner_test.go
       reads_contracts:
         - docs/contracts/diagnostics.md
-    - id: tmux-clients
-      name: Tmux-backed agent clients
-      owned_paths:
+      acceptance:
+        - The exec step's output buffer cannot grow unbounded; tests demonstrate large outputs are truncated to the configured tail size.
+        - On non-zero exit the exec step writes the captured tail and metadata into .vibedrive/debug/... per the diagnostics contract.
+        - Existing exec-step tests continue to pass; a new test verifies bounded buffering and diagnostics capture on failure.
+        - Task notes record any followup runner cleanup the next phase should address.
+      verify_commands:
+        - go test ./internal/runner -run Exec
+      commit_message: 'fix: bound exec output and capture diagnostics on failure'
+    - id: wire-tmux-diagnostics
+      title: Capture tmux pane diagnostics on every TUI failure
+      details: |
+        Today tmuxPaneDiagnostics in internal/runner/tmux_clients.go appends the last 160 lines of pane output into the error string. Replace that with a structured diagnostics call into the new Capturer that writes the full pane snapshot, title-transition history (idle/busy/trust counts plus the recorded states), the prompt payload that was pasted, and timing data into the debug directory. The error message should still include a short hint plus a path to the diagnostics directory for human consumption. Do not change the failure conditions yet; that is the next task.
+      status: todo
+      workflow: implement
+      deps:
+        - implement-diagnostics-package
+      component: tmux-clients
+      owns_paths:
         - internal/runner/tmux_clients.go
         - internal/runner/tmux_clients_test.go
       reads_contracts:
         - docs/contracts/diagnostics.md
-        - docs/contracts/agent-transport.md
-    - id: codex-cli
-      name: Codex CLI wrapper
-      owned_paths:
+      acceptance:
+        - Every tmux client failure path (submit-prompt timeout, startup timeout, unexpected exit) writes a complete diagnostics bundle.
+        - Error messages reference the diagnostics directory path so a human can find the bundle without log diving.
+        - Tests cover that diagnostics are written for both the codex and claude tmux clients on simulated failure.
+        - Task notes capture any patterns observed while wiring this up that should inform the fail-fast task.
+      verify_commands:
+        - go test ./internal/runner -run Tmux
+      commit_message: 'feat: structured tmux diagnostics on TUI failure'
+    - id: codex-screen-detector-test-harness
+      title: Add captured-screen golden tests for the Codex detector
+      details: |
+        Capture real terminal recordings from a working codex run and a stuck codex run (use the diagnostics output from a recent failure if available). Save them as fixtures alongside pkg/agentcli/codex/. Write tests that replay each fixture through classifyTitle, isBusyTitle, titleMatchesIdle, codexReadyScreen, codexTrustPrompt, and codexScreenState and assert the expected classifications. The point is to make every screen-scraping heuristic regression-detectable; do not change detector behavior in this task.
+      status: todo
+      workflow: implement
+      deps:
+        - implement-diagnostics-package
+      component: codex-cli
+      owns_paths:
         - pkg/agentcli/codex/**
       reads_contracts:
         - docs/contracts/diagnostics.md
-        - docs/contracts/agent-transport.md
-    - id: claude-cli
-      name: Claude CLI wrapper
-      owned_paths:
+      acceptance:
+        - At least one fixture per detector branch (idle title, busy title, ready screen, trust prompt, working screen, stuck/ambiguous screen).
+        - Tests fail loudly when any classification flips, with diff output that points to the responsible heuristic.
+        - A short README in pkg/agentcli/codex/testdata explains how to capture a new fixture from a real run.
+        - Task notes record any heuristics that turned out to be wrong on real fixtures so the next task can fix them with evidence.
+      verify_commands:
+        - go test ./pkg/agentcli/codex
+      commit_message: 'test: golden fixtures for Codex screen detection'
+    - id: claude-screen-detector-test-harness
+      title: Add captured-screen golden tests for the Claude detector
+      details: |
+        Mirror codex-screen-detector-test-harness for claude. Capture working and stuck claude TUI recordings, save fixtures, and write tests that exercise classifyClaudeTmuxTitle and the trust-prompt detection in pkg/agentcli/claude. Do not change detector behavior in this task; the goal is making future changes safe.
+      status: todo
+      workflow: implement
+      deps:
+        - implement-diagnostics-package
+      component: claude-cli
+      owns_paths:
         - pkg/agentcli/claude/**
       reads_contracts:
         - docs/contracts/diagnostics.md
-        - docs/contracts/agent-transport.md
-    - id: config-scaffold
-      name: Config schema and scaffold
-      owned_paths:
+      acceptance:
+        - At least one fixture per detector branch (idle title, busy title, trust prompt, ambiguous/stuck state).
+        - Tests fail loudly when any classification flips.
+        - A short README in pkg/agentcli/claude/testdata explains the fixture-capture process.
+        - Task notes record any detector bugs found via real fixtures.
+      verify_commands:
+        - go test ./pkg/agentcli/claude
+      commit_message: 'test: golden fixtures for Claude screen detection'
+    - id: fail-fast-on-unknown-tui-state
+      title: Replace 3-enter retry with structured failure on unknown TUI state
+      details: |
+        The current submit-prompt loop pastes a prompt and presses Enter up to 3 times waiting for a busy-state transition. If the screen state is unrecognized the agent may have already accepted the prompt, so additional Enters can submit half-written follow-ups or trigger menu items. Change behavior so that when the first Enter does not yield a recognized state transition within the retry window, the client captures full diagnostics and returns an actionable error immediately. Two retries remain only when the FSM positively classified the screen as accepting input. Update fixtures and tests to cover both the happy path and the unknown-state abort.
+      status: todo
+      workflow: implement
+      deps:
+        - wire-tmux-diagnostics
+        - codex-screen-detector-test-harness
+        - claude-screen-detector-test-harness
+      component: tmux-clients
+      owns_paths:
+        - internal/runner/tmux_clients.go
+        - internal/runner/tmux_clients_test.go
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+      conflicts_with:
+        - wire-tmux-diagnostics
+      acceptance:
+        - Submit-prompt no longer issues blind retries when the screen state is unclassified; it captures diagnostics and aborts.
+        - The error message points the operator to the captured diagnostics directory and names the unclassified state.
+        - Tests exercise the unknown-state abort using fixtures from the detector test harnesses.
+        - Task notes describe any cases where this stricter policy will surface previously-hidden bugs in agent UIs.
+      verify_commands:
+        - go test ./internal/runner -run Tmux
+      commit_message: 'fix: fail fast on unknown TUI state instead of blind retries'
+    - id: agent-transport-config-contract
+      title: Add agent transport selection to config schema and scaffold
+      details: |
+        Today vibedrive.yaml has claude.transport and codex.transport with only "tui" supported. Extend the config to support transport=exec for codex and transport=print for claude, validated by config tests. Document the new transport semantics in docs/contracts/agent-transport.md, including how prompts are passed, how outputs are read, and what step types are compatible. Update the init scaffold so new projects can opt into the non-interactive transports for the orchestrated workflow steps while keeping TUI for any step that needs a human-watchable session. Do not implement the new transports here; this task is the schema, validation, scaffold defaults, and contract.
+      status: todo
+      workflow: implement
+      component: config-scaffold
+      owns_paths:
         - internal/config/**
         - internal/scaffold/**
+        - docs/contracts/agent-transport.md
       provides_contracts:
         - docs/contracts/agent-transport.md
-
-tasks:
-  - id: define-diagnostics-contract
-    title: Define the failure-diagnostics capture contract
-    workflow: implement
-    status: todo
-    component: diagnostics
-    owns_paths:
-      - docs/contracts/diagnostics.md
-    provides_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      Specify what gets captured on every step failure and where it goes. At minimum: a per-run debug root under .vibedrive/debug/<run-id>/<task-id>/<step-name>/, with sub-artifacts for full tmux pane captures (capture-pane -p -S -3000), terminal-title transition history with timestamps, the rendered prompt that was pasted (raw bytes and normalized text), the parent process stdout/stderr tail, and a manifest.json describing what was collected. The contract should be transport-agnostic so non-TUI transports (codex exec, claude --print) can populate the same schema with different fields.
-    acceptance:
-      - docs/contracts/diagnostics.md describes the .vibedrive/debug/<run>/<task>/<step>/ directory layout, manifest schema, and required artifacts for tmux failures and exec failures.
-      - The contract names which existing failure paths must call into the diagnostics package (tmux submit-prompt timeout, ensureRequiredOutputsAfterStep failure, exec step non-zero exit, validateTaskNotesAfterAgentStep failure).
-      - The contract specifies bounded sizes (capture lines, output buffer tails) so capture cannot itself cause large-output failures.
-      - Task notes record any open questions about capture size budgets or PII concerns for future tasks.
-    verify_commands:
-      - test -f docs/contracts/diagnostics.md
-    commit_message: 'docs: define failure diagnostics capture contract'
-
-  - id: implement-diagnostics-package
-    title: Implement internal/diagnostics capture package
-    workflow: implement
-    status: todo
-    deps:
-      - define-diagnostics-contract
-    component: diagnostics
-    owns_paths:
-      - internal/diagnostics/**
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      Build the internal/diagnostics package that the runner and tmux clients will call. Provide a Capturer with methods that take a run/task/step identity and write artifacts atomically into .vibedrive/debug/<run-id>/<task-id>/<step-name>/. Include helpers for writing pane snapshots, title-transition logs, prompt payloads, and exec output tails with the bounded sizes defined by the contract. Do not wire callers in this task; only the package and its tests.
-    acceptance:
-      - internal/diagnostics has a Capturer type that produces artifacts matching docs/contracts/diagnostics.md.
-      - Output writes are bounded to the sizes declared in the contract; oversized inputs are truncated with a tail-preferred policy.
-      - Unit tests cover artifact layout, bounded-size truncation, and concurrent capture from multiple goroutines for the same step (sanity check, since parallel batches share a run).
-      - Task notes capture any contract gaps discovered while implementing the package.
-    verify_commands:
-      - go test ./internal/diagnostics
-    commit_message: 'feat: add diagnostics capture package'
-
-  - id: fix-git-commit-output-volume
-    title: Eliminate the broken-pipe class in finalize commits
-    workflow: implement
-    status: todo
-    component: automation
-    owns_paths:
-      - internal/automation/**
-    details: |
-      Two changes in internal/automation/automation.go. First, run git commit with -q so the file-list output stops flooding stdout (the root cause of the meetspace SIGPIPE). Second, broaden transientArtifactExcludes to cover .vibedrive/** entirely (workers should never commit anything inside .vibedrive, including cargo-target), plus **/target/**, **/node_modules/**, and **/__pycache__/** so deeply-nested build dirs don't get staged either. Update automation_test.go to assert -q is passed and that the new excludes apply for both tracked-update and untracked-add paths. Keep backward compatibility: any file outside the excluded paths still gets staged exactly as before.
-    acceptance:
-      - CommitIfNeeded calls git commit with -q (or equivalent quiet flag) so stdout stays small even on commits with thousands of files.
-      - transientArtifactExcludes excludes .vibedrive/** entirely plus **/target/**, **/node_modules/**, and **/__pycache__/**.
-      - Existing tests still pass and a new test verifies that adding files inside .vibedrive/cargo-target and crates/foo/target does not stage them.
-      - Task notes describe any tradeoff (e.g. files a project legitimately wants under .vibedrive/) and how a future task could opt back in.
-    verify_commands:
-      - go test ./internal/automation
-    commit_message: 'fix: keep finalize commits quiet and exclude nested build dirs'
-
-  - id: bound-runner-exec-output
-    title: Cap runner exec output buffer and capture diagnostics on failure
-    workflow: implement
-    status: todo
-    deps:
-      - implement-diagnostics-package
-    component: runner
-    owns_paths:
-      - internal/runner/runner.go
-      - internal/runner/runner_test.go
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      The exec step in internal/runner/runner.go currently writes child stdout/stderr through io.MultiWriter into an unbounded bytes.Buffer. Replace that with a bounded ring/tail buffer (size from the diagnostics contract). On non-zero exit, call the diagnostics Capturer to write the full tail, the rendered command, working directory, and env to the per-step debug directory before returning the wrapped error. Keep the existing user-visible error message format so log readers don't break. Do not modify tmux client code in this task.
-    acceptance:
-      - The exec step's output buffer cannot grow unbounded; tests demonstrate large outputs are truncated to the configured tail size.
-      - On non-zero exit the exec step writes the captured tail and metadata into .vibedrive/debug/... per the diagnostics contract.
-      - Existing exec-step tests continue to pass; a new test verifies bounded buffering and diagnostics capture on failure.
-      - Task notes record any followup runner cleanup the next phase should address.
-    verify_commands:
-      - go test ./internal/runner -run Exec
-    commit_message: 'fix: bound exec output and capture diagnostics on failure'
-
-  - id: wire-tmux-diagnostics
-    title: Capture tmux pane diagnostics on every TUI failure
-    workflow: implement
-    status: todo
-    deps:
-      - implement-diagnostics-package
-    component: tmux-clients
-    owns_paths:
-      - internal/runner/tmux_clients.go
-      - internal/runner/tmux_clients_test.go
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      Today tmuxPaneDiagnostics in internal/runner/tmux_clients.go appends the last 160 lines of pane output into the error string. Replace that with a structured diagnostics call into the new Capturer that writes the full pane snapshot, title-transition history (idle/busy/trust counts plus the recorded states), the prompt payload that was pasted, and timing data into the debug directory. The error message should still include a short hint plus a path to the diagnostics directory for human consumption. Do not change the failure conditions yet; that is the next task.
-    acceptance:
-      - Every tmux client failure path (submit-prompt timeout, startup timeout, unexpected exit) writes a complete diagnostics bundle.
-      - Error messages reference the diagnostics directory path so a human can find the bundle without log diving.
-      - Tests cover that diagnostics are written for both the codex and claude tmux clients on simulated failure.
-      - Task notes capture any patterns observed while wiring this up that should inform the fail-fast task.
-    verify_commands:
-      - go test ./internal/runner -run Tmux
-    commit_message: 'feat: structured tmux diagnostics on TUI failure'
-
-  - id: codex-screen-detector-test-harness
-    title: Add captured-screen golden tests for the Codex detector
-    workflow: implement
-    status: todo
-    deps:
-      - implement-diagnostics-package
-    component: codex-cli
-    owns_paths:
-      - pkg/agentcli/codex/**
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      Capture real terminal recordings from a working codex run and a stuck codex run (use the diagnostics output from a recent failure if available). Save them as fixtures alongside pkg/agentcli/codex/. Write tests that replay each fixture through classifyTitle, isBusyTitle, titleMatchesIdle, codexReadyScreen, codexTrustPrompt, and codexScreenState and assert the expected classifications. The point is to make every screen-scraping heuristic regression-detectable; do not change detector behavior in this task.
-    acceptance:
-      - At least one fixture per detector branch (idle title, busy title, ready screen, trust prompt, working screen, stuck/ambiguous screen).
-      - Tests fail loudly when any classification flips, with diff output that points to the responsible heuristic.
-      - A short README in pkg/agentcli/codex/testdata explains how to capture a new fixture from a real run.
-      - Task notes record any heuristics that turned out to be wrong on real fixtures so the next task can fix them with evidence.
-    verify_commands:
-      - go test ./pkg/agentcli/codex
-    commit_message: 'test: golden fixtures for Codex screen detection'
-
-  - id: claude-screen-detector-test-harness
-    title: Add captured-screen golden tests for the Claude detector
-    workflow: implement
-    status: todo
-    deps:
-      - implement-diagnostics-package
-    component: claude-cli
-    owns_paths:
-      - pkg/agentcli/claude/**
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    details: |
-      Mirror codex-screen-detector-test-harness for claude. Capture working and stuck claude TUI recordings, save fixtures, and write tests that exercise classifyClaudeTmuxTitle and the trust-prompt detection in pkg/agentcli/claude. Do not change detector behavior in this task; the goal is making future changes safe.
-    acceptance:
-      - At least one fixture per detector branch (idle title, busy title, trust prompt, ambiguous/stuck state).
-      - Tests fail loudly when any classification flips.
-      - A short README in pkg/agentcli/claude/testdata explains the fixture-capture process.
-      - Task notes record any detector bugs found via real fixtures.
-    verify_commands:
-      - go test ./pkg/agentcli/claude
-    commit_message: 'test: golden fixtures for Claude screen detection'
-
-  - id: fail-fast-on-unknown-tui-state
-    title: Replace 3-enter retry with structured failure on unknown TUI state
-    workflow: implement
-    status: todo
-    deps:
-      - wire-tmux-diagnostics
-      - codex-screen-detector-test-harness
-      - claude-screen-detector-test-harness
-    component: tmux-clients
-    owns_paths:
-      - internal/runner/tmux_clients.go
-      - internal/runner/tmux_clients_test.go
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-    conflicts_with:
-      - wire-tmux-diagnostics
-    details: |
-      The current submit-prompt loop pastes a prompt and presses Enter up to 3 times waiting for a busy-state transition. If the screen state is unrecognized the agent may have already accepted the prompt, so additional Enters can submit half-written follow-ups or trigger menu items. Change behavior so that when the first Enter does not yield a recognized state transition within the retry window, the client captures full diagnostics and returns an actionable error immediately. Two retries remain only when the FSM positively classified the screen as accepting input. Update fixtures and tests to cover both the happy path and the unknown-state abort.
-    acceptance:
-      - Submit-prompt no longer issues blind retries when the screen state is unclassified; it captures diagnostics and aborts.
-      - The error message points the operator to the captured diagnostics directory and names the unclassified state.
-      - Tests exercise the unknown-state abort using fixtures from the detector test harnesses.
-      - Task notes describe any cases where this stricter policy will surface previously-hidden bugs in agent UIs.
-    verify_commands:
-      - go test ./internal/runner -run Tmux
-    commit_message: 'fix: fail fast on unknown TUI state instead of blind retries'
-
-  - id: agent-transport-config-contract
-    title: Add agent transport selection to config schema and scaffold
-    workflow: implement
-    status: todo
-    component: config-scaffold
-    owns_paths:
-      - internal/config/**
-      - internal/scaffold/**
-      - docs/contracts/agent-transport.md
-    provides_contracts:
-      - docs/contracts/agent-transport.md
-    details: |
-      Today vibedrive.yaml has claude.transport and codex.transport with only "tui" supported. Extend the config to support transport=exec for codex and transport=print for claude, validated by config tests. Document the new transport semantics in docs/contracts/agent-transport.md, including how prompts are passed, how outputs are read, and what step types are compatible. Update the init scaffold so new projects can opt into the non-interactive transports for the orchestrated workflow steps while keeping TUI for any step that needs a human-watchable session. Do not implement the new transports here; this task is the schema, validation, scaffold defaults, and contract.
-    acceptance:
-      - config supports transport=tui|exec for codex and transport=tui|print for claude with clear validation errors for unknown values.
-      - docs/contracts/agent-transport.md specifies how each transport delivers prompts, gathers stdout/stderr, signals completion, and exits.
-      - Scaffolded vibedrive.yaml documents the new options with comments and keeps tui as the default for backward compatibility.
-      - Task notes capture decisions about which orchestration steps should default to non-interactive in the future scaffold.
-    verify_commands:
-      - go test ./internal/config
-      - go test ./internal/scaffold
-    commit_message: 'feat: agent transport selection contract'
-
-  - id: implement-codex-exec-transport
-    title: Implement non-interactive codex exec transport
-    workflow: implement
-    status: todo
-    deps:
-      - agent-transport-config-contract
-      - codex-screen-detector-test-harness
-    component: codex-cli
-    owns_paths:
-      - pkg/agentcli/codex/**
-    reads_contracts:
-      - docs/contracts/agent-transport.md
-      - docs/contracts/diagnostics.md
-    conflicts_with:
-      - codex-screen-detector-test-harness
-    details: |
-      Implement transport=exec for codex by invoking codex's non-interactive subcommand (codex exec) with the rendered prompt. Reuse the existing client interface so the runner does not need to know which transport is in use. Capture stdout/stderr per the diagnostics contract. Reject step types that are documented as TUI-only (and document them in the agent-transport contract if any are discovered). Keep the TUI implementation untouched for the create/init flows that need to remain interactive.
-    acceptance:
-      - codex.transport=exec runs orchestrated agent steps end-to-end via codex exec without launching a TUI.
-      - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
-      - The codex.transport=tui path continues to work with no behavior changes for TUI-only flows.
-      - Task notes record any codex exec features (e.g. session continuity) that the next iteration should leverage.
-    verify_commands:
-      - go test ./pkg/agentcli/codex
-    commit_message: 'feat: non-interactive codex exec transport'
-
-  - id: implement-claude-print-transport
-    title: Implement non-interactive claude print transport
-    workflow: implement
-    status: todo
-    deps:
-      - agent-transport-config-contract
-      - claude-screen-detector-test-harness
-    component: claude-cli
-    owns_paths:
-      - pkg/agentcli/claude/**
-    reads_contracts:
-      - docs/contracts/agent-transport.md
-      - docs/contracts/diagnostics.md
-    conflicts_with:
-      - claude-screen-detector-test-harness
-    details: |
-      Implement transport=print for claude by invoking claude with --print and the rendered prompt. Reuse the existing client interface. Capture stdout/stderr per the diagnostics contract. Reject step types that are TUI-only and document them. Keep the TUI implementation untouched.
-    acceptance:
-      - claude.transport=print runs orchestrated agent steps end-to-end via claude --print without launching a TUI.
-      - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
-      - The claude.transport=tui path continues to work with no behavior changes for TUI-only flows.
-      - Task notes record any --print flags or session-continuation behavior that the next iteration should leverage.
-    verify_commands:
-      - go test ./pkg/agentcli/claude
-    commit_message: 'feat: non-interactive claude print transport'
-
-  - id: pin-agent-cli-versions
-    title: Pin codex and claude CLI versions in config and scaffold
-    workflow: implement
-    status: todo
-    deps:
-      - agent-transport-config-contract
-    component: config-scaffold
-    owns_paths:
-      - internal/config/**
-      - internal/scaffold/**
-    details: |
-      Add optional codex.version and claude.version fields to the config. When set, vibedrive checks the resolved CLI's reported version on startup and refuses to run if it does not match (so a silent codex update cannot shift screen-scraping ground truth under us). Update the scaffold to record the version used at init time so plans are reproducible. Document the new fields and the rationale ("pin to keep TUI heuristics stable across runs") in README.md.
-    acceptance:
-      - config supports codex.version and claude.version with clear error messages when the live CLI version differs.
-      - vibedrive init records the live versions in the scaffolded vibedrive.yaml.
-      - README.md documents the pinning fields and explains why they exist.
-      - Task notes record what to do when an upgrade is intentionally desired (manual version bump path).
-    verify_commands:
-      - go test ./internal/config
-      - go test ./internal/scaffold
-    commit_message: 'feat: pin agent CLI versions to stabilize TUI heuristics'
-
-  - id: integration-checkpoint-quality-recovery
-    title: End-to-end run on a target project verifies the recovery
-    workflow: checkpoint
-    status: todo
-    deps:
-      - fix-git-commit-output-volume
-      - bound-runner-exec-output
-      - fail-fast-on-unknown-tui-state
-      - implement-codex-exec-transport
-      - implement-claude-print-transport
-      - pin-agent-cli-versions
-    reads_contracts:
-      - docs/contracts/diagnostics.md
-      - docs/contracts/agent-transport.md
-    conflicts_with:
-      - fix-git-commit-output-volume
-      - bound-runner-exec-output
-      - fail-fast-on-unknown-tui-state
-      - implement-codex-exec-transport
-      - implement-claude-print-transport
-      - pin-agent-cli-versions
-    details: |
-      Run vibedrive end-to-end against a fresh checkout of a Rust project (meetspace shape) and a non-Rust project (ECSNet shape) using the new defaults. For each project capture a diagnostics bundle from at least one intentional failure (e.g. a verify_commands failure) and confirm the bundle contents match docs/contracts/diagnostics.md. Confirm that finalize commits stay quiet, that no broken-pipe occurs even with build artifacts present, and that an unknown-state TUI failure produces an actionable error with a diagnostics path. If any acceptance criterion fails, this task records the failure and stays in_progress.
-    acceptance:
-      - A Rust-shaped project completes at least one full task iteration end-to-end with the new defaults and no broken-pipe failures.
-      - A non-Rust project completes at least one full task iteration end-to-end with the new defaults.
-      - An intentional failure in each project produces a diagnostics bundle that matches the contract.
-      - Task notes summarize any remaining quality issues observed during the integration run for follow-up planning.
-    verify_commands:
-      - go test ./...
-      - go install ./cmd/vibedrive
-    commit_message: 'chore: verify quality recovery end-to-end'
+      acceptance:
+        - config supports transport=tui|exec for codex and transport=tui|print for claude with clear validation errors for unknown values.
+        - docs/contracts/agent-transport.md specifies how each transport delivers prompts, gathers stdout/stderr, signals completion, and exits.
+        - Scaffolded vibedrive.yaml documents the new options with comments and keeps tui as the default for backward compatibility.
+        - Task notes capture decisions about which orchestration steps should default to non-interactive in the future scaffold.
+      verify_commands:
+        - go test ./internal/config
+        - go test ./internal/scaffold
+      commit_message: 'feat: agent transport selection contract'
+    - id: implement-codex-exec-transport
+      title: Implement non-interactive codex exec transport
+      details: |
+        Implement transport=exec for codex by invoking codex's non-interactive subcommand (codex exec) with the rendered prompt. Reuse the existing client interface so the runner does not need to know which transport is in use. Capture stdout/stderr per the diagnostics contract. Reject step types that are documented as TUI-only (and document them in the agent-transport contract if any are discovered). Keep the TUI implementation untouched for the create/init flows that need to remain interactive.
+      status: todo
+      workflow: implement
+      deps:
+        - agent-transport-config-contract
+        - codex-screen-detector-test-harness
+      component: codex-cli
+      owns_paths:
+        - pkg/agentcli/codex/**
+      reads_contracts:
+        - docs/contracts/agent-transport.md
+        - docs/contracts/diagnostics.md
+      conflicts_with:
+        - codex-screen-detector-test-harness
+      acceptance:
+        - codex.transport=exec runs orchestrated agent steps end-to-end via codex exec without launching a TUI.
+        - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
+        - The codex.transport=tui path continues to work with no behavior changes for TUI-only flows.
+        - Task notes record any codex exec features (e.g. session continuity) that the next iteration should leverage.
+      verify_commands:
+        - go test ./pkg/agentcli/codex
+      commit_message: 'feat: non-interactive codex exec transport'
+    - id: implement-claude-print-transport
+      title: Implement non-interactive claude print transport
+      details: |
+        Implement transport=print for claude by invoking claude with --print and the rendered prompt. Reuse the existing client interface. Capture stdout/stderr per the diagnostics contract. Reject step types that are TUI-only and document them. Keep the TUI implementation untouched.
+      status: todo
+      workflow: implement
+      deps:
+        - agent-transport-config-contract
+        - claude-screen-detector-test-harness
+      component: claude-cli
+      owns_paths:
+        - pkg/agentcli/claude/**
+      reads_contracts:
+        - docs/contracts/agent-transport.md
+        - docs/contracts/diagnostics.md
+      conflicts_with:
+        - claude-screen-detector-test-harness
+      acceptance:
+        - claude.transport=print runs orchestrated agent steps end-to-end via claude --print without launching a TUI.
+        - Tests cover happy path, non-zero exit, prompt rendering, and diagnostics capture on failure.
+        - The claude.transport=tui path continues to work with no behavior changes for TUI-only flows.
+        - Task notes record any --print flags or session-continuation behavior that the next iteration should leverage.
+      verify_commands:
+        - go test ./pkg/agentcli/claude
+      commit_message: 'feat: non-interactive claude print transport'
+    - id: pin-agent-cli-versions
+      title: Pin codex and claude CLI versions in config and scaffold
+      details: |
+        Add optional codex.version and claude.version fields to the config. When set, vibedrive checks the resolved CLI's reported version on startup and refuses to run if it does not match (so a silent codex update cannot shift screen-scraping ground truth under us). Update the scaffold to record the version used at init time so plans are reproducible. Document the new fields and the rationale ("pin to keep TUI heuristics stable across runs") in README.md.
+      status: todo
+      workflow: implement
+      deps:
+        - agent-transport-config-contract
+      component: config-scaffold
+      owns_paths:
+        - internal/config/**
+        - internal/scaffold/**
+      acceptance:
+        - config supports codex.version and claude.version with clear error messages when the live CLI version differs.
+        - vibedrive init records the live versions in the scaffolded vibedrive.yaml.
+        - README.md documents the pinning fields and explains why they exist.
+        - Task notes record what to do when an upgrade is intentionally desired (manual version bump path).
+      verify_commands:
+        - go test ./internal/config
+        - go test ./internal/scaffold
+      commit_message: 'feat: pin agent CLI versions to stabilize TUI heuristics'
+    - id: integration-checkpoint-quality-recovery
+      title: End-to-end run on a target project verifies the recovery
+      details: |
+        Run vibedrive end-to-end against a fresh checkout of a Rust project (meetspace shape) and a non-Rust project (ECSNet shape) using the new defaults. For each project capture a diagnostics bundle from at least one intentional failure (e.g. a verify_commands failure) and confirm the bundle contents match docs/contracts/diagnostics.md. Confirm that finalize commits stay quiet, that no broken-pipe occurs even with build artifacts present, and that an unknown-state TUI failure produces an actionable error with a diagnostics path. If any acceptance criterion fails, this task records the failure and stays in_progress.
+      status: todo
+      workflow: checkpoint
+      deps:
+        - fix-git-commit-output-volume
+        - bound-runner-exec-output
+        - fail-fast-on-unknown-tui-state
+        - implement-codex-exec-transport
+        - implement-claude-print-transport
+        - pin-agent-cli-versions
+      reads_contracts:
+        - docs/contracts/diagnostics.md
+        - docs/contracts/agent-transport.md
+      conflicts_with:
+        - fix-git-commit-output-volume
+        - bound-runner-exec-output
+        - fail-fast-on-unknown-tui-state
+        - implement-codex-exec-transport
+        - implement-claude-print-transport
+        - pin-agent-cli-versions
+      acceptance:
+        - A Rust-shaped project completes at least one full task iteration end-to-end with the new defaults and no broken-pipe failures.
+        - A non-Rust project completes at least one full task iteration end-to-end with the new defaults.
+        - An intentional failure in each project produces a diagnostics bundle that matches the contract.
+        - Task notes summarize any remaining quality issues observed during the integration run for follow-up planning.
+      verify_commands:
+        - go test ./...
+        - go install ./cmd/vibedrive
+      commit_message: 'chore: verify quality recovery end-to-end'
