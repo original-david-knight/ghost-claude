@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"vibedrive/pkg/agentcli/codex"
 
@@ -28,6 +29,7 @@ const (
 	defaultClaudeEffort         = "max"
 	defaultClaudePermissionMode = "bypassPermissions"
 	defaultStartupTimeout       = "30s"
+	defaultIdleActivityTimeout  = "60s"
 	defaultCodexReasoningEffort = "xhigh"
 	defaultCodexBypassFlag      = "--dangerously-bypass-approvals-and-sandbox"
 
@@ -37,6 +39,9 @@ const (
 
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
+
+	DefaultCoderAgent    = AgentClaude
+	DefaultReviewerAgent = AgentCodex
 
 	StepActorCoder    = "coder"
 	StepActorReviewer = "reviewer"
@@ -68,20 +73,22 @@ type ParallelConfig struct {
 }
 
 type ClaudeConfig struct {
-	Command         string   `yaml:"command"`
-	Version         string   `yaml:"version"`
-	Args            []string `yaml:"args"`
-	Transport       string   `yaml:"transport"`
-	StartupTimeout  string   `yaml:"startup_timeout"`
-	SessionStrategy string   `yaml:"session_strategy"`
+	Command             string   `yaml:"command"`
+	Version             string   `yaml:"version"`
+	Args                []string `yaml:"args"`
+	Transport           string   `yaml:"transport"`
+	StartupTimeout      string   `yaml:"startup_timeout"`
+	IdleActivityTimeout string   `yaml:"idle_activity_timeout"`
+	SessionStrategy     string   `yaml:"session_strategy"`
 }
 
 type CodexConfig struct {
-	Command        string   `yaml:"command"`
-	Version        string   `yaml:"version"`
-	Args           []string `yaml:"args"`
-	Transport      string   `yaml:"transport"`
-	StartupTimeout string   `yaml:"startup_timeout"`
+	Command             string   `yaml:"command"`
+	Version             string   `yaml:"version"`
+	Args                []string `yaml:"args"`
+	Transport           string   `yaml:"transport"`
+	StartupTimeout      string   `yaml:"startup_timeout"`
+	IdleActivityTimeout string   `yaml:"idle_activity_timeout"`
 }
 
 type Step struct {
@@ -151,6 +158,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Claude.StartupTimeout == "" {
 		cfg.Claude.StartupTimeout = defaultStartupTimeout
 	}
+	if cfg.Claude.IdleActivityTimeout == "" {
+		cfg.Claude.IdleActivityTimeout = defaultIdleActivityTimeout
+	}
 	if cfg.Claude.SessionStrategy == "" {
 		cfg.Claude.SessionStrategy = SessionStrategySessionID
 	}
@@ -167,6 +177,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Codex.StartupTimeout == "" {
 		cfg.Codex.StartupTimeout = defaultStartupTimeout
+	}
+	if cfg.Codex.IdleActivityTimeout == "" {
+		cfg.Codex.IdleActivityTimeout = defaultIdleActivityTimeout
 	}
 	cfg.Codex.Args = ensureDefaultCodexArgs(cfg.Codex.Args)
 
@@ -253,6 +266,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("claude.startup_timeout is required")
 	}
 
+	if err := validateIdleActivityTimeout("claude.idle_activity_timeout", c.Claude.IdleActivityTimeout); err != nil {
+		return err
+	}
+
 	switch normalize(c.Claude.SessionStrategy) {
 	case "", SessionStrategySessionID, SessionStrategyContinue:
 	default:
@@ -268,6 +285,10 @@ func (c *Config) Validate() error {
 	case CodexTransportTUI, CodexTransportExec:
 	default:
 		return fmt.Errorf("unsupported codex.transport %q", c.Codex.Transport)
+	}
+
+	if err := validateIdleActivityTimeout("codex.idle_activity_timeout", c.Codex.IdleActivityTimeout); err != nil {
+		return err
 	}
 
 	if err := validateCodexArgs(codexTransport, c.Codex.Args); err != nil {
@@ -323,31 +344,48 @@ func defaultConfig() Config {
 		Workspace:            ".",
 		PlanFile:             "vibedrive-plan.yaml",
 		MaxStalledIterations: 2,
-		Coder:                AgentCodex,
-		Reviewer:             AgentClaude,
+		Coder:                DefaultCoderAgent,
+		Reviewer:             DefaultReviewerAgent,
 		Parallel: ParallelConfig{
 			MaxParallelism: DefaultParallelMaxParallelism,
 			WorktreeRoot:   DefaultParallelWorktreeRoot,
 			ArtifactRoot:   DefaultParallelArtifactRoot,
 		},
 		Claude: ClaudeConfig{
-			Command:         "claude",
-			Args:            []string{"--effort", defaultClaudeEffort},
-			Transport:       ClaudeTransportTUI,
-			StartupTimeout:  defaultStartupTimeout,
-			SessionStrategy: SessionStrategySessionID,
+			Command:             "claude",
+			Args:                []string{"--effort", defaultClaudeEffort},
+			Transport:           ClaudeTransportTUI,
+			StartupTimeout:      defaultStartupTimeout,
+			IdleActivityTimeout: defaultIdleActivityTimeout,
+			SessionStrategy:     SessionStrategySessionID,
 		},
 		Codex: CodexConfig{
-			Command:        "codex",
-			StartupTimeout: defaultStartupTimeout,
-			Transport:      CodexTransportTUI,
-			Args:           defaultCodexArgs(),
+			Command:             "codex",
+			StartupTimeout:      defaultStartupTimeout,
+			IdleActivityTimeout: defaultIdleActivityTimeout,
+			Transport:           CodexTransportTUI,
+			Args:                defaultCodexArgs(),
 		},
 	}
 }
 
 func normalize(value string) string {
 	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func validateIdleActivityTimeout(field, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return fmt.Errorf("parse %s %q: %w", field, value, err)
+	}
+	if d < 0 {
+		return fmt.Errorf("%s must be >= 0", field)
+	}
+	return nil
 }
 
 func NormalizeAgent(value string) string {

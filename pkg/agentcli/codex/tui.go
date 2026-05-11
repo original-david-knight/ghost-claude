@@ -420,6 +420,12 @@ func codexScreenState(text string) (string, bool) {
 }
 
 // ScreenState classifies captured Codex screen text as idle or busy when known.
+// Callers must not trust an "idle" result on its own when the title shows a
+// busy spinner: the welcome banner that this function uses as the idle signal
+// stays in scrollback for the lifetime of the session, so a single capture can
+// land mid-redraw with the banner visible but the live "Working ... interrupt"
+// line not yet flushed, even while Codex is still working. Cross-check against
+// title classification (see IsBusyTitle) to break that tie.
 func ScreenState(text string) (string, bool) {
 	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
 	if strings.Contains(compact, "working") && strings.Contains(compact, "interrupt") {

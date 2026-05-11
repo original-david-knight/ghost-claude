@@ -739,11 +739,11 @@ func TestLoadDefaultsRolesForAgentSteps(t *testing.T) {
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != AgentCodex {
-		t.Fatalf("expected default coder %q, got %q", AgentCodex, cfg.CoderAgent())
+	if cfg.CoderAgent() != AgentClaude {
+		t.Fatalf("expected default coder %q, got %q", AgentClaude, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != AgentClaude {
-		t.Fatalf("expected default reviewer %q, got %q", AgentClaude, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != AgentCodex {
+		t.Fatalf("expected default reviewer %q, got %q", AgentCodex, cfg.ReviewerAgent())
 	}
 }
 
@@ -772,11 +772,11 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != AgentCodex {
-		t.Fatalf("expected default coder %q, got %q", AgentCodex, cfg.CoderAgent())
+	if cfg.CoderAgent() != AgentClaude {
+		t.Fatalf("expected default coder %q, got %q", AgentClaude, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != AgentClaude {
-		t.Fatalf("expected default reviewer %q, got %q", AgentClaude, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != AgentCodex {
+		t.Fatalf("expected default reviewer %q, got %q", AgentCodex, cfg.ReviewerAgent())
 	}
 }
 

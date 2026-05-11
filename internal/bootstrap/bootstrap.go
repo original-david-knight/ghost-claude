@@ -11,6 +11,7 @@ import (
 
 	"vibedrive/internal/agentlaunch"
 	"vibedrive/internal/config"
+	"vibedrive/internal/plan"
 	"vibedrive/internal/scaffold"
 	"vibedrive/pkg/agentcli/claude"
 )
@@ -133,6 +134,9 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderCreatePlanPrompt(cfg, source, componentsPath)); err != nil {
 		return err
 	}
+	if err := requireValidPlan(cfg.PlanFile, "plan author phase"); err != nil {
+		return err
+	}
 	if err := i.runBootstrapPhase(ctx, cfg, critic, "critic", renderCriticPlanPrompt(cfg, source, componentsPath, planFeedbackPath)); err != nil {
 		return err
 	}
@@ -140,6 +144,9 @@ func (i *Initializer) Run(ctx context.Context, configPath string, sourceArgs []s
 		return err
 	}
 	if err := i.runBootstrapPhase(ctx, cfg, author, "author", renderRevisePlanPrompt(cfg, source, componentsPath, planFeedbackPath)); err != nil {
+		return err
+	}
+	if err := requireValidPlan(cfg.PlanFile, "plan revision phase"); err != nil {
 		return err
 	}
 
@@ -286,6 +293,7 @@ func renderCreatePlanPrompt(cfg *config.Config, source sourceSpec, componentsPat
 	planRef := repoRelative(cfg.Workspace, cfg.PlanFile)
 	componentsRef := repoRelative(cfg.Workspace, componentsPath)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
+	shapeRules := renderPlanShapeRules(planRef)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Bootstrap vibedrive plan mode for this repository.
@@ -298,6 +306,8 @@ Also read the component breakdown in %s completely and use it as the authority f
 Read every listed file completely. Follow any referenced local docs that materially define the project, scope, tests, constraints, checkpoints, or success criteria.
 
 Create %s as a machine-readable execution plan for the whole project.
+
+%s
 
 Write valid YAML with this structure:
 
@@ -373,7 +383,7 @@ Requirements for the plan:
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
-`, sourceRefs, componentsRef, planRef, componentsRef, componentsRef, componentsRef, planRef))
+`, sourceRefs, componentsRef, planRef, shapeRules, componentsRef, componentsRef, componentsRef, planRef))
 }
 
 func renderCriticPlanPrompt(cfg *config.Config, source sourceSpec, componentsPath, feedbackPath string) string {
@@ -391,6 +401,8 @@ Also read %s and inspect any source docs they reference when checking plan cover
 Perform a critical review of the plan. You are the critic only: do not change %s, and do not change any source document.
 
 Focus on:
+- missing or malformed required top-level YAML sibling sections, especially a missing top-level tasks sequence
+- task lists incorrectly nested under project, components, milestones, phases, plan, or any other wrapper instead of top-level tasks
 - missing constraints or success criteria
 - missing, stale, or contradicted use of the component breakdown in %s
 - missing component, ownership, contract, or integration-boundary analysis before task generation
@@ -421,6 +433,7 @@ func renderRevisePlanPrompt(cfg *config.Config, source sourceSpec, componentsPat
 	componentsRef := repoRelative(cfg.Workspace, componentsPath)
 	sourceRefs := renderSourceRefs(cfg.Workspace, source.Files)
 	feedbackRef := repoRelative(cfg.Workspace, feedbackPath)
+	shapeRules := renderPlanShapeRules(planRef)
 
 	return strings.TrimSpace(fmt.Sprintf(`
 Revise the generated execution plan in %s using the transient critic feedback at %s.
@@ -433,6 +446,8 @@ Read %s, %s, %s, and every listed source input completely before making changes.
 Apply actionable critic feedback directly to %s. Ignore feedback that would weaken or contradict the listed source inputs.
 
 Keep the YAML valid. Keep task statuses at todo. Do not weaken or remove constraints from the source requirements.
+
+%s
 
 When revising:
 - preserve every explicit requirement, constraint, checkpoint, success gate, and verification demand from the listed source inputs
@@ -456,7 +471,16 @@ When revising:
 - quote any string list item that contains a colon followed by a space so the YAML stays valid
 
 After writing %s, quickly check that the YAML parses and that dependency ordering is coherent.
-`, planRef, feedbackRef, sourceRefs, planRef, feedbackRef, componentsRef, planRef, componentsRef, componentsRef, planRef))
+`, planRef, feedbackRef, sourceRefs, planRef, feedbackRef, componentsRef, planRef, shapeRules, componentsRef, componentsRef, planRef))
+}
+
+func renderPlanShapeRules(planRef string) string {
+	return fmt.Sprintf(`Plan shape rules:
+- %s must be YAML only; do not wrap it in Markdown fences or add explanatory prose.
+- The required top-level sibling sections are project: and tasks:, both at indentation zero.
+- tasks: must be a top-level YAML sequence with at least one task item. Never put tasks under project, components, milestones, phases, plan, task_groups, or any other wrapper.
+- project.components is the component catalog; it is not the task list.
+- Every executable item must be a top-level tasks entry with id, title, status: todo, workflow, acceptance, and any known dependency or boundary metadata.`, planRef)
 }
 
 func initComponentsPath(workspace string) string {
@@ -481,6 +505,16 @@ func requireNonEmptyFile(path, phase string) error {
 	}
 	if info.Size() == 0 {
 		return fmt.Errorf("%s wrote empty required artifact %s", phase, path)
+	}
+	return nil
+}
+
+func requireValidPlan(path, phase string) error {
+	if err := requireNonEmptyFile(path, phase); err != nil {
+		return err
+	}
+	if _, err := plan.Load(path); err != nil {
+		return fmt.Errorf("%s wrote invalid plan %s: %w", phase, path, err)
 	}
 	return nil
 }

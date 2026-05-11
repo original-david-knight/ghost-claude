@@ -1,7 +1,7 @@
 {
   "name": "busy-title",
   "branch": "busy title",
-  "source": "tmux capture from codex-cli 0.129.0 while the title showed a spinner before the visible working marker rendered in the 003-codex-screen-detector-test-harness worktree on 2026-05-07",
+  "source": "tmux capture from codex-cli 0.129.0 while the title showed a spinner before the visible Working marker rendered in the 003-codex-screen-detector-test-harness worktree on 2026-05-07; the welcome banner is in scrollback but the live Working line is not yet visible, so codexScreenState reports idle in isolation — the snapshot orchestration must cross-check the busy title spinner before trusting that result.",
   "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/003-codex-screen-detector-test-harness-1f2457693a42",
   "title": "⠼ 003-codex-screen-dete...",
   "screen_file": "busy-title.txt",

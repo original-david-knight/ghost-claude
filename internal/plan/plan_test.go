@@ -293,7 +293,7 @@ func TestFindNextReadyHonorsDependencies(t *testing.T) {
 	}
 }
 
-func TestFindNextReadyReturnsNoReadyWhenBlockedByDeps(t *testing.T) {
+func TestFindNextReadyTreatsBlockedDepsAsTerminal(t *testing.T) {
 	file := &File{
 		Tasks: []Task{
 			{ID: "first", Title: "first", Status: StatusBlocked},
@@ -301,9 +301,31 @@ func TestFindNextReadyReturnsNoReadyWhenBlockedByDeps(t *testing.T) {
 		},
 	}
 
+	task, err := file.FindNextReady()
+	if err != nil {
+		t.Fatalf("FindNextReady returned error: %v", err)
+	}
+
+	if task.ID != "second" {
+		t.Fatalf("expected task with blocked terminal dependency to be ready, got %q", task.ID)
+	}
+}
+
+func TestFindNextReadyReturnsCompleteWhenOnlyTerminalTasksRemain(t *testing.T) {
+	file := &File{
+		Tasks: []Task{
+			{ID: "done", Title: "done", Status: StatusDone},
+			{ID: "blocked", Title: "blocked", Status: StatusBlocked},
+			{ID: "manual", Title: "manual", Status: StatusManual},
+		},
+	}
+
 	_, err := file.FindNextReady()
-	if !errors.Is(err, ErrNoReadyTasks) {
-		t.Fatalf("expected ErrNoReadyTasks, got %v", err)
+	if !errors.Is(err, ErrAllTasksDone) {
+		t.Fatalf("expected ErrAllTasksDone, got %v", err)
+	}
+	if unfinished := file.UnfinishedTasks(); len(unfinished) != 0 {
+		t.Fatalf("expected no unfinished non-terminal tasks, got %#v", unfinished)
 	}
 }
 

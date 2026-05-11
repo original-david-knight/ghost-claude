@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,8 @@ import (
 
 const resultDir = ".vibedrive/task-results"
 const reviewDir = ".vibedrive/reviews"
+
+const VerificationFailureNotePrefix = "Verification failed while running"
 
 type TaskResult struct {
 	Status string `json:"status"`
@@ -37,6 +40,25 @@ type FinalizeOptions struct {
 	TaskID        string
 	ResultPath    string
 	CommitMessage string
+}
+
+type VerificationError struct {
+	TaskID  string
+	Command string
+	Err     error
+}
+
+func (e *VerificationError) Error() string {
+	return fmt.Sprintf("verify task %q with %q: %v", e.TaskID, e.Command, e.Err)
+}
+
+func (e *VerificationError) Unwrap() error {
+	return e.Err
+}
+
+func IsVerificationError(err error) bool {
+	var verifyErr *VerificationError
+	return errors.As(err, &verifyErr)
 }
 
 func ResultPath(workspace, taskID string) string {
@@ -132,7 +154,7 @@ func Finalize(ctx context.Context, opts FinalizeOptions, stdout, stderr io.Write
 			if err := file.Save(); err != nil {
 				return err
 			}
-			return fmt.Errorf("verify task %q with %q: %w", opts.TaskID, failedCommand, verifyErr)
+			return &VerificationError{TaskID: opts.TaskID, Command: failedCommand, Err: verifyErr}
 		}
 	case plan.StatusInProgress, plan.StatusBlocked, plan.StatusManual:
 	default:
@@ -397,9 +419,12 @@ func normalizeStatus(status string) string {
 
 func appendFailureNote(notes, command string) string {
 	notes = strings.TrimSpace(notes)
-	suffix := fmt.Sprintf("Verification failed while running %q.", command)
+	suffix := fmt.Sprintf("%s %q.", VerificationFailureNotePrefix, command)
 	if notes == "" {
 		return suffix
+	}
+	if strings.Contains(notes, suffix) {
+		return notes
 	}
 	return notes + " " + suffix
 }

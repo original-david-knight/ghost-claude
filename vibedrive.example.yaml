@@ -14,6 +14,11 @@ claude:
   command: claude
   transport: tui
   startup_timeout: 30s
+  # Treat the agent as done if the tmux pane has produced no visible output
+  # for this long. Guards against title-classifier misses where the agent has
+  # finished but its TUI title never matches the "idle" pattern. Set to 0 to
+  # disable the fallback.
+  idle_activity_timeout: 60s
   args:
     - --effort
     - max
@@ -24,6 +29,7 @@ codex:
   command: codex
   transport: tui
   startup_timeout: 30s
+  idle_activity_timeout: 60s
   args:
     - --dangerously-bypass-approvals-and-sandbox
     - -c

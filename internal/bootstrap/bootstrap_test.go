@@ -47,12 +47,17 @@ type fakePhaseLauncher struct {
 	workspace             string
 	componentFeedbackPath string
 	feedbackPath          string
+	planPath              string
+	authorPlanContent     string
 	nextID                int
 	events                []phaseEvent
 	prompts               []capturedPhasePrompt
 }
 
 func (f *fakePhaseLauncher) launch(cfg *config.Config, agentType, role string, stdout, stderr io.Writer) (agentlaunch.Runner, error) {
+	if f.planPath == "" {
+		f.planPath = cfg.PlanFile
+	}
 	f.nextID++
 	id := f.nextID
 	f.events = append(f.events, phaseEvent{Kind: "launch", Role: role, AgentType: agentType, ID: id})
@@ -77,6 +82,15 @@ func (f *fakePhaseRunner) RunPrompt(_ context.Context, prompt string) error {
 	if f.role == "components" && f.parent.workspace != "" {
 		componentsPath := initComponentsPath(f.parent.workspace)
 		if err := os.WriteFile(componentsPath, []byte("# Components\n\n## app: App\n- Owned paths:\n  - internal/app/**\n"), 0o644); err != nil {
+			f.parent.t.Fatalf("WriteFile returned error: %v", err)
+		}
+	}
+	if f.role == "author" && f.parent.planPath != "" {
+		content := f.parent.authorPlanContent
+		if content == "" {
+			content = validBootstrapPlanContent()
+		}
+		if err := os.WriteFile(f.parent.planPath, []byte(content), 0o644); err != nil {
 			f.parent.t.Fatalf("WriteFile returned error: %v", err)
 		}
 	}
@@ -116,6 +130,31 @@ func newFakePhaseInitializer(t *testing.T, workspace string) (*Initializer, *fak
 	init := New(io.Discard, io.Discard)
 	init.launchAgent = launcher.launch
 	return init, launcher
+}
+
+func validBootstrapPlanContent() string {
+	return `project:
+  name: demo
+  objective: Ship the demo.
+  source_docs:
+    - DESIGN.md
+  components:
+    - id: app
+      name: App
+      owned_paths:
+        - internal/app/**
+tasks:
+  - id: scaffold
+    title: Scaffold app
+    status: todo
+    workflow: implement
+    component: app
+    owns_paths:
+      - internal/app/**
+    acceptance:
+      - App scaffold exists.
+      - Leave task notes describing what was learned in this phase.
+`
 }
 
 func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
@@ -226,6 +265,16 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	if !strings.Contains(createPrompt, "Create vibedrive-plan.yaml") {
 		t.Fatalf("expected first prompt to create the plan file, got %q", createPrompt)
 	}
+	for _, want := range []string{
+		"The required top-level sibling sections are project: and tasks:",
+		"tasks: must be a top-level YAML sequence with at least one task item",
+		"Never put tasks under project, components, milestones, phases, plan, task_groups, or any other wrapper",
+		"project.components is the component catalog; it is not the task list",
+	} {
+		if !strings.Contains(createPrompt, want) {
+			t.Fatalf("expected first prompt to include plan shape rule %q, got %q", want, createPrompt)
+		}
+	}
 	if !strings.Contains(createPrompt, "component breakdown in COMPONENTS.md") {
 		t.Fatalf("expected plan prompt to read COMPONENTS.md, got %q", createPrompt)
 	}
@@ -284,6 +333,12 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(criticPrompt, "Perform a critical review of the plan") {
 		t.Fatalf("expected second prompt to request a critical plan review, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "missing or malformed required top-level YAML sibling sections") {
+		t.Fatalf("expected second prompt to review plan shape, got %q", criticPrompt)
+	}
+	if !strings.Contains(criticPrompt, "task lists incorrectly nested under project") {
+		t.Fatalf("expected second prompt to reject nested task lists, got %q", criticPrompt)
 	}
 	if !strings.Contains(criticPrompt, "Also read COMPONENTS.md") {
 		t.Fatalf("expected critic prompt to read COMPONENTS.md, got %q", criticPrompt)
@@ -353,6 +408,9 @@ func TestInitializerRunWritesConfigAndBootstrapsPlan(t *testing.T) {
 	}
 	if !strings.Contains(revisionPrompt, "Apply actionable critic feedback directly to vibedrive-plan.yaml") {
 		t.Fatalf("expected third prompt to apply actionable critic feedback, got %q", revisionPrompt)
+	}
+	if !strings.Contains(revisionPrompt, "tasks: must be a top-level YAML sequence with at least one task item") {
+		t.Fatalf("expected third prompt to preserve top-level task shape, got %q", revisionPrompt)
 	}
 	if !strings.Contains(revisionPrompt, "keep testing, verification, and cleanup work attached to the implementation task") {
 		t.Fatalf("expected third prompt to preserve inline testing and cleanup, got %q", revisionPrompt)
@@ -501,8 +559,41 @@ func TestInitializerRunRegeneratesPlanWithForce(t *testing.T) {
 	if !strings.Contains(launcher.prompts[3].Prompt, "vibedrive-plan.yaml") {
 		t.Fatalf("expected plan author prompt to mention the plan path, got %q", launcher.prompts[3].Prompt)
 	}
-	if _, err := os.Stat(planPath); !os.IsNotExist(err) {
-		t.Fatalf("expected existing plan file to be removed before prompting, stat err=%v", err)
+	if _, err := os.Stat(planPath); err != nil {
+		t.Fatalf("expected regenerated plan file, stat err=%v", err)
+	}
+}
+
+func TestInitializerRunRejectsGeneratedPlanWithoutTopLevelTasks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+	sourcePath := filepath.Join(dir, "DESIGN.md")
+
+	if err := os.WriteFile(sourcePath, []byte("design\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	init, launcher := newFakePhaseInitializer(t, dir)
+	launcher.authorPlanContent = `project:
+  name: malformed
+  tasks:
+    - id: nested
+      title: Nested task
+      status: todo
+`
+
+	err := init.Run(context.Background(), configPath, []string{sourcePath}, false, config.AgentCodex, config.AgentClaude)
+	if err == nil {
+		t.Fatal("expected Run to reject malformed generated plan")
+	}
+	if !strings.Contains(err.Error(), "plan author phase wrote invalid plan") {
+		t.Fatalf("expected plan author validation error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "plan must contain at least one task") {
+		t.Fatalf("expected missing top-level tasks validation error, got %v", err)
+	}
+	if len(launcher.prompts) != 4 {
+		t.Fatalf("expected init to stop after the invalid author plan, got %d prompts", len(launcher.prompts))
 	}
 }
 

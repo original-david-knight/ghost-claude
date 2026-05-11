@@ -18,8 +18,23 @@ tasks:
       status: done
       notes: 'Exec steps now use diagnostics TailBuffer for stdout, stderr, and combined output, and capture exec diagnostics on command failure without changing the returned error format. Followup: future tmux/agent diagnostics should reuse the runner parent stdout/stderr tail capture instead of introducing separate parent-output buffers.'
     - id: wire-tmux-diagnostics
-      status: in_progress
-      notes: 'Wired tmux TUI failures to diagnostics.Capturer for startup timeout, submit timeout, and unexpected exit. Added title-state history, prompt payload capture, pane snapshots, timing/counter metadata, and errors pointing at the debug directory. Touched internal/runner/runner.go outside owns_paths only to pass run/task/step identity into tmux clients via context. Pattern for fail-fast task: current submit loops still retry after unclassified/no-busy states; diagnostics now expose prompt attempt counts and state history for that decision. Parallel worker changes did not apply cleanly: git apply: exit status 1: error: patch failed: internal/runner/runner.go:2052 error: internal/runner/runner.go: patch does not apply. Recovery patch preserved at /home/david/workspace/vibedrive/.vibedrive/task-runs/recovery/wire-tmux-diagnostics-79568bb6d2f9/rejected.patch; the next coder run should reconcile useful changes from that patch.'
+      status: done
+      notes: Structured tmux diagnostics are wired for startup timeout, submit timeout, and unexpected exit; runner passes run/task/step identity plus parent tails; go test ./internal/runner -run Tmux and go test ./internal/runner pass.
     - id: codex-screen-detector-test-harness
-      status: in_progress
-      notes: 'Parallel worker failed: step "execute-task" failed: ask codex to create required outputs after step "execute-task": codex tmux tui did not start processing after 3 enter presses; last tmux pane output: 20 + 21 + gpt-5.5 xhigh · ~/workspace/vibedrive/.vibedrive/wo....'
+      status: done
+      notes: 'Peer review requested changes were addressed. Codex ReadyScreen/ScreenState now live canonically in pkg/agentcli/codex and internal/runner delegates to them; this is a narrow edit outside owns_paths so the package golden tests protect the runtime tmux detector. Busy-title and working-screen fixtures now use distinct screen evidence, and the CLI usage-error ambiguous fixture was replaced with a TUI-style stuck/no-submit fixture reconstructed from the prior failure notes because no diagnostics bundle was present. Remaining evidence: current heuristics still classify model-dialog panes as ready when the startup card remains visible and idle-looking status titles as idle even for stuck submit states; preserved for follow-up behavior fixes.'
+    - id: claude-screen-detector-test-harness
+      status: done
+      notes: Added Claude Code 2.1.132 tmux-capture fixtures for idle title, busy title, trust prompt, and ambiguous/stuck error states, plus golden tests for classifyClaudeTmuxTitle and trust prompt detection. Real fixtures show the current title detector treats any non-empty non-idle title, including trust/error titles like cosmic, as busy; recorded unchanged for a future detector fix.
+    - id: implement-claude-print-transport
+      status: done
+      notes: Implemented claude.transport=print as claude --print with prompt on stdin, streamed stdout/stderr, exec-style diagnostics with prompt artifacts on failure, and RunInteractivePrompt rejection for TUI-only flows. Narrow runner edits outside claude-cli were required to pass run/task/step diagnostics identity and render SessionID empty for non-TUI Claude, matching the transport contract. Print ignores session_strategy today; next iteration should evaluate Claude --print continuation/session flags if session reuse is needed.
+    - id: fail-fast-on-unknown-tui-state
+      status: done
+      notes: Addressed review by adding Claude fixture-backed retry and fail-fast coverage, removing the package-global retry-interval test seam, and normalizing diagnostics state sources. The stricter policy will surface stale or ambiguous agent UI states, including panes whose title or screen no longer proves input is accepted.
+    - id: implement-codex-exec-transport
+      status: done
+      notes: Implemented codex.transport=exec via `codex exec` with stdin prompt delivery, stdout/stderr streaming, and codex_exec diagnostics on failures. Added codex tests for happy path, non-zero diagnostics, prompt delivery, and interactive rejection, plus narrow runner edits outside owns_paths so rendered codex exec steps get diagnostics identity and parallel workers only use tmux for fullscreen agents. Local `codex exec --help` shows `exec resume`; next iteration can evaluate session continuity support.
+    - id: integration-checkpoint-quality-recovery
+      status: done
+      notes: 'Added runner e2e checkpoint harness outside undeclared owns_paths for automated evidence. Rust/non-Rust fresh checkouts pass with codex exec/claude print; intentional finalize failures produce contract-shaped diagnostics; transient artifact excludes are exercised beyond .gitignore. Follow-ups remain in TUI/session paths not covered by the integration run: Codex/Claude detector edge cases, claude print session_strategy, and codex exec continuity.'

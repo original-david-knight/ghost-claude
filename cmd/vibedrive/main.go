@@ -67,8 +67,8 @@ func runCommand(ctx context.Context, args []string) error {
 	configPath := fs.String("config", "vibedrive.yaml", "Path to the workflow config file")
 	workspace := fs.String("workspace", "", "Workspace directory containing the workflow config")
 	dryRun := fs.Bool("dry-run", false, "Render prompts and commands without executing them")
-	coder := fs.String("coder", "", "Coder agent to use at runtime: claude or codex (default: codex)")
-	reviewer := fs.String("reviewer", "", "Peer reviewer agent to use at runtime: claude or codex (default: claude)")
+	coder := fs.String("coder", "", "Coder agent to use at runtime: claude or codex (default: claude)")
+	reviewer := fs.String("reviewer", "", "Peer reviewer agent to use at runtime: claude or codex (default: codex)")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -99,11 +99,11 @@ func runCommand(ctx context.Context, args []string) error {
 }
 
 func applyRuntimeAgentRoles(cfg *config.Config, coder, reviewer string) error {
-	resolvedCoder, err := config.ResolveAgent(coder, config.AgentCodex, "coder")
+	resolvedCoder, err := config.ResolveAgent(coder, config.DefaultCoderAgent, "coder")
 	if err != nil {
 		return err
 	}
-	resolvedReviewer, err := config.ResolveAgent(reviewer, config.AgentClaude, "reviewer")
+	resolvedReviewer, err := config.ResolveAgent(reviewer, config.DefaultReviewerAgent, "reviewer")
 	if err != nil {
 		return err
 	}

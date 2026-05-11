@@ -71,6 +71,9 @@ func RenderWithOptions(w io.Writer, file *plan.File, cfg *config.Config, opts Re
 }
 
 func renderActiveOnly(w io.Writer, file *plan.File, cfg *config.Config, activeTasks map[string]runstate.Task) {
+	counts := countStatuses(file.Tasks)
+	fmt.Fprintf(w, "%d/%d tasks completed\n", counts[plan.StatusDone], len(file.Tasks))
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Currently Executing:")
 	if len(activeTasks) == 0 {
 		fmt.Fprintln(w, "  none")
@@ -151,7 +154,7 @@ func nextSummary(file *plan.File) string {
 	case err == nil:
 		return fmt.Sprintf("%s - %s", task.ID, task.Title)
 	case errors.Is(err, plan.ErrAllTasksDone):
-		return "all tasks complete"
+		return "all runnable tasks complete"
 	case errors.Is(err, plan.ErrNoReadyTasks):
 		return fmt.Sprintf("none ready; unfinished tasks: %s", summarizeUnfinished(file.UnfinishedTasks()))
 	default:

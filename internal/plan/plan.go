@@ -364,7 +364,7 @@ func (t Task) IsTerminal() bool {
 func (f *File) UnfinishedTasks() []Task {
 	var tasks []Task
 	for _, task := range f.Tasks {
-		if normalizeStatus(task.Status) != StatusDone {
+		if !task.IsTerminal() {
 			tasks = append(tasks, task)
 		}
 	}
@@ -385,7 +385,7 @@ func (f *File) findReadyTaskByStatus(status string) (Task, bool) {
 
 func (f *File) hasUnfinishedTasks() bool {
 	for _, task := range f.Tasks {
-		if normalizeStatus(task.Status) != StatusDone {
+		if !task.IsTerminal() {
 			return true
 		}
 	}
@@ -400,7 +400,7 @@ func (f *File) unmetDependencyIDs(task Task) []string {
 	var unmet []string
 	for _, depID := range task.Deps {
 		dep, ok := f.FindTask(depID)
-		if !ok || normalizeStatus(dep.Status) != StatusDone {
+		if !ok || !dep.IsTerminal() {
 			unmet = append(unmet, depID)
 		}
 	}

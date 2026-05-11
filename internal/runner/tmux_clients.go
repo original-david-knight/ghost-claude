@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,6 +27,8 @@ const (
 	tmuxDiagnosticsTimeout  = 5 * time.Second
 )
 
+var tmuxPaneRedrawInterval = 5 * time.Second
+
 const (
 	tmuxFailureStartupTimeout     = "tmux_startup_timeout"
 	tmuxFailureSubmitTimeout      = "tmux_submit_prompt_timeout"
@@ -36,26 +39,28 @@ const (
 )
 
 type tmuxClaudeClient struct {
-	command        string
-	args           []string
-	workdir        string
-	startupTimeout time.Duration
-	controller     *tmuxagent.Controller
-	capturer       *diagnostics.Capturer
-	name           string
+	command             string
+	args                []string
+	workdir             string
+	startupTimeout      time.Duration
+	idleActivityTimeout time.Duration
+	controller          *tmuxagent.Controller
+	capturer            *diagnostics.Capturer
+	name                string
 
 	mu       sync.Mutex
 	sessions map[*claude.Session]*tmuxClaudeSession
 }
 
 type tmuxCodexClient struct {
-	command        string
-	args           []string
-	workdir        string
-	startupTimeout time.Duration
-	controller     *tmuxagent.Controller
-	capturer       *diagnostics.Capturer
-	name           string
+	command             string
+	args                []string
+	workdir             string
+	startupTimeout      time.Duration
+	idleActivityTimeout time.Duration
+	controller          *tmuxagent.Controller
+	capturer            *diagnostics.Capturer
+	name                string
 
 	mu       sync.Mutex
 	sessions map[*codex.Session]*tmuxCodexSession
@@ -68,6 +73,7 @@ type tmuxClaudeSession struct {
 	trustPrompts        int
 	trustPromptDetected bool
 	currentState        string
+	idleActivityTimeout time.Duration
 	diag                tmuxSessionDiagnostics
 }
 
@@ -79,18 +85,21 @@ type tmuxCodexSession struct {
 	trustPrompts        int
 	trustPromptDetected bool
 	currentState        string
+	idleActivityTimeout time.Duration
 	diag                tmuxSessionDiagnostics
 }
 
 type tmuxTitleSnapshot struct {
-	idleTransitions int
-	busyTransitions int
-	trustPrompts    int
-	currentState    string
-	observedState   string
-	observedSource  string
-	observedTitle   string
-	classified      bool
+	idleTransitions    int
+	busyTransitions    int
+	trustPrompts       int
+	currentState       string
+	observedState      string
+	observedSource     string
+	observedTitle      string
+	classified         bool
+	captureFingerprint uint64
+	captureValid       bool
 }
 
 type tmuxSessionDiagnostics struct {
@@ -145,6 +154,12 @@ type tmuxSubmitStateError struct {
 	source  string
 }
 
+type tmuxSubmitReadyError struct {
+	agent  string
+	state  string
+	source string
+}
+
 func (e *tmuxSubmitStateError) Error() string {
 	agent := strings.TrimSpace(e.agent)
 	if agent == "" {
@@ -168,8 +183,31 @@ func (e *tmuxSubmitStateError) Error() string {
 	return fmt.Sprintf("%s tmux tui submit aborted after enter press %d: TUI state %q from %s is not accepting input; refusing blind retry because the prompt may already be accepted", agent, attempt, state, source)
 }
 
+func (e *tmuxSubmitReadyError) Error() string {
+	agent := strings.TrimSpace(e.agent)
+	if agent == "" {
+		agent = "tmux"
+	}
+	state := strings.TrimSpace(e.state)
+	if state == "" {
+		state = tmuxObservedStateUnknown
+	}
+	source := strings.TrimSpace(e.source)
+	if source == "" {
+		source = "transport"
+	}
+	if state == tmuxObservedStateUnknown {
+		return fmt.Sprintf("%s tmux tui is not ready for prompt submission: unclassified TUI state %q from %s", agent, state, source)
+	}
+	return fmt.Sprintf("%s tmux tui is not ready for prompt submission: TUI state %q from %s is not accepting input", agent, state, source)
+}
+
 func (s tmuxTitleSnapshot) acceptingInputForSubmitRetry() bool {
 	return s.classified && s.observedState == "idle"
+}
+
+func (s tmuxTitleSnapshot) readyForPromptSubmission() bool {
+	return s.acceptingInputForSubmitRetry() || s.currentState == "idle"
 }
 
 func (s tmuxTitleSnapshot) submitRetryState() string {
@@ -186,27 +224,32 @@ func (s tmuxTitleSnapshot) submitRetrySource() string {
 	return "transport"
 }
 
-func newTmuxClaudeClient(command string, args []string, workdir, startupTimeout string, controller *tmuxagent.Controller, name string) (*tmuxClaudeClient, error) {
+func newTmuxClaudeClient(command string, args []string, workdir, startupTimeout, idleActivityTimeout string, controller *tmuxagent.Controller, name string) (*tmuxClaudeClient, error) {
 	timeout, err := time.ParseDuration(startupTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("parse claude.startup_timeout %q: %w", startupTimeout, err)
+	}
+	idleActivity, err := parseIdleActivityTimeout(idleActivityTimeout, "claude.idle_activity_timeout")
+	if err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(command) == "" {
 		command = "claude"
 	}
 	return &tmuxClaudeClient{
-		command:        command,
-		args:           append([]string{}, args...),
-		workdir:        workdir,
-		startupTimeout: timeout,
-		controller:     controller,
-		capturer:       diagnostics.New(workdir),
-		name:           name,
-		sessions:       make(map[*claude.Session]*tmuxClaudeSession),
+		command:             command,
+		args:                append([]string{}, args...),
+		workdir:             workdir,
+		startupTimeout:      timeout,
+		idleActivityTimeout: idleActivity,
+		controller:          controller,
+		capturer:            diagnostics.New(workdir),
+		name:                name,
+		sessions:            make(map[*claude.Session]*tmuxClaudeSession),
 	}, nil
 }
 
-func newTmuxCodexClient(command string, args []string, workdir, startupTimeout string, controller *tmuxagent.Controller, name string) (*tmuxCodexClient, error) {
+func newTmuxCodexClient(command string, args []string, workdir, startupTimeout, idleActivityTimeout string, controller *tmuxagent.Controller, name string) (*tmuxCodexClient, error) {
 	timeout := 30 * time.Second
 	if strings.TrimSpace(startupTimeout) != "" {
 		parsed, err := time.ParseDuration(startupTimeout)
@@ -215,19 +258,52 @@ func newTmuxCodexClient(command string, args []string, workdir, startupTimeout s
 		}
 		timeout = parsed
 	}
+	idleActivity, err := parseIdleActivityTimeout(idleActivityTimeout, "codex.idle_activity_timeout")
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(command) == "" {
 		command = "codex"
 	}
 	return &tmuxCodexClient{
-		command:        command,
-		args:           append([]string{}, args...),
-		workdir:        workdir,
-		startupTimeout: timeout,
-		controller:     controller,
-		capturer:       diagnostics.New(workdir),
-		name:           name,
-		sessions:       make(map[*codex.Session]*tmuxCodexSession),
+		command:             command,
+		args:                append([]string{}, args...),
+		workdir:             workdir,
+		startupTimeout:      timeout,
+		idleActivityTimeout: idleActivity,
+		controller:          controller,
+		capturer:            diagnostics.New(workdir),
+		name:                name,
+		sessions:            make(map[*codex.Session]*tmuxCodexSession),
 	}, nil
+}
+
+func parseIdleActivityTimeout(value, field string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s %q: %w", field, value, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must be >= 0", field)
+	}
+	return d, nil
+}
+
+func tmuxCaptureFingerprint(text string) uint64 {
+	if text == "" {
+		return 0
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	sum := h.Sum64()
+	if sum == 0 {
+		sum = 1
+	}
+	return sum
 }
 
 func withTmuxDiagnosticsIdentity(ctx context.Context, runID, taskID, stepName string) context.Context {
@@ -343,7 +419,7 @@ func (c *tmuxClaudeClient) ensureSession(ctx context.Context, session *claude.Se
 	c.mu.Lock()
 	state := c.sessions[session]
 	if state == nil {
-		state = newTmuxClaudeSession(c.capturer, c.command, c.args, c.workdir, c.startupTimeout)
+		state = newTmuxClaudeSession(c.capturer, c.command, c.args, c.workdir, c.startupTimeout, c.idleActivityTimeout)
 		c.sessions[session] = state
 	}
 	c.mu.Unlock()
@@ -376,15 +452,16 @@ func (c *tmuxClaudeClient) ensureSession(ctx context.Context, session *claude.Se
 	return state, nil
 }
 
-func newTmuxClaudeSession(capturer *diagnostics.Capturer, command string, args []string, workdir string, startupTimeout time.Duration) *tmuxClaudeSession {
+func newTmuxClaudeSession(capturer *diagnostics.Capturer, command string, args []string, workdir string, startupTimeout, idleActivityTimeout time.Duration) *tmuxClaudeSession {
 	return &tmuxClaudeSession{
-		diag: newTmuxSessionDiagnostics(capturer, "claude", command, args, workdir, startupTimeout),
+		idleActivityTimeout: idleActivityTimeout,
+		diag:                newTmuxSessionDiagnostics(capturer, "claude", command, args, workdir, startupTimeout),
 	}
 }
 
 func (s *tmuxClaudeSession) sendPrompt(ctx context.Context, prompt string) error {
 	s.diag.lastPromptStartedAt = time.Now()
-	snapshot, err := s.snapshot(ctx)
+	snapshot, err := s.waitForSubmitReady(ctx)
 	if err != nil {
 		return err
 	}
@@ -482,7 +559,11 @@ func (s *tmuxClaudeSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, er
 		observedState = state
 		observedKnown = true
 	}
+	var fingerprint uint64
+	captureValid := false
 	if text, err := s.pane.Capture(ctx, 80); err == nil {
+		fingerprint = tmuxCaptureFingerprint(text)
+		captureValid = true
 		trustDetected := strings.Contains(ptyrunner.CompactVisibleText([]byte(text)), "yesitrustthisfolder")
 		if trustDetected && !s.trustPromptDetected {
 			s.trustPrompts++
@@ -495,7 +576,10 @@ func (s *tmuxClaudeSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, er
 			observedKnown = true
 		}
 	}
-	return s.snapshotWithObservation(observedSource, title, observedState, observedKnown), nil
+	snap := s.snapshotWithObservation(observedSource, title, observedState, observedKnown)
+	snap.captureFingerprint = fingerprint
+	snap.captureValid = captureValid
+	return snap, nil
 }
 
 func classifyClaudeTmuxTitle(title string) (string, bool) {
@@ -545,7 +629,7 @@ func (c *tmuxCodexClient) ensureSession(ctx context.Context, session *codex.Sess
 	c.mu.Lock()
 	state := c.sessions[session]
 	if state == nil {
-		state = newTmuxCodexSession(c.workdir)
+		state = newTmuxCodexSession(c.workdir, c.idleActivityTimeout)
 		state.diag = newTmuxSessionDiagnostics(c.capturer, "codex", c.command, c.args, c.workdir, c.startupTimeout)
 		state.recordTitleEvent("transport", "", state.currentState)
 		c.sessions[session] = state
@@ -580,21 +664,22 @@ func (c *tmuxCodexClient) ensureSession(ctx context.Context, session *codex.Sess
 	return state, nil
 }
 
-func newTmuxCodexSession(workdir string) *tmuxCodexSession {
+func newTmuxCodexSession(workdir string, idleActivityTimeout time.Duration) *tmuxCodexSession {
 	idleTitle := filepath.Base(filepath.Clean(workdir))
 	if idleTitle == "." || idleTitle == string(filepath.Separator) || idleTitle == "" {
 		idleTitle = "codex"
 	}
 	return &tmuxCodexSession{
-		idleTitle:       idleTitle,
-		busyTransitions: 1,
-		currentState:    "busy",
+		idleTitle:           idleTitle,
+		busyTransitions:     1,
+		currentState:        "busy",
+		idleActivityTimeout: idleActivityTimeout,
 	}
 }
 
 func (s *tmuxCodexSession) sendPrompt(ctx context.Context, prompt string) error {
 	s.diag.lastPromptStartedAt = time.Now()
-	snapshot, err := s.snapshot(ctx)
+	snapshot, err := s.waitForSubmitReady(ctx)
 	if err != nil {
 		return err
 	}
@@ -689,7 +774,11 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 	observedSource := "screen"
 	observedState := tmuxObservedStateUnknown
 	observedKnown := false
+	var fingerprint uint64
+	captureValid := false
 	if text, err := s.pane.Capture(ctx, 80); err == nil {
+		fingerprint = tmuxCaptureFingerprint(text)
+		captureValid = true
 		trustDetected := codexTrustPrompt(text)
 		if trustDetected && !s.trustPromptDetected {
 			s.trustPrompts++
@@ -697,17 +786,33 @@ func (s *tmuxCodexSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, err
 		}
 		s.trustPromptDetected = trustDetected
 		if trustDetected {
-			return s.snapshotWithObservation("trust_prompt", "", tmuxObservedStateTrustPrompt, true), nil
+			snap := s.snapshotWithObservation("trust_prompt", "", tmuxObservedStateTrustPrompt, true)
+			snap.captureFingerprint = fingerprint
+			snap.captureValid = captureValid
+			return snap, nil
 		}
 		if state, ok := codexScreenState(text); ok {
+			if state == "idle" && isCodexBusyTitle(strings.TrimSpace(title)) {
+				s.recordState("title", title, "busy")
+				snap := s.snapshotWithObservation("title", title, "busy", true)
+				snap.captureFingerprint = fingerprint
+				snap.captureValid = captureValid
+				return snap, nil
+			}
 			s.recordState("screen", title, state)
-			return s.snapshotWithObservation("screen", title, state, true), nil
+			snap := s.snapshotWithObservation("screen", title, state, true)
+			snap.captureFingerprint = fingerprint
+			snap.captureValid = captureValid
+			return snap, nil
 		}
 	}
 	if state, ok := s.classifyTitle(title); ok {
 		s.recordState("title", title, state)
 	}
-	return s.snapshotWithObservation(observedSource, title, observedState, observedKnown), nil
+	snap := s.snapshotWithObservation(observedSource, title, observedState, observedKnown)
+	snap.captureFingerprint = fingerprint
+	snap.captureValid = captureValid
+	return snap, nil
 }
 
 func (s *tmuxClaudeSession) snapshotWithObservation(source, title, state string, classified bool) tmuxTitleSnapshot {
@@ -875,12 +980,68 @@ func (s *tmuxCodexSession) waitForBusyTransition(ctx context.Context, busyStart 
 	return waitForTmuxBusy(ctx, s.pane, s.snapshot, busyStart, timeout, "codex")
 }
 
+func (s *tmuxClaudeSession) waitForSubmitReady(ctx context.Context) (tmuxTitleSnapshot, error) {
+	return waitForTmuxSubmitReady(ctx, s.pane, s.snapshot, s.diag.effectiveSubmitReadyTimeout(), "claude")
+}
+
+func (s *tmuxCodexSession) waitForSubmitReady(ctx context.Context) (tmuxTitleSnapshot, error) {
+	return waitForTmuxSubmitReady(ctx, s.pane, s.snapshot, s.diag.effectiveSubmitReadyTimeout(), "codex")
+}
+
 func (s *tmuxClaudeSession) waitForIdleTransition(ctx context.Context, idleStart, busyStart int) error {
-	return waitForTmuxIdle(ctx, s.pane, s.snapshot, idleStart, busyStart, "claude")
+	return waitForTmuxIdle(ctx, s.pane, s.snapshot, idleStart, busyStart, s.idleActivityTimeout, "claude", s.recordIdleActivityFallback)
 }
 
 func (s *tmuxCodexSession) waitForIdleTransition(ctx context.Context, idleStart, busyStart int) error {
-	return waitForTmuxIdle(ctx, s.pane, s.snapshot, idleStart, busyStart, "codex")
+	return waitForTmuxIdle(ctx, s.pane, s.snapshot, idleStart, busyStart, s.idleActivityTimeout, "codex", s.recordIdleActivityFallback)
+}
+
+func (s *tmuxClaudeSession) recordIdleActivityFallback(title string) {
+	s.recordState("idle_activity_fallback", title, "idle")
+}
+
+func (s *tmuxCodexSession) recordIdleActivityFallback(title string) {
+	s.recordState("idle_activity_fallback", title, "idle")
+}
+
+func waitForTmuxSubmitReady(ctx context.Context, pane *tmuxagent.Pane, snapshot func(context.Context) (tmuxTitleSnapshot, error), timeout time.Duration, agent string) (tmuxTitleSnapshot, error) {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(tmuxStatePollInterval)
+	defer ticker.Stop()
+
+	var last tmuxTitleSnapshot
+	redraw := newTmuxPaneRedrawNudger()
+	for {
+		current, err := snapshot(ctx)
+		if err != nil {
+			return tmuxTitleSnapshot{}, err
+		}
+		last = current
+		if current.readyForPromptSubmission() {
+			return current, nil
+		}
+		if !time.Now().Before(deadline) {
+			return tmuxTitleSnapshot{}, &tmuxSubmitReadyError{
+				agent:  agent,
+				state:  last.submitRetryState(),
+				source: last.submitRetrySource(),
+			}
+		}
+		if dead, err := pane.Dead(ctx); err != nil {
+			return tmuxTitleSnapshot{}, err
+		} else if dead {
+			return tmuxTitleSnapshot{}, fmt.Errorf("%s tmux tui exited unexpectedly", agent)
+		}
+		if err := redraw.MaybeRequest(ctx, pane); err != nil {
+			return tmuxTitleSnapshot{}, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return tmuxTitleSnapshot{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func waitForTmuxBusy(ctx context.Context, pane *tmuxagent.Pane, snapshot func(context.Context) (tmuxTitleSnapshot, error), busyStart int, timeout time.Duration, agent string) (tmuxBusyWaitResult, error) {
@@ -888,6 +1049,7 @@ func waitForTmuxBusy(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 	ticker := time.NewTicker(tmuxStatePollInterval)
 	defer ticker.Stop()
 
+	redraw := newTmuxPaneRedrawNudger()
 	for {
 		current, err := snapshot(ctx)
 		if err != nil {
@@ -904,6 +1066,9 @@ func waitForTmuxBusy(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 		} else if dead {
 			return tmuxBusyWaitResult{}, fmt.Errorf("%s tmux tui exited unexpectedly", agent)
 		}
+		if err := redraw.MaybeRequest(ctx, pane); err != nil {
+			return tmuxBusyWaitResult{}, err
+		}
 
 		select {
 		case <-ctx.Done():
@@ -913,10 +1078,13 @@ func waitForTmuxBusy(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 	}
 }
 
-func waitForTmuxIdle(ctx context.Context, pane *tmuxagent.Pane, snapshot func(context.Context) (tmuxTitleSnapshot, error), idleStart, busyStart int, agent string) error {
+func waitForTmuxIdle(ctx context.Context, pane *tmuxagent.Pane, snapshot func(context.Context) (tmuxTitleSnapshot, error), idleStart, busyStart int, idleActivityTimeout time.Duration, agent string, onFallback func(title string)) error {
 	ticker := time.NewTicker(tmuxStatePollInterval)
 	defer ticker.Stop()
 
+	redraw := newTmuxPaneRedrawNudger()
+	var lastFingerprint uint64
+	var lastChange time.Time
 	for {
 		current, err := snapshot(ctx)
 		if err != nil {
@@ -925,10 +1093,31 @@ func waitForTmuxIdle(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 		if current.busyTransitions > busyStart && current.idleTransitions > idleStart {
 			return nil
 		}
+		now := time.Now()
+		if current.captureValid {
+			if current.captureFingerprint != lastFingerprint {
+				lastFingerprint = current.captureFingerprint
+				lastChange = now
+			} else if lastChange.IsZero() {
+				lastChange = now
+			}
+		}
+		if idleActivityTimeout > 0 &&
+			current.busyTransitions > busyStart &&
+			!lastChange.IsZero() &&
+			now.Sub(lastChange) >= idleActivityTimeout {
+			if onFallback != nil {
+				onFallback(current.observedTitle)
+			}
+			return nil
+		}
 		if dead, err := pane.Dead(ctx); err != nil {
 			return err
 		} else if dead {
 			return fmt.Errorf("%s tmux tui exited unexpectedly", agent)
+		}
+		if err := redraw.MaybeRequest(ctx, pane); err != nil {
+			return err
 		}
 
 		select {
@@ -937,6 +1126,33 @@ func waitForTmuxIdle(ctx context.Context, pane *tmuxagent.Pane, snapshot func(co
 		case <-ticker.C:
 		}
 	}
+}
+
+type tmuxPaneRedrawNudger struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func newTmuxPaneRedrawNudger() tmuxPaneRedrawNudger {
+	return tmuxPaneRedrawNudger{
+		interval: tmuxPaneRedrawInterval,
+		next:     time.Now().Add(tmuxPaneRedrawInterval),
+	}
+}
+
+func (n *tmuxPaneRedrawNudger) MaybeRequest(ctx context.Context, pane *tmuxagent.Pane) error {
+	if n == nil || pane == nil || n.interval <= 0 {
+		return nil
+	}
+	now := time.Now()
+	if now.Before(n.next) {
+		return nil
+	}
+	n.next = now.Add(n.interval)
+	if err := pane.RequestRedraw(ctx); err != nil && !tmuxagent.IsTargetMissingError(err) {
+		return err
+	}
+	return nil
 }
 
 func (s *tmuxClaudeSession) recordState(source, title, state string) {
@@ -1157,6 +1373,10 @@ func tmuxPromptFailurePath(err error) string {
 	if errors.As(err, &stateErr) {
 		return tmuxFailureSubmitUnknownState
 	}
+	var readyErr *tmuxSubmitReadyError
+	if errors.As(err, &readyErr) {
+		return tmuxFailureSubmitUnknownState
+	}
 	if err != nil && strings.Contains(err.Error(), "exited unexpectedly") {
 		return tmuxFailureUnexpectedExit
 	}
@@ -1191,6 +1411,13 @@ func (d tmuxSessionDiagnostics) effectiveSubmitRetryInterval() time.Duration {
 		return d.submitRetryInterval
 	}
 	return tmuxSubmitRetryInterval
+}
+
+func (d tmuxSessionDiagnostics) effectiveSubmitReadyTimeout() time.Duration {
+	if d.startupTimeout > 0 {
+		return d.startupTimeout
+	}
+	return 30 * time.Second
 }
 
 func (d tmuxSessionDiagnostics) promptPayload() diagnostics.PromptPayload {
@@ -1252,6 +1479,7 @@ func (d tmuxSessionDiagnostics) metadata(pane *tmuxagent.Pane, idleTransitions, 
 func (d tmuxSessionDiagnostics) timingMetadata() map[string]any {
 	timing := map[string]any{
 		"submit_retry_interval_ms": d.effectiveSubmitRetryInterval().Milliseconds(),
+		"submit_ready_timeout_ms":  d.effectiveSubmitReadyTimeout().Milliseconds(),
 		"submit_key_delay_ms":      tmuxSubmitKeyDelay.Milliseconds(),
 		"submit_max_attempts":      tmuxSubmitMaxAttempts,
 		"observed_submit_attempts": d.lastSubmitAttempts,

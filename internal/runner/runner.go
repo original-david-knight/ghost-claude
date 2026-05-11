@@ -52,6 +52,8 @@ type Runner struct {
 	runStatePlanFile  string
 }
 
+var errFinalizeVerificationRecorded = errors.New("finalize verification failure recorded")
+
 type TemplateData struct {
 	ConfigPath     string
 	ExecutablePath string
@@ -195,7 +197,7 @@ func (r *Runner) runPlan(ctx context.Context) error {
 			switch {
 			case errors.Is(err, plan.ErrAllTasksDone):
 				if r.shouldLogProgress() {
-					fmt.Fprintln(r.stdout, "All plan tasks are complete.")
+					fmt.Fprintln(r.stdout, "All runnable plan tasks are complete.")
 				}
 				return nil
 			case errors.Is(err, plan.ErrNoReadyTasks):
@@ -238,7 +240,7 @@ func (r *Runner) runParallelPlan(ctx context.Context) error {
 			switch {
 			case errors.Is(err, plan.ErrAllTasksDone):
 				if r.shouldLogProgress() {
-					fmt.Fprintln(r.stdout, "All plan tasks are complete.")
+					fmt.Fprintln(r.stdout, "All runnable plan tasks are complete.")
 				}
 				return nil
 			case errors.Is(err, plan.ErrNoReadyTasks):
@@ -396,6 +398,7 @@ type parallelRecoveryMetadata struct {
 	BaseRevision    string `json:"base_revision,omitempty"`
 	Status          string `json:"status,omitempty"`
 	Notes           string `json:"notes,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 	Error           string `json:"error"`
 	CreatedAt       string `json:"created_at"`
 }
@@ -634,7 +637,13 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 		if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
 			return fmt.Errorf("%w; also failed to record follow-up: %v", err, recordErr)
 		}
-		return err
+		if recoveryErr != nil {
+			return fmt.Errorf("%w; also failed to preserve recovery patch: %v", err, recoveryErr)
+		}
+		if r.shouldLogProgress() {
+			fmt.Fprintf(r.stderr, "warning: patch integration failed for parallel task %s; continuing so a follow-up iteration can repair it\n", result.Task.ID)
+		}
+		return nil
 	}
 	if application.FileSync {
 		result.Notes = appendIntegrationNote(result.Notes, "Git reported an oversized patch; integrated changed files with the safe file-sync fallback.")
@@ -658,6 +667,16 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 	}
 	cleanup = false
 
+	if automation.IsVerificationError(err) {
+		if recoveryErr := r.handleParallelVerificationFailure(ctx, result, status, patch, application, err); recoveryErr != nil {
+			return recoveryErr
+		}
+		if r.shouldLogProgress() {
+			fmt.Fprintf(r.stderr, "warning: verification failed for parallel task %s; continuing so a follow-up iteration can repair it\n", result.Task.ID)
+		}
+		return nil
+	}
+
 	if application.Applied && status == plan.StatusDone {
 		var reverseErr error
 		if application.FileSync {
@@ -675,6 +694,38 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 		}
 	}
 	return err
+}
+
+func (r *Runner) handleParallelVerificationFailure(ctx context.Context, result parallelTaskResult, status string, patch []byte, application parallelPatchApplication, verifyErr error) error {
+	notes := strings.TrimSpace(result.Notes)
+	if note, ok := taskVerificationFailureNote(tasknotes.Path(r.cfg.Workspace), result.Task.ID); ok {
+		notes = note
+	}
+
+	recovery, recoveryErr := r.writeParallelVerificationRecoveryArtifact(result, patch, verifyErr)
+	notes = appendParallelVerificationRecoveryNote(notes, verifyErr, recovery, recoveryErr)
+	if recordErr := r.recordParallelTaskStatus(ctx, result.Task, plan.StatusInProgress, notes); recordErr != nil {
+		return fmt.Errorf("%w; also failed to record verification follow-up: %v", verifyErr, recordErr)
+	}
+
+	if application.Applied && status == plan.StatusDone {
+		var reverseErr error
+		if application.FileSync {
+			reverseErr = rollbackParallelWorkerFileSync(ctx, r.cfg.Workspace, result.BaseRevision, application.FileSyncEntries)
+		} else {
+			reverseErr = gitApplyPatchFunc(ctx, r.cfg.Workspace, patch, false, true)
+		}
+		if reverseErr != nil {
+			return fmt.Errorf("%w; also failed to roll back unverified worker changes: %v", verifyErr, reverseErr)
+		}
+	}
+
+	if status == plan.StatusDone {
+		if commitErr := automation.CommitIfNeeded(ctx, r.cfg.Workspace, parallelFollowUpCommitMessage(result.Task.ID), r.stdout, r.stderr); commitErr != nil {
+			return fmt.Errorf("%w; also failed to commit verification follow-up: %v", verifyErr, commitErr)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) parallelWorkerPatch(ctx context.Context, result parallelTaskResult) ([]byte, error) {
@@ -959,6 +1010,28 @@ func shortRevision(revision string) string {
 }
 
 func (r *Runner) writeParallelRecoveryArtifact(result parallelTaskResult, patch []byte, applyErr error) (parallelRecoveryArtifact, error) {
+	return r.writeParallelRecoveryArtifactWithReason(
+		result,
+		patch,
+		applyErr,
+		"patch_apply_failure",
+		"The parallel worker completed, but its patch did not apply cleanly to the root workspace.",
+		"worker changes that failed root integration",
+	)
+}
+
+func (r *Runner) writeParallelVerificationRecoveryArtifact(result parallelTaskResult, patch []byte, verifyErr error) (parallelRecoveryArtifact, error) {
+	return r.writeParallelRecoveryArtifactWithReason(
+		result,
+		patch,
+		verifyErr,
+		"verification_failure",
+		"The parallel worker completed, but its integrated changes did not pass root verification.",
+		"worker changes that failed root verification",
+	)
+}
+
+func (r *Runner) writeParallelRecoveryArtifactWithReason(result parallelTaskResult, patch []byte, cause error, reason, description, patchDescription string) (parallelRecoveryArtifact, error) {
 	artifact := parallelRecoveryArtifactForTask(r.cfg, result.Task.ID)
 	if len(bytes.TrimSpace(patch)) == 0 {
 		return artifact, fmt.Errorf("parallel recovery patch is empty")
@@ -976,7 +1049,8 @@ func (r *Runner) writeParallelRecoveryArtifact(result parallelTaskResult, patch 
 		BaseRevision:    result.BaseRevision,
 		Status:          result.Status,
 		Notes:           strings.TrimSpace(result.Notes),
-		Error:           shortError(applyErr),
+		Reason:          reason,
+		Error:           shortError(cause),
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.MarshalIndent(metadata, "", "  ")
@@ -989,14 +1063,14 @@ func (r *Runner) writeParallelRecoveryArtifact(result parallelTaskResult, patch 
 
 	instructions := fmt.Sprintf(`# Parallel Recovery: %s
 
-The parallel worker completed, but its patch did not apply cleanly to the root workspace.
+%s
 
 Files:
-- rejected.patch: worker changes that failed root integration
+- rejected.patch: %s
 - metadata.json: task, base revision, and integration error
 
 On the next Vibedrive run, the coder prompt for this task will include this recovery patch. Reconcile useful changes manually against the current workspace; do not apply the patch blindly.
-`, result.Task.ID)
+`, result.Task.ID, description, patchDescription)
 	if err := os.WriteFile(artifact.InstructionsPath, []byte(instructions), 0o644); err != nil {
 		return artifact, err
 	}
@@ -1017,7 +1091,7 @@ func (r *Runner) withParallelRecoveryPrompt(prompt string, data TemplateData, ta
 	}
 
 	recovery := fmt.Sprintf(`Parallel recovery context:
-A previous parallel worker for this task completed, but its patch did not apply cleanly to the root workspace.
+A previous parallel worker for this task left changes that need to be reconciled against the root workspace.
 
 Recovery patch: %s
 Recovery metadata: %s
@@ -1026,6 +1100,38 @@ Before making new edits, inspect the recovery patch and reconcile any still-usef
 
 `, artifact.PatchPath, artifact.MetadataPath, data.TaskNotesPath)
 	return recovery + strings.TrimLeft(prompt, "\n")
+}
+
+func (r *Runner) withVerificationFollowUpPrompt(prompt string, data TemplateData, target string, step config.Step) string {
+	if !isAgentTarget(target) {
+		return prompt
+	}
+	if strings.TrimSpace(strings.ToLower(step.Actor)) == config.StepActorReviewer {
+		return prompt
+	}
+
+	note, ok := taskVerificationFailureNote(data.TaskNotesPath, data.Task.ID)
+	if !ok {
+		return prompt
+	}
+	if strings.TrimSpace(note) == "" {
+		return prompt
+	}
+
+	resultPath := strings.TrimSpace(data.TaskResultPath)
+	if resultPath == "" {
+		resultPath = "the task result file"
+	}
+	context := fmt.Sprintf(`Verification follow-up context:
+The previous finalize attempt for task %s failed automated verification and reset the task to in_progress.
+
+Task notes from %s:
+%s
+
+Fix the verification failure before marking the task done again. Re-run the failing verification command, or an equivalent narrower check, before writing %s.
+
+`, data.Task.ID, data.TaskNotesPath, indentBlock(limitText(note, 2000), "  "), resultPath)
+	return context + strings.TrimLeft(prompt, "\n")
 }
 
 func (r *Runner) parallelRecoveryArtifact(taskID string) (parallelRecoveryArtifact, bool) {
@@ -1064,6 +1170,16 @@ func parallelRecoveryTaskKey(taskID string) string {
 
 func appendParallelRecoveryNote(notes string, applyErr error, artifact parallelRecoveryArtifact, recoveryErr error) string {
 	suffix := "Parallel worker changes did not apply cleanly: " + shortError(applyErr) + "."
+	if recoveryErr != nil {
+		suffix += " Failed to preserve recovery patch: " + shortError(recoveryErr) + "."
+	} else {
+		suffix += " Recovery patch preserved at " + artifact.PatchPath + "; the next coder run should reconcile useful changes from that patch."
+	}
+	return appendIntegrationNote(notes, suffix)
+}
+
+func appendParallelVerificationRecoveryNote(notes string, verifyErr error, artifact parallelRecoveryArtifact, recoveryErr error) string {
+	suffix := "Root verification failed after integrating parallel worker changes: " + shortError(verifyErr) + "."
 	if recoveryErr != nil {
 		suffix += " Failed to preserve recovery patch: " + shortError(recoveryErr) + "."
 	} else {
@@ -1135,6 +1251,7 @@ func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (
 				workerCfg.Claude.Args,
 				workerCfg.Workspace,
 				workerCfg.Claude.StartupTimeout,
+				workerCfg.Claude.IdleActivityTimeout,
 				r.tmux,
 				paths.Name,
 			)
@@ -1163,6 +1280,7 @@ func (r *Runner) isolatedRunner(paths TaskExecutionPaths, steps []config.Step) (
 				workerCfg.Codex.Args,
 				workerCfg.Workspace,
 				workerCfg.Codex.StartupTimeout,
+				workerCfg.Codex.IdleActivityTimeout,
 				r.tmux,
 				paths.Name,
 			)
@@ -1329,6 +1447,7 @@ func (r *Runner) useRootTmuxClients() error {
 			r.cfg.Claude.Args,
 			r.cfg.Workspace,
 			r.cfg.Claude.StartupTimeout,
+			r.cfg.Claude.IdleActivityTimeout,
 			r.tmux,
 			"main",
 		)
@@ -1343,6 +1462,7 @@ func (r *Runner) useRootTmuxClients() error {
 			r.cfg.Codex.Args,
 			r.cfg.Workspace,
 			r.cfg.Codex.StartupTimeout,
+			r.cfg.Codex.IdleActivityTimeout,
 			r.tmux,
 			"main",
 		)
@@ -1912,6 +2032,9 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 			return runErr
 		}()
 		if err != nil {
+			if errors.Is(err, errFinalizeVerificationRecorded) {
+				return closeSharedSession(nil)
+			}
 			if step.ContinueOnError {
 				if r.shouldLogProgress() {
 					fmt.Fprintf(r.stderr, "warning: step %q failed but continue_on_error is set: %v\n", step.Name, err)
@@ -2196,6 +2319,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				return fmt.Errorf("render prompt: %w", err)
 			}
 			prompt = r.withParallelRecoveryPrompt(prompt, stepData, target, step)
+			prompt = r.withVerificationFollowUpPrompt(prompt, stepData, target, step)
 
 			if r.shouldLogProgress() {
 				fmt.Fprintf(r.stdout, "\n--> claude step: %s\n", step.Name)
@@ -2215,6 +2339,7 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				return fmt.Errorf("render prompt: %w", err)
 			}
 			prompt = r.withParallelRecoveryPrompt(prompt, data, target, step)
+			prompt = r.withVerificationFollowUpPrompt(prompt, data, target, step)
 
 			if r.shouldLogProgress() {
 				fmt.Fprintf(r.stdout, "\n--> codex step: %s\n", step.Name)
@@ -2286,6 +2411,12 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 				stderrSnapshot := stderrTail.Snapshot()
 				combinedSnapshot := combinedTail.Snapshot()
 				r.captureExecFailure(err, command, workdir, envMap, stdoutSnapshot, stderrSnapshot, combinedSnapshot, stepCtx, step, data)
+				if r.finalizeVerificationFailureRecorded(command, data) {
+					if r.shouldLogProgress() {
+						fmt.Fprintf(r.stderr, "warning: finalize verification failed for task %s; continuing so the next iteration can repair it\n", data.Task.ID)
+					}
+					return errFinalizeVerificationRecorded
+				}
 				return fmt.Errorf("run command: %w%s", err, commandOutputSuffix(string(combinedSnapshot.Data)))
 			}
 			return nil
@@ -2457,6 +2588,110 @@ func isAgentTarget(target string) bool {
 	default:
 		return false
 	}
+}
+
+func (r *Runner) finalizeVerificationFailureRecorded(command []string, data TemplateData) bool {
+	taskID, ok := taskFinalizeCommandTaskID(command)
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(taskID) != strings.TrimSpace(data.Task.ID) {
+		return false
+	}
+
+	planPath := strings.TrimSpace(data.PlanFile)
+	if planPath == "" && r != nil && r.cfg != nil {
+		planPath = r.cfg.PlanFile
+	}
+	notesPath := strings.TrimSpace(data.TaskNotesPath)
+	if notesPath == "" && r != nil && r.cfg != nil {
+		notesPath = tasknotes.Path(r.cfg.Workspace)
+	}
+	return taskRecordedVerificationFailure(planPath, notesPath, taskID)
+}
+
+func taskFinalizeCommandTaskID(command []string) (string, bool) {
+	for i := 0; i < len(command)-1; i++ {
+		if command[i] != "task" || command[i+1] != "finalize" {
+			continue
+		}
+		args := command[i+2:]
+		for j := 0; j < len(args); j++ {
+			arg := strings.TrimSpace(args[j])
+			switch {
+			case arg == "--task" || arg == "-task":
+				if j+1 >= len(args) {
+					return "", false
+				}
+				taskID := strings.TrimSpace(args[j+1])
+				return taskID, taskID != ""
+			case strings.HasPrefix(arg, "--task="):
+				taskID := strings.TrimSpace(strings.TrimPrefix(arg, "--task="))
+				return taskID, taskID != ""
+			case strings.HasPrefix(arg, "-task="):
+				taskID := strings.TrimSpace(strings.TrimPrefix(arg, "-task="))
+				return taskID, taskID != ""
+			}
+		}
+		return "", false
+	}
+	return "", false
+}
+
+func taskRecordedVerificationFailure(planPath, notesPath, taskID string) bool {
+	loaded, err := plan.Load(planPath)
+	if err != nil {
+		return false
+	}
+	task, ok := loaded.FindTask(taskID)
+	if !ok || strings.TrimSpace(task.Status) != plan.StatusInProgress {
+		return false
+	}
+	_, ok = taskVerificationFailureNote(notesPath, taskID)
+	return ok
+}
+
+func taskVerificationFailureNote(notesPath, taskID string) (string, bool) {
+	if strings.TrimSpace(notesPath) == "" || strings.TrimSpace(taskID) == "" {
+		return "", false
+	}
+	notesFile, err := tasknotes.Load(notesPath)
+	if err != nil {
+		return "", false
+	}
+	note, ok := notesFile.Find(taskID)
+	if !ok || strings.TrimSpace(note.Status) != plan.StatusInProgress {
+		return "", false
+	}
+	text := strings.TrimSpace(note.Notes)
+	if !strings.Contains(text, automation.VerificationFailureNotePrefix) {
+		return "", false
+	}
+	return text, true
+}
+
+func limitText(text string, max int) string {
+	text = strings.TrimSpace(text)
+	if max <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:max])) + "..."
+}
+
+func indentBlock(text, prefix string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return prefix
+	}
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func taskNotesRepairPrompt(path, taskID string, parseErr error) string {

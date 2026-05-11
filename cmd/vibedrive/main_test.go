@@ -366,6 +366,9 @@ workflows:
 	if err := os.WriteFile(planPath, []byte(`project:
   name: demo
 tasks:
+  - id: db
+    title: Build DB
+    status: done
   - id: api
     title: Build API
     status: todo
@@ -403,6 +406,7 @@ tasks:
 
 	output := out.String()
 	for _, want := range []string{
+		"1/3 tasks completed",
 		"Currently Executing:",
 		"[~] api - Build API",
 		"step 2/3: review(agent:reviewer)",
@@ -471,11 +475,11 @@ func TestApplyRuntimeAgentRolesUsesDefaults(t *testing.T) {
 		t.Fatalf("applyRuntimeAgentRoles returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != config.AgentCodex {
-		t.Fatalf("expected default coder %q, got %q", config.AgentCodex, cfg.CoderAgent())
+	if cfg.CoderAgent() != config.AgentClaude {
+		t.Fatalf("expected default coder %q, got %q", config.AgentClaude, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != config.AgentClaude {
-		t.Fatalf("expected default reviewer %q, got %q", config.AgentClaude, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != config.AgentCodex {
+		t.Fatalf("expected default reviewer %q, got %q", config.AgentCodex, cfg.ReviewerAgent())
 	}
 }
 

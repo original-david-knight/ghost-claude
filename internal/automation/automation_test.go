@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -308,6 +309,13 @@ tasks:
 	if err == nil {
 		t.Fatal("expected Finalize to fail when verification fails")
 	}
+	var verifyErr *VerificationError
+	if !errors.As(err, &verifyErr) {
+		t.Fatalf("expected VerificationError, got %T: %v", err, err)
+	}
+	if verifyErr.TaskID != "scaffold" || verifyErr.Command != "git show definitely-not-a-real-ref" {
+		t.Fatalf("unexpected verification error details: %#v", verifyErr)
+	}
 
 	loaded, loadErr := plan.Load(planPath)
 	if loadErr != nil {
@@ -346,6 +354,15 @@ tasks:
 	}
 	if _, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").CombinedOutput(); err == nil {
 		t.Fatal("expected no commit to be created when verification fails")
+	}
+}
+
+func TestAppendFailureNoteIsIdempotent(t *testing.T) {
+	got := appendFailureNote("implementation complete", "go test ./...")
+	got = appendFailureNote(got, "go test ./...")
+
+	if count := strings.Count(got, VerificationFailureNotePrefix); count != 1 {
+		t.Fatalf("expected one verification failure note, got %d in %q", count, got)
 	}
 }
 

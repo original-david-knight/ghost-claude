@@ -307,6 +307,28 @@ func TestPanePasteLoadsAndPastesBuffer(t *testing.T) {
 	}
 }
 
+func TestPaneRequestRedrawSignalsPaneProcess(t *testing.T) {
+	fake := &fakeTmux{}
+	controller := NewController(Options{
+		SessionName: "vibedrive",
+		Run:         fake.run,
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane := &Pane{controller: controller, Target: "%9"}
+
+	if err := pane.RequestRedraw(context.Background()); err != nil {
+		t.Fatalf("RequestRedraw returned error: %v", err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("expected one run-shell call, got %#v", fake.calls)
+	}
+	if !reflect.DeepEqual(fake.calls[0].args, []string{"run-shell", "-t", "%9", "kill -WINCH #{pane_pid}"}) {
+		t.Fatalf("unexpected redraw args: %#v", fake.calls[0].args)
+	}
+}
+
 func TestControllerReportsMissingTmux(t *testing.T) {
 	controller := NewController(Options{
 		Run: func(context.Context, string, []string, string) ([]byte, error) {

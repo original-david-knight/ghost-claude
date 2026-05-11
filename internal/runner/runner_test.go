@@ -1627,19 +1627,52 @@ tasks:
 	}
 	initRunnerGitRepo(t, dir)
 
-	script := `set -eu
-printf '{{ .Task.ID }}\n' > shared.txt
-printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
-`
-	cfg := parallelRunnerConfig(dir, planPath, script)
+	base := strings.TrimSpace(runRunnerCmd(t, dir, "git", "-C", dir, "rev-parse", "HEAD"))
+	firstWorker := filepath.Join(t.TempDir(), "first")
+	secondWorker := filepath.Join(t.TempDir(), "second")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", firstWorker, "HEAD")
+	runRunnerCmd(t, dir, "git", "-C", dir, "worktree", "add", "--detach", secondWorker, "HEAD")
+	if err := os.WriteFile(filepath.Join(firstWorker, "shared.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile first worker shared returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secondWorker, "shared.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile second worker shared returned error: %v", err)
+	}
+
+	initialPlan, loadErr := plan.Load(planPath)
+	if loadErr != nil {
+		t.Fatalf("Load initial plan returned error: %v", loadErr)
+	}
+	firstTask, _ := initialPlan.FindTask("first")
+	secondTask, _ := initialPlan.FindTask("second")
+
+	cfg := &config.Config{
+		Workspace: dir,
+		PlanFile:  planPath,
+		Parallel: config.ParallelConfig{
+			ArtifactRoot: filepath.Join(dir, config.DefaultParallelArtifactRoot),
+		},
+	}
 	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
 
-	err := r.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected Run to report the conflicted worker")
-	}
-	if !strings.Contains(err.Error(), "second") {
-		t.Fatalf("expected error to name second, got %v", err)
+	err := r.integrateParallelBatch(context.Background(), []parallelTaskResult{
+		{
+			Task:         firstTask,
+			Paths:        TaskExecutionPaths{Workspace: firstWorker},
+			BaseRevision: base,
+			Status:       plan.StatusDone,
+			Notes:        "first complete",
+		},
+		{
+			Task:         secondTask,
+			Paths:        TaskExecutionPaths{Workspace: secondWorker},
+			BaseRevision: base,
+			Status:       plan.StatusDone,
+			Notes:        "second complete",
+		},
+	})
+	if err != nil {
+		t.Fatalf("integrateParallelBatch returned error for recorded follow-up: %v", err)
 	}
 
 	loaded, loadErr := plan.Load(planPath)
@@ -1721,7 +1754,7 @@ func TestParallelRecoveryPromptIsPrependedForCoder(t *testing.T) {
 	}
 }
 
-func TestRunMarksOnlyVerificationFailureForFollowUp(t *testing.T) {
+func TestRunRetriesVerificationFailureFollowUp(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
 
@@ -1753,6 +1786,40 @@ tasks:
 	initRunnerGitRepo(t, dir)
 
 	script := `set -eu
+if [ "{{ .Task.ID }}" = "bad" ] && grep -q 'status: in_progress' "{{ .PlanFile }}"; then
+  rm -f bad.txt
+  cat > "{{ .PlanFile }}" <<EOF
+project:
+  name: demo
+tasks:
+  - id: api
+    title: API
+    workflow: implement
+    status: done
+    owns_paths:
+      - api.txt
+    verify_commands:
+      - test -f api.txt
+    commit_message: "feat: finish api"
+  - id: bad
+    title: Bad
+    workflow: implement
+    status: done
+    owns_paths:
+      - bad.txt
+    verify_commands:
+      - test ! -f bad.txt
+    commit_message: "feat: finish bad"
+EOF
+  cat > "{{ .TaskNotesPath }}" <<EOF
+tasks:
+  - id: bad
+    status: done
+    notes: repaired verification failure
+EOF
+  printf '{"status":"done","notes":"bad repaired"}' > "{{ .TaskResultPath }}"
+  exit 0
+fi
 printf '{{ .Task.ID }}\n' > "{{ .Task.ID }}.txt"
 printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPath }}"
 `
@@ -1760,11 +1827,8 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 	r := &Runner{cfg: cfg, stdout: io.Discard, stderr: io.Discard}
 
 	err := r.Run(context.Background())
-	if err == nil {
-		t.Fatal("expected Run to report verification failure")
-	}
-	if !strings.Contains(err.Error(), "bad") {
-		t.Fatalf("expected error to name bad, got %v", err)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
 	}
 
 	loaded, loadErr := plan.Load(planPath)
@@ -1776,8 +1840,8 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 	if api.Status != plan.StatusDone {
 		t.Fatalf("expected api to be done, got %q", api.Status)
 	}
-	if bad.Status != plan.StatusInProgress {
-		t.Fatalf("expected bad to be in progress, got %q", bad.Status)
+	if bad.Status != plan.StatusDone {
+		t.Fatalf("expected bad to be done after follow-up, got %q", bad.Status)
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "api.txt")); statErr != nil {
 		t.Fatalf("expected api.txt to remain, stat err=%v", statErr)
@@ -1793,8 +1857,8 @@ printf '{"status":"done","notes":"{{ .Task.ID }} complete"}' > "{{ .TaskResultPa
 	if !ok {
 		t.Fatal("expected bad task note")
 	}
-	if !strings.Contains(badNote.Notes, "Verification failed while running") {
-		t.Fatalf("expected verification failure note, got %q", badNote.Notes)
+	if !strings.Contains(badNote.Notes, "repaired verification failure") {
+		t.Fatalf("expected repaired verification note, got %q", badNote.Notes)
 	}
 
 	badPaths := taskExecutionPaths(cfg, "bad", 1, true)
@@ -2291,6 +2355,211 @@ tasks:
 	}
 	if note.Status != plan.StatusDone {
 		t.Fatalf("expected task note status %q, got %q", plan.StatusDone, note.Status)
+	}
+}
+
+func TestRunContinuesAfterFinalizeVerificationFailure(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, "vibedrive-plan.yaml")
+
+	content := `project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: todo
+    verify_commands:
+      - test -f fixed.txt
+`
+	if err := os.WriteFile(planPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	finalizePath := filepath.Join(dir, "fake-vibedrive")
+	finalizeScript := `#!/bin/sh
+set -eu
+if [ "$1" != "task" ] || [ "$2" != "finalize" ]; then
+  echo "unexpected args: $*" >&2
+  exit 2
+fi
+shift 2
+workspace=""
+plan=""
+task=""
+result=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --workspace)
+      workspace="$2"
+      shift 2
+      ;;
+    --plan)
+      plan="$2"
+      shift 2
+      ;;
+    --task)
+      task="$2"
+      shift 2
+      ;;
+    --result)
+      result="$2"
+      shift 2
+      ;;
+    --message)
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+count_file="$workspace/finalize-count"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+printf '%s\n' "$((count + 1))" > "$count_file"
+mkdir -p "$workspace/.vibedrive"
+if [ "$count" -eq 0 ]; then
+  cat > "$plan" <<EOF
+project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: in_progress
+    verify_commands:
+      - test -f fixed.txt
+EOF
+  cat > "$workspace/.vibedrive/task-notes.yaml" <<EOF
+tasks:
+  - id: scaffold
+    status: in_progress
+    notes: Verification failed while running "test -f fixed.txt".
+EOF
+  rm -f "$result"
+  exit 1
+fi
+cat > "$plan" <<EOF
+project:
+  name: demo
+tasks:
+  - id: scaffold
+    title: Scaffold repo
+    workflow: implement
+    status: done
+    verify_commands:
+      - test -f fixed.txt
+EOF
+cat > "$workspace/.vibedrive/task-notes.yaml" <<EOF
+tasks:
+  - id: scaffold
+    status: done
+    notes: fixed verification
+EOF
+rm -f "$result"
+`
+	if err := os.WriteFile(finalizePath, []byte(finalizeScript), 0o755); err != nil {
+		t.Fatalf("WriteFile fake finalizer returned error: %v", err)
+	}
+
+	cfg := &config.Config{
+		Path:                 filepath.Join(dir, "vibedrive.yaml"),
+		Workspace:            dir,
+		PlanFile:             planPath,
+		Coder:                config.AgentCodex,
+		Reviewer:             config.AgentCodex,
+		MaxStalledIterations: 2,
+		DefaultWorkflow:      "implement",
+		Workflows: map[string]config.Workflow{
+			"implement": {
+				Steps: []config.Step{
+					{
+						Name:            "execute",
+						Type:            config.StepTypeAgent,
+						Actor:           config.StepActorCoder,
+						Prompt:          "implement {{ .Task.ID }}",
+						RequiredOutputs: []string{"{{ .TaskResultPath }}"},
+					},
+					{
+						Name: "finalize-task",
+						Type: config.StepTypeExec,
+						Command: []string{
+							"{{ .ExecutablePath }}",
+							"task",
+							"finalize",
+							"--workspace",
+							"{{ .Workspace }}",
+							"--plan",
+							"{{ .PlanFile }}",
+							"--task",
+							"{{ .Task.ID }}",
+							"--result",
+							"{{ .TaskResultPath }}",
+							"--message",
+							"{{ .Task.Title }}",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	resultPath := automation.ResultPath(dir, "scaffold")
+	codexAgent := &fakeCodex{
+		planPath: planPath,
+		onRun: func(prompt string) error {
+			if strings.Contains(prompt, "Verification follow-up context") {
+				if err := os.WriteFile(filepath.Join(dir, "fixed.txt"), []byte("fixed\n"), 0o644); err != nil {
+					return err
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(resultPath, []byte(`{"status":"done","notes":"implementation complete"}`+"\n"), 0o644)
+		},
+	}
+
+	r := &Runner{
+		cfg:            cfg,
+		stdout:         io.Discard,
+		stderr:         io.Discard,
+		codex:          codexAgent,
+		executablePath: finalizePath,
+	}
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(codexAgent.prompts) != 2 {
+		t.Fatalf("expected original and verification follow-up prompts, got:\n%s", strings.Join(codexAgent.prompts, "\n---\n"))
+	}
+	if codexAgent.prompts[0] != "implement scaffold" {
+		t.Fatalf("expected first prompt to implement, got %q", codexAgent.prompts[0])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "Verification follow-up context") {
+		t.Fatalf("expected second prompt to include verification context, got %q", codexAgent.prompts[1])
+	}
+	if !strings.Contains(codexAgent.prompts[1], "test -f fixed.txt") {
+		t.Fatalf("expected second prompt to include failing command, got %q", codexAgent.prompts[1])
+	}
+
+	loaded, err := plan.Load(planPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	task, ok := loaded.FindTask("scaffold")
+	if !ok {
+		t.Fatal("expected scaffold task")
+	}
+	if task.Status != plan.StatusDone {
+		t.Fatalf("expected task status %q, got %q", plan.StatusDone, task.Status)
+	}
+	if got := strings.TrimSpace(mustReadRunnerFile(t, filepath.Join(dir, "finalize-count"))); got != "2" {
+		t.Fatalf("expected finalizer to run twice, got %q", got)
 	}
 }
 

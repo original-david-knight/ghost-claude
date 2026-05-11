@@ -9,7 +9,7 @@ Claude Code and Codex both run in their real fullscreen TUIs inside a PTY, so yo
 ## Why use it
 
 - **Unattended loops.** The runner picks the next ready task, dispatches it to the agents, stages, verifies, and commits — no babysitting.
-- **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Codex codes, Claude reviews. Flip them, or use the same agent for both.
+- **Two agents, flipped at runtime.** Choose `--coder` and `--reviewer` per run. Defaults: Claude codes, Codex reviews. Flip them, or use the same agent for both.
 - **Machine-owned state.** `vibedrive-plan.yaml` is the execution queue. Every task ends by writing back its status there and short phase notes in `.vibedrive/task-notes.yaml`, so the run is resumable and the plan stays focused on task structure.
 - **Per-task verification.** Each task declares its own `verify_commands` (build, tests, linters). Plans should include any harnesses or instrumentation agents need to verify their own work, such as scripted screenshot capture for UI changes. A task only stays `done` when its commands pass; otherwise it drops back to `in_progress` with a failure note.
 - **Boundary-first parallelism.** Plans can describe components, contract files, owned paths, and explicit task conflicts. Init-generated configs enable parallelism by default, and Vibedrive only starts a batch when ready-task boundaries prove it is safe. Parallel agent batches run the real TUIs in tmux.
@@ -24,7 +24,7 @@ vibedrive start               # alias for create; does not require vibedrive.yam
 vibedrive create              # interactively author DESIGN.md with the default Codex author and Claude critic
 vibedrive init DESIGN.md      # scaffold vibedrive.yaml + vibedrive-plan.yaml from your spec
 vibedrive view                # inspect plan progress, dependency graph, and workflow steps
-vibedrive run                 # run the loop: codex codes, claude reviews
+vibedrive run                 # run the loop: claude codes, codex reviews
 ```
 
 That's the whole flow. The runner walks the plan, dispatches each task, commits each iteration, and stops when there is nothing left to do. Rerunning `vibedrive run` resumes where you left off.
@@ -64,8 +64,8 @@ vibedrive init --source DESIGN.md --source docs/specs
 vibedrive init --source DESIGN.md --source docs/specs --print-sources   # preview resolved sources without writing config or plan
 vibedrive restart           # replans from prior task notes, then resets vibedrive-plan.yaml to a fresh-run state
 vibedrive view              # prints current task status, dependency graph, and configured workflow steps
-vibedrive run    # starts the loop with coder=codex and reviewer=claude
-vibedrive run --coder claude --reviewer codex   # flips roles at run time without changing vibedrive-plan.yaml
+vibedrive run    # starts the loop with coder=claude and reviewer=codex
+vibedrive run --coder codex --reviewer claude   # flips roles at run time without changing vibedrive-plan.yaml
 vibedrive run --coder codex --reviewer codex    # same agent can both code and review
 ```
 
@@ -193,6 +193,7 @@ claude:
   version: "claude 1.2.3"
   transport: tui
   startup_timeout: 30s
+  idle_activity_timeout: 60s
   session_strategy: session_id
   args:
     - --effort
@@ -205,6 +206,7 @@ codex:
   version: "codex-cli 4.5.6"
   transport: tui
   startup_timeout: 30s
+  idle_activity_timeout: 60s
   args:
     - --dangerously-bypass-approvals-and-sandbox
     - -c
@@ -497,7 +499,7 @@ Task completion comes from `vibedrive-plan.yaml`. Vibedrive does not persist per
 | `status`          | Required execution state. See supported values below.                                   |
 | `workflow`        | Optional workflow name from `vibedrive.yaml`. Falls back to `default_workflow`.      |
 | `kind`            | Optional planning metadata. Stored in the plan, but not interpreted by the runner today. |
-| `deps`            | Optional list of task IDs that must be `done` before this task is ready.                |
+| `deps`            | Optional list of task IDs that must be terminal (`done`, `blocked`, or `manual`) before this task is ready. |
 | `context_files`   | Optional repo-relative files the task should pay attention to.                          |
 | `component`       | Optional component ID for this task. If a component catalog exists, the ID must be declared there. |
 | `owns_paths`      | Optional repo-relative path globs the task is allowed to edit.                          |
@@ -512,7 +514,7 @@ Task completion comes from `vibedrive-plan.yaml`. Vibedrive does not persist per
 
 | Status         | Meaning                                                                                     |
 | -------------- | ------------------------------------------------------------------------------------------- |
-| `todo`         | Not started yet. Eligible once all dependencies are `done`.                                 |
+| `todo`         | Not started yet. Eligible once all dependencies are terminal.                               |
 | `in_progress`  | Partially complete. Ready tasks in this state are selected before `todo` tasks.             |
 | `blocked`      | Terminal state for work that cannot continue without an external dependency or decision.     |
 | `done`         | Terminal state for completed work.                                                           |
@@ -549,6 +551,7 @@ The scaffold writes `parallel.enabled: true` and `max_parallelism: 3`, so new in
 | `args`             | `["--effort", "max", "--permission-mode", "bypassPermissions"]` | Extra CLI flags passed to Claude. If you set custom args without an explicit `--effort`, vibedrive appends `--effort max`. If you do not set a Claude permission flag, vibedrive appends `--permission-mode bypassPermissions` so agent steps do not stop on approval prompts. |
 | `transport`        | `tui`        | Optional compatibility field. Only `tui` is supported.                |
 | `startup_timeout`  | `30s`        | How long to wait for Claude to become ready before failing.             |
+| `idle_activity_timeout` | `60s`   | Treat the agent as done if its tmux pane produces no visible output for this long. Guards against title-classifier misses where the agent has finished but its TUI title never matches the "idle" pattern. Set to `0` to disable. |
 | `session_strategy` | `session_id` | `session_id` starts a new session per item; `continue` resumes.         |
 
 ### `codex` block
@@ -558,6 +561,7 @@ The scaffold writes `parallel.enabled: true` and `max_parallelism: 3`, so new in
 | `command`         | `codex`                                                                 | Executable to launch.                                                   |
 | `transport`       | `tui`                                                                   | Optional compatibility field. Only `tui` is supported.                |
 | `startup_timeout` | `30s`                                                                   | How long to wait for Codex to become ready in `tui` mode before failing. |
+| `idle_activity_timeout` | `60s`                                                             | Treat the agent as done if its tmux pane produces no visible output for this long. Set to `0` to disable. |
 | `args`            | `["--dangerously-bypass-approvals-and-sandbox", "-c", "model_reasoning_effort=\"xhigh\""]` | Extra CLI flags passed to Codex before the rendered prompt.             |
 
 vibedrive prepends `--dangerously-bypass-approvals-and-sandbox` to Codex invocations so the agent never pauses for approval prompts. If you set custom `codex.args` without an explicit `model_reasoning_effort=...` override, vibedrive appends `-c model_reasoning_effort="xhigh"`. Non-interactive Codex subcommands such as `exec` and `review` are rejected for agent steps.
@@ -570,7 +574,7 @@ Codex runs the same fullscreen terminal UI you get from invoking `codex` yoursel
 | ------------------- | ----------- | ----------------------------------------------------------------- |
 | `name`              | all         | Required. Shown in logs.                                          |
 | `type`              | all         | `claude` (default), `codex`, `agent`, or `exec`.                  |
-| `actor`             | agent       | `coder` or `reviewer`. Resolved at runtime from `--coder` / `--reviewer`, defaulting to `codex` and `claude`. |
+| `actor`             | agent       | `coder` or `reviewer`. Resolved at runtime from `--coder` / `--reviewer`, defaulting to `claude` and `codex`. |
 | `prompt`            | claude, codex, agent | Go template rendered and sent to the resolved agent.        |
 | `command`           | exec        | Argv list to run. Each element is a Go template.                  |
 | `working_dir`       | exec        | Defaults to `workspace`. Relative paths resolve from `workspace`. |
@@ -614,14 +618,14 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `verify_commands` lets plan tasks declare deterministic checks for the exec finalizer to run before a task can stay `done`.
 - `vibedrive plan ready-batch` loads the plan without launching agents and explains why ready tasks are or are not parallel-ready.
 - `vibedrive view` loads the plan without launching agents and displays progress, the task dependency graph, and each task's configured workflow steps.
-- If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing.
+- If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing. During `vibedrive run`, that recorded failure is treated as progress so the next iteration can repair it.
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
 - `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.
 - The finalizer stages changes with `git add -A` and only creates a commit when something is actually staged.
 - Codex steps use native TUI mode, so the app shows the same Codex interface you get from running `codex` directly.
 - Parallel agent steps require tmux. Use the printed attach command to inspect the running worker windows.
 - `--coder` and `--reviewer` are independent. You can set them to different agents or to the same agent.
-- Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`codex` and reviewer=`claude`.
+- Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`claude` and reviewer=`codex`.
 - `vibedrive init` uses the selected bootstrap author and critic through their TUI flows. Defaults are author=`codex` and critic=`claude`. `--author claude` uses Claude for authoring, `--critic codex` uses Codex for critique, and each bootstrap phase uses a fresh instance even when both roles resolve to the same agent type.
 - In TUI mode, YAML multiline prompts are flattened into one submitted message, because real newlines would be interpreted as separate messages by Claude's composer.
 - In a fresh workspace, the runner auto-confirms Claude's trust dialog so the loop can start unattended.

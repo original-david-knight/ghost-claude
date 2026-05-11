@@ -442,6 +442,20 @@ func (p *Pane) SendCtrlD(ctx context.Context) error {
 	return p.sendKeys(ctx, "C-d")
 }
 
+func (p *Pane) RequestRedraw(ctx context.Context) error {
+	if p == nil || p.controller == nil {
+		return fmt.Errorf("tmux pane is nil")
+	}
+	output, err := p.controller.run(ctx, p.controller.command, []string{"run-shell", "-t", p.Target, "kill -WINCH #{pane_pid}"}, "")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("request redraw from tmux pane %s: %w: %s", p.Target, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func (p *Pane) Kill(ctx context.Context) error {
 	if p == nil || p.controller == nil {
 		return nil

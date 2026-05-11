@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -166,7 +167,7 @@ func TestWaitForTmuxIdleReportsExpiredContextDirectly(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	session := newTmuxCodexSession("")
+	session := newTmuxCodexSession("", 0)
 	session.pane = pane
 	err = session.waitForIdleTransition(ctx, 0, 0)
 	if !errors.Is(err, context.Canceled) {
@@ -177,8 +178,183 @@ func TestWaitForTmuxIdleReportsExpiredContextDirectly(t *testing.T) {
 	}
 }
 
+func TestWaitForTmuxIdleRequestsRedrawWhenPaneStateStaysStale(t *testing.T) {
+	workspace := t.TempDir()
+	readyFixture, readyScreen := readCodexDetectorFixture(t, "ready-screen")
+	busyFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+
+	oldInterval := tmuxPaneRedrawInterval
+	tmuxPaneRedrawInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		tmuxPaneRedrawInterval = oldInterval
+	})
+
+	redraws := 0
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%8\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				if redraws == 0 {
+					return []byte(busyFixture.Title + "\n"), nil
+				}
+				return []byte(readyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if redraws == 0 {
+					return []byte(workingScreen), nil
+				}
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "run-shell":
+				if !reflect.DeepEqual(args, []string{"run-shell", "-t", "%8", "kill -WINCH #{pane_pid}"}) {
+					t.Fatalf("unexpected redraw args: %#v", args)
+				}
+				redraws++
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession(readyFixture.Workdir, 0)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.waitForIdleTransition(ctx, 0, 0); err != nil {
+		t.Fatalf("waitForIdleTransition returned error: %v", err)
+	}
+	if redraws == 0 {
+		t.Fatal("expected stale pane polling to request a redraw")
+	}
+}
+
+func TestWaitForTmuxIdleFallsBackWhenPaneActivityStalls(t *testing.T) {
+	workspace := t.TempDir()
+	busyFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%9\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte(busyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(workingScreen), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession(busyFixture.Workdir, 75*time.Millisecond)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := session.waitForIdleTransition(ctx, 0, 0); err != nil {
+		t.Fatalf("waitForIdleTransition returned error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("fallback fired too quickly (%s); want >= 50ms", elapsed)
+	}
+	if session.currentState != "idle" {
+		t.Fatalf("expected fallback to record idle state, got %q", session.currentState)
+	}
+}
+
+func TestWaitForTmuxIdleStaysBlockedWhenFallbackDisabled(t *testing.T) {
+	workspace := t.TempDir()
+	busyFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%10\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte(busyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(workingScreen), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession(busyFixture.Workdir, 0)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err = session.waitForIdleTransition(ctx, 0, 0)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context deadline exceeded when fallback is disabled, got %v", err)
+	}
+}
+
 func TestTmuxCodexClassifiesPathStyleIdleTitle(t *testing.T) {
-	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-abcdef123456")
+	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-abcdef123456", 0)
 
 	for _, title := range []string{
 		"001-render-api-coordinate-contract-abcdef123456",
@@ -249,7 +425,7 @@ func TestTmuxCodexSnapshotTreatsTruncatedIdlePaneTitleAsIdle(t *testing.T) {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
 
-	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-abcdef123456")
+	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-abcdef123456", 0)
 	session.pane = pane
 	session.currentState = "busy"
 	session.busyTransitions = 2
@@ -303,7 +479,7 @@ Tip: You can resume a previous conversation by running codex resume
 		t.Fatalf("NewPane returned error: %v", err)
 	}
 
-	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-51448272af5")
+	session := newTmuxCodexSession("/tmp/worktrees/001-render-api-coordinate-contract-51448272af5", 0)
 	session.pane = pane
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -365,7 +541,7 @@ permissions: YOLO mode
 		t.Fatalf("NewPane returned error: %v", err)
 	}
 
-	session := newTmuxCodexSession("/tmp/vibedrive")
+	session := newTmuxCodexSession("/tmp/vibedrive", 0)
 	session.pane = pane
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -415,7 +591,7 @@ gpt-5.5 xhigh · ~/workspace/planet/.vibedrive/worktrees/001-data-fixtures-and-a
 		t.Fatalf("NewPane returned error: %v", err)
 	}
 
-	session := newTmuxCodexSession("/tmp/worktrees/001-data-fixtures-and-asset-51448272af5")
+	session := newTmuxCodexSession("/tmp/worktrees/001-data-fixtures-and-asset-51448272af5", 0)
 	session.pane = pane
 	session.currentState = "idle"
 	session.idleTransitions = 1
@@ -427,6 +603,75 @@ gpt-5.5 xhigh · ~/workspace/planet/.vibedrive/worktrees/001-data-fixtures-and-a
 	}
 	if snapshot.currentState != "busy" || snapshot.busyTransitions != 2 {
 		t.Fatalf("expected working screen to record busy transition, got %#v", snapshot)
+	}
+}
+
+// TestTmuxCodexSnapshotPrefersBusyTitleOverWelcomeBannerIdle reproduces the
+// ECSNet failure where Codex was actively working on a prompt but a single
+// pane capture happened to land mid-redraw without the "Working ... interrupt"
+// line. The welcome banner was still in scrollback so codexScreenState
+// reported idle, while the pane title's braille spinner correctly indicated
+// busy. The runner trusted the screen, declared the prompt complete, and tried
+// to submit a follow-up which Codex (still busy) refused. The snapshot must
+// resolve that conflict in favor of the busy title.
+func TestTmuxCodexSnapshotPrefersBusyTitleOverWelcomeBannerIdle(t *testing.T) {
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%1\n"), nil
+			case len(args) > 0 && args[0] == "display-message":
+				return []byte("⠏ ECSNet\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(`
+╭───────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.129.0)                    │
+│                                               │
+│ model:       gpt-5.5 xhigh   /model to change │
+│ directory:   ~/workspace/ECSNet               │
+│ permissions: YOLO mode                        │
+╰───────────────────────────────────────────────╯
+`), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession("/home/david/workspace/ECSNet", 0)
+	session.pane = pane
+	session.currentState = "busy"
+	session.idleTransitions = 1
+	session.busyTransitions = 2
+
+	snapshot, err := session.snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot returned error: %v", err)
+	}
+	if snapshot.observedState != "busy" || snapshot.observedSource != "title" || !snapshot.classified {
+		t.Fatalf("expected busy spinner title to override welcome-banner idle, got %#v", snapshot)
+	}
+	if snapshot.currentState != "busy" {
+		t.Fatalf("expected currentState to remain busy, got %q", snapshot.currentState)
+	}
+	if snapshot.idleTransitions != 1 {
+		t.Fatalf("expected no idle transition to be recorded, got %d", snapshot.idleTransitions)
 	}
 }
 
@@ -491,7 +736,7 @@ func TestTmuxCodexSubmitRetriesWhenFixtureScreenStillAcceptsInput(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
-	session := newTmuxCodexSession(readyFixture.Workdir)
+	session := newTmuxCodexSession(readyFixture.Workdir, 0)
 	session.pane = pane
 	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 30*time.Second)
 	session.diag.submitRetryInterval = 10 * time.Millisecond
@@ -501,6 +746,202 @@ func TestTmuxCodexSubmitRetriesWhenFixtureScreenStillAcceptsInput(t *testing.T) 
 	}
 	if enterCount != 2 {
 		t.Fatalf("expected one classified-idle retry and then acceptance, got %d enter presses", enterCount)
+	}
+}
+
+func TestTmuxCodexSendPromptWaitsForReadyBeforePasting(t *testing.T) {
+	workspace := t.TempDir()
+	readyFixture, readyScreen := readCodexDetectorFixture(t, "ready-screen")
+	busyFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+	_, unknownScreen := readCodexDetectorFixture(t, "stuck-no-submit")
+
+	titleCallsBeforePaste := 0
+	titleCallsAtPaste := 0
+	enterCount := 0
+	afterEnterCaptures := 0
+	pasted := false
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%9\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				if !pasted {
+					titleCallsBeforePaste++
+					if titleCallsBeforePaste == 1 {
+						return []byte(busyFixture.Title + "\n"), nil
+					}
+					return []byte(readyFixture.Title + "\n"), nil
+				}
+				if enterCount > 0 && afterEnterCaptures < 2 {
+					return []byte(busyFixture.Title + "\n"), nil
+				}
+				return []byte(readyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if !pasted {
+					return []byte(unknownScreen), nil
+				}
+				if enterCount > 0 {
+					afterEnterCaptures++
+					if afterEnterCaptures == 1 {
+						return []byte(workingScreen), nil
+					}
+					return []byte(readyScreen), nil
+				}
+				return []byte(unknownScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				if stdin == "" {
+					t.Fatal("expected prompt payload to be pasted")
+				}
+				titleCallsAtPaste = titleCallsBeforePaste
+				pasted = true
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxCodexSession(readyFixture.Workdir, 0)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 30*time.Second)
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.sendPrompt(ctx, "handle transient startup title"); err != nil {
+		t.Fatalf("sendPrompt returned error: %v", err)
+	}
+	if titleCallsAtPaste < 2 {
+		t.Fatalf("expected sendPrompt to wait for an idle title before pasting, title calls at paste = %d", titleCallsAtPaste)
+	}
+	if enterCount != 1 {
+		t.Fatalf("expected one enter press after prompt paste, got %d", enterCount)
+	}
+}
+
+func TestTmuxCodexSendPromptUsesStartupTimeoutWhileWaitingForReady(t *testing.T) {
+	workspace := t.TempDir()
+	readyFixture, readyScreen := readCodexDetectorFixture(t, "ready-screen")
+	busyFixture, workingScreen := readCodexDetectorFixture(t, "working-screen")
+
+	titleCallsBeforePaste := 0
+	pasted := false
+	enterCount := 0
+	afterEnterCaptures := 0
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, stdin string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%10\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				if !pasted {
+					titleCallsBeforePaste++
+					if titleCallsBeforePaste <= 2 {
+						return []byte(busyFixture.Title + "\n"), nil
+					}
+					return []byte(readyFixture.Title + "\n"), nil
+				}
+				if enterCount > 0 && afterEnterCaptures < 2 {
+					return []byte(busyFixture.Title + "\n"), nil
+				}
+				return []byte(readyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane" && tmuxArgsContain(args, "-3000"):
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				if !pasted {
+					if titleCallsBeforePaste > 2 {
+						return []byte(readyScreen), nil
+					}
+					return []byte(workingScreen), nil
+				}
+				if enterCount > 0 {
+					afterEnterCaptures++
+					if afterEnterCaptures == 1 {
+						return []byte(workingScreen), nil
+					}
+					return []byte(readyScreen), nil
+				}
+				return []byte(readyScreen), nil
+			case len(args) > 0 && args[0] == "load-buffer":
+				if stdin == "" {
+					t.Fatal("expected prompt payload to be pasted")
+				}
+				pasted = true
+				return nil, nil
+			case len(args) > 0 && args[0] == "paste-buffer":
+				return nil, nil
+			case len(args) > 0 && args[0] == "send-keys":
+				if tmuxArgsContain(args, "Enter") {
+					enterCount++
+				}
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+	session := newTmuxCodexSession(readyFixture.Workdir, 0)
+	session.pane = pane
+	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 250*time.Millisecond)
+	session.diag.submitRetryInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := session.sendPrompt(ctx, "wait through codex startup busy state"); err != nil {
+		t.Fatalf("sendPrompt returned error: %v", err)
+	}
+	if titleCallsBeforePaste < 3 {
+		t.Fatalf("expected sendPrompt to wait past submit retry interval, title calls before paste = %d", titleCallsBeforePaste)
+	}
+	if enterCount != 1 {
+		t.Fatalf("expected one enter press after prompt paste, got %d", enterCount)
 	}
 }
 
@@ -553,7 +994,7 @@ func TestTmuxCodexSubmitAbortsOnUnclassifiedFixtureScreen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
-	session := newTmuxCodexSession(stuckFixture.Workdir)
+	session := newTmuxCodexSession(stuckFixture.Workdir, 0)
 	session.pane = pane
 	session.diag = newTmuxSessionDiagnostics(diagnostics.New(workspace), "codex", "codex", nil, workspace, 30*time.Second)
 	session.diag.submitRetryInterval = 10 * time.Millisecond
@@ -645,7 +1086,7 @@ func TestTmuxClaudeSubmitRetriesWhenFixtureTitleStillAcceptsInput(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
-	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second)
+	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second, 0)
 	session.pane = pane
 	session.diag.submitRetryInterval = 10 * time.Millisecond
 
@@ -708,7 +1149,7 @@ func TestTmuxClaudeSubmitAbortsOnBusyFixtureScreen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPane returned error: %v", err)
 	}
-	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second)
+	session := newTmuxClaudeSession(diagnostics.New(workspace), "claude", nil, workspace, time.Second, 0)
 	session.pane = pane
 	session.currentState = "busy"
 	session.busyTransitions = 1
@@ -795,7 +1236,7 @@ permissions: YOLO mode
 			return "/usr/bin/tmux", nil
 		},
 	})
-	client, err := newTmuxCodexClient("codex", nil, workspace, "", controller, "task")
+	client, err := newTmuxCodexClient("codex", nil, workspace, "", "", controller, "task")
 	if err != nil {
 		t.Fatalf("newTmuxCodexClient returned error: %v", err)
 	}
@@ -861,7 +1302,7 @@ func TestTmuxClaudeDiagnosticsWrittenOnSubmitTimeout(t *testing.T) {
 			return "/usr/bin/tmux", nil
 		},
 	})
-	client, err := newTmuxClaudeClient("claude", nil, workspace, "1s", controller, "task")
+	client, err := newTmuxClaudeClient("claude", nil, workspace, "1s", "", controller, "task")
 	if err != nil {
 		t.Fatalf("newTmuxClaudeClient returned error: %v", err)
 	}
@@ -917,7 +1358,7 @@ func TestTmuxCodexDiagnosticsWrittenOnStartupTimeout(t *testing.T) {
 			return "/usr/bin/tmux", nil
 		},
 	})
-	client, err := newTmuxCodexClient("codex", nil, workspace, "1ms", controller, "task")
+	client, err := newTmuxCodexClient("codex", nil, workspace, "1ms", "", controller, "task")
 	if err != nil {
 		t.Fatalf("newTmuxCodexClient returned error: %v", err)
 	}
