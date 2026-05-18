@@ -24,6 +24,8 @@ type claudeDetectorEvaluation struct {
 	ClassifyClaudeTmuxTitle stateResult        `json:"classifyClaudeTmuxTitle"`
 	ClassifyTitle           stateResult        `json:"classifyTitle"`
 	ClaudeTrustPrompt       bool               `json:"claudeTrustPrompt"`
+	ClaudeReadyScreen       bool               `json:"claudeReadyScreen"`
+	ClaudeScreenState       stateResult        `json:"claudeScreenState"`
 	TitleMonitorSnapshot    snapshotEvaluation `json:"titleMonitorSnapshot"`
 }
 
@@ -54,6 +56,7 @@ func TestClaudeScreenGoldenFixtures(t *testing.T) {
 	for _, branch := range []string{
 		"idle title",
 		"busy title",
+		"ready screen",
 		"trust prompt",
 		"stuck/ambiguous state",
 	} {
@@ -113,6 +116,7 @@ func readClaudeFixtureScreen(t *testing.T, name string) string {
 func evaluateClaudeDetectors(fixture claudeScreenFixture, screen string) claudeDetectorEvaluation {
 	tmuxState, tmuxOK := classifyClaudeTmuxTitle(fixture.Title)
 	titleState, titleOK := classifyTitle(fixture.Title)
+	screenState, screenOK := ScreenState(screen)
 
 	monitor := &titleMonitor{}
 	monitor.Consume(append(claudeTitleChunk(fixture.Title), []byte(screen)...))
@@ -128,6 +132,11 @@ func evaluateClaudeDetectors(fixture claudeScreenFixture, screen string) claudeD
 			OK:    titleOK,
 		},
 		ClaudeTrustPrompt: claudeTrustPrompt(screen),
+		ClaudeReadyScreen: ReadyScreen(screen),
+		ClaudeScreenState: stateResult{
+			State: screenState,
+			OK:    screenOK,
+		},
 		TitleMonitorSnapshot: snapshotEvaluation{
 			IdleTransitions: snapshot.idleTransitions,
 			BusyTransitions: snapshot.busyTransitions,
@@ -147,6 +156,8 @@ func assertClaudeDetectorEvaluation(t *testing.T, fixture claudeScreenFixture, g
 		{name: "classifyClaudeTmuxTitle", got: got.ClassifyClaudeTmuxTitle, want: fixture.Want.ClassifyClaudeTmuxTitle},
 		{name: "classifyTitle", got: got.ClassifyTitle, want: fixture.Want.ClassifyTitle},
 		{name: "claudeTrustPrompt", got: got.ClaudeTrustPrompt, want: fixture.Want.ClaudeTrustPrompt},
+		{name: "claudeReadyScreen", got: got.ClaudeReadyScreen, want: fixture.Want.ClaudeReadyScreen},
+		{name: "claudeScreenState", got: got.ClaudeScreenState, want: fixture.Want.ClaudeScreenState},
 		{name: "titleMonitorSnapshot", got: got.TitleMonitorSnapshot, want: fixture.Want.TitleMonitorSnapshot},
 	}
 

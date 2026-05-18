@@ -143,6 +143,31 @@ func TestLoadSetsDefaultCodexTUIArgs(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsIdleActivityFallback(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+
+	content := `steps:
+  - name: inspect
+    prompt: inspect
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.IdleActivityTimeout != defaultIdleActivityTimeout {
+		t.Fatalf("expected default claude idle fallback %q, got %q", defaultIdleActivityTimeout, cfg.Claude.IdleActivityTimeout)
+	}
+	if cfg.Codex.IdleActivityTimeout != defaultIdleActivityTimeout {
+		t.Fatalf("expected default codex idle fallback %q, got %q", defaultIdleActivityTimeout, cfg.Codex.IdleActivityTimeout)
+	}
+}
+
 func TestLoadDefaultsParallelExecutionToSerial(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "vibedrive.yaml")
@@ -478,11 +503,33 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.Claude.Version != "claude 1.2.3" {
-		t.Fatalf("expected claude version pin, got %q", cfg.Claude.Version)
-	}
 	if cfg.Codex.Version != "codex-cli 4.5.6" {
 		t.Fatalf("expected codex version pin, got %q", cfg.Codex.Version)
+	}
+}
+
+func TestLoadIgnoresLegacyClaudeVersionField(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "vibedrive.yaml")
+	claudeCommand := writeVersionCommand(t, dir, "fake-claude", "claude 1.2.4")
+
+	content := fmt.Sprintf(`claude:
+  command: %q
+  version: "claude 1.2.3"
+steps:
+  - name: inspect
+    prompt: inspect
+`, claudeCommand)
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if err := cfg.CheckPinnedAgentVersions(); err != nil {
+		t.Fatalf("expected legacy claude.version to be ignored, got %v", err)
 	}
 }
 
@@ -511,56 +558,27 @@ steps:
 	}
 }
 
-func TestCheckPinnedAgentVersionsRejectsMismatchedAgentVersions(t *testing.T) {
-	tests := []struct {
-		name        string
-		cfg         func(string) *Config
-		wantMessage string
-	}{
-		{
-			name: "claude",
-			cfg: func(dir string) *Config {
-				return &Config{
-					Workspace: dir,
-					Claude: ClaudeConfig{
-						Command: writeVersionCommand(t, dir, "fake-claude", "claude 1.2.4"),
-						Version: "claude 1.2.3",
-					},
-				}
-			},
-			wantMessage: `claude.version "claude 1.2.3" does not match live claude CLI version "claude 1.2.4"`,
-		},
-		{
-			name: "codex",
-			cfg: func(dir string) *Config {
-				return &Config{
-					Workspace: dir,
-					Codex: CodexConfig{
-						Command: writeVersionCommand(t, dir, "fake-codex", "codex-cli 4.5.7"),
-						Version: "codex-cli 4.5.6",
-					},
-				}
-			},
-			wantMessage: `codex.version "codex-cli 4.5.6" does not match live codex CLI version "codex-cli 4.5.7"`,
+func TestCheckPinnedAgentVersionsRejectsMismatchedCodexVersion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		Workspace: dir,
+		Codex: CodexConfig{
+			Command: writeVersionCommand(t, dir, "fake-codex", "codex-cli 4.5.7"),
+			Version: "codex-cli 4.5.6",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			err := tt.cfg(dir).CheckPinnedAgentVersions()
-			if err == nil {
-				t.Fatalf("expected CheckPinnedAgentVersions to reject mismatched %s.version", tt.name)
-			}
-			for _, want := range []string{
-				tt.wantMessage,
-				"update " + tt.name + ".version only after intentionally upgrading the CLI",
-			} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("expected error to contain %q, got %v", want, err)
-				}
-			}
-		})
+	err := cfg.CheckPinnedAgentVersions()
+	if err == nil {
+		t.Fatal("expected CheckPinnedAgentVersions to reject mismatched codex.version")
+	}
+	for _, want := range []string{
+		`codex.version "codex-cli 4.5.6" does not match live codex CLI version "codex-cli 4.5.7"`,
+		"update codex.version only after intentionally upgrading the CLI",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to contain %q, got %v", want, err)
+		}
 	}
 }
 
@@ -739,11 +757,11 @@ func TestLoadDefaultsRolesForAgentSteps(t *testing.T) {
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != AgentClaude {
-		t.Fatalf("expected default coder %q, got %q", AgentClaude, cfg.CoderAgent())
+	if cfg.CoderAgent() != AgentCodex {
+		t.Fatalf("expected default coder %q, got %q", AgentCodex, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != AgentCodex {
-		t.Fatalf("expected default reviewer %q, got %q", AgentCodex, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != AgentClaude {
+		t.Fatalf("expected default reviewer %q, got %q", AgentClaude, cfg.ReviewerAgent())
 	}
 }
 
@@ -772,11 +790,11 @@ steps:
 		t.Fatalf("Load returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != AgentClaude {
-		t.Fatalf("expected default coder %q, got %q", AgentClaude, cfg.CoderAgent())
+	if cfg.CoderAgent() != AgentCodex {
+		t.Fatalf("expected default coder %q, got %q", AgentCodex, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != AgentCodex {
-		t.Fatalf("expected default reviewer %q, got %q", AgentCodex, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != AgentClaude {
+		t.Fatalf("expected default reviewer %q, got %q", AgentClaude, cfg.ReviewerAgent())
 	}
 }
 

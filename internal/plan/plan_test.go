@@ -3,6 +3,7 @@ package plan
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -190,6 +191,73 @@ func TestValidateRejectsMalformedOwnershipMetadata(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tasks[0].owns_paths") {
 		t.Fatalf("expected owns_paths validation error, got %v", err)
+	}
+}
+
+func TestLoadAllowsParentPathMetadataInsideGitRepo(t *testing.T) {
+	repo := initGitRepo(t)
+	workspace := filepath.Join(repo, "TetherGame")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+
+	path := filepath.Join(workspace, "vibedrive-plan.yaml")
+	content := `project:
+  name: tether
+  components:
+    - id: api
+      reads_contracts:
+        - ../docs/api/build-foundation.md
+tasks:
+  - id: first
+    title: First task
+    status: todo
+    reads_contracts:
+      - ../docs/api/build-foundation.md
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	file, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := file.Project.Components[0].ReadsContracts[0]; got != "../docs/api/build-foundation.md" {
+		t.Fatalf("expected component parent-relative contract to load, got %q", got)
+	}
+	if err := file.Save(); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+}
+
+func TestLoadRejectsParentPathMetadataOutsideGitRepo(t *testing.T) {
+	repo := initGitRepo(t)
+	workspace := filepath.Join(repo, "TetherGame")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+
+	path := filepath.Join(workspace, "vibedrive-plan.yaml")
+	content := `project:
+  name: tether
+tasks:
+  - id: first
+    title: First task
+    status: todo
+    reads_contracts:
+      - ../../outside.md
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load to reject parent path metadata outside the git repo")
+	}
+	if !strings.Contains(err.Error(), "tasks[0].reads_contracts") || !strings.Contains(err.Error(), "must not escape the git repository") {
+		t.Fatalf("expected git repository escape error, got %v", err)
 	}
 }
 
@@ -619,4 +687,18 @@ func writePlanFile(t *testing.T, content string) string {
 		t.Fatalf("WriteFile returned error: %v", err)
 	}
 	return path
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	cmd := exec.Command("git", "-C", repo, "init")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init returned error: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	return repo
 }

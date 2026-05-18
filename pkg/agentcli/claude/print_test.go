@@ -13,6 +13,15 @@ import (
 	"vibedrive/internal/diagnostics"
 )
 
+type failingOutputWriter struct {
+	writes int
+}
+
+func (w *failingOutputWriter) Write(_ []byte) (int, error) {
+	w.writes++
+	return 0, os.ErrClosed
+}
+
 func TestNewAcceptsPrintTransport(t *testing.T) {
 	client, err := New("claude", nil, ".", " PRINT ", "1s", io.Discard, io.Discard)
 	if err != nil {
@@ -77,6 +86,37 @@ sys.stderr.flush()
 	}
 	if session.Started || session.tui != nil {
 		t.Fatalf("print transport must not start a TUI session: %#v", session)
+	}
+}
+
+func TestRunPromptPrintIgnoresLiveOutputWriteErrors(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-claude.py")
+	writeClaudePrintScript(t, scriptPath, `#!/usr/bin/env python3
+import sys
+
+_ = sys.stdin.read()
+sys.stdout.write("stdout-ok\n")
+sys.stdout.flush()
+sys.stderr.write("stderr-ok\n")
+sys.stderr.flush()
+`)
+
+	stdout := &failingOutputWriter{}
+	stderr := &failingOutputWriter{}
+	client, err := New(scriptPath, nil, dir, TransportPrint, "1s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	if err := client.RunPrompt(context.Background(), &Session{}, "prompt"); err != nil {
+		t.Fatalf("RunPrompt returned error: %v", err)
+	}
+	if stdout.writes == 0 {
+		t.Fatal("expected stdout display writer to receive output")
+	}
+	if stderr.writes == 0 {
+		t.Fatal("expected stderr display writer to receive output")
 	}
 }
 

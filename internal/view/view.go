@@ -67,6 +67,7 @@ func RenderWithOptions(w io.Writer, file *plan.File, cfg *config.Config, opts Re
 
 	graph := newTaskGraph(displayFile.Tasks)
 	graph.render(w, cfg, activeTasks)
+	fmt.Fprintf(w, "\n%d/%d tasks completed\n", counts[plan.StatusDone], total)
 	return nil
 }
 

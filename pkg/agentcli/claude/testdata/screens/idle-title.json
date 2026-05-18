@@ -15,6 +15,11 @@
       "ok": true
     },
     "claudeTrustPrompt": false,
+    "claudeReadyScreen": true,
+    "claudeScreenState": {
+      "state": "idle",
+      "ok": true
+    },
     "titleMonitorSnapshot": {
       "idleTransitions": 1,
       "busyTransitions": 0,

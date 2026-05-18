@@ -384,6 +384,77 @@ func TestTmuxCodexClassifiesPathStyleIdleTitle(t *testing.T) {
 	}
 }
 
+func TestTmuxCodexClassifiesGitRootTitle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Tether")
+	workdir := filepath.Join(root, "TetherGame")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .git returned error: %v", err)
+	}
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession(workdir, 0)
+	if state, ok := session.classifyTitle("Tether"); !ok || state != "idle" {
+		t.Fatalf("expected git-root title to classify idle, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := session.classifyTitle("⠴ Tether"); !ok || state != "busy" {
+		t.Fatalf("expected spinner git-root title to classify busy, got state=%q ok=%v", state, ok)
+	}
+}
+
+func TestTmuxCodexSubmitReadyAcceptsGitRootTitle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Tether")
+	workdir := filepath.Join(root, "TetherGame")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .git returned error: %v", err)
+	}
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir returned error: %v", err)
+	}
+
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%12\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte("Tether\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte("› previous prompt\n\n• finished previous task\n"), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "codex",
+		Command: "codex",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxCodexSession(workdir, 0)
+	session.pane = pane
+	snapshot, err := session.waitForSubmitReady(context.Background())
+	if err != nil {
+		t.Fatalf("waitForSubmitReady returned error: %v", err)
+	}
+	if snapshot.currentState != "idle" || snapshot.idleTransitions != 1 {
+		t.Fatalf("expected git-root title to mark submit-ready idle, got %#v", snapshot)
+	}
+}
+
 func TestTmuxCodexSnapshotTreatsTruncatedIdlePaneTitleAsIdle(t *testing.T) {
 	controller := tmuxagent.NewController(tmuxagent.Options{
 		Command: "tmux",
@@ -672,6 +743,62 @@ func TestTmuxCodexSnapshotPrefersBusyTitleOverWelcomeBannerIdle(t *testing.T) {
 	}
 	if snapshot.idleTransitions != 1 {
 		t.Fatalf("expected no idle transition to be recorded, got %d", snapshot.idleTransitions)
+	}
+}
+
+func TestTmuxClaudeSnapshotPrefersReadyScreenOverStaleBusyTitle(t *testing.T) {
+	readyFixture, readyScreen := readClaudeDetectorFixture(t, "ready-screen-stale-busy-title")
+
+	controller := tmuxagent.NewController(tmuxagent.Options{
+		Command: "tmux",
+		Run: func(_ context.Context, _ string, args []string, _ string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && args[0] == "-V":
+				return []byte("tmux 3.4\n"), nil
+			case len(args) > 0 && args[0] == "new-session":
+				return nil, nil
+			case len(args) > 0 && args[0] == "new-window":
+				return []byte("%11\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_title}"):
+				return []byte(readyFixture.Title + "\n"), nil
+			case len(args) > 0 && args[0] == "display-message" && tmuxArgsContain(args, "#{pane_dead}"):
+				return []byte("0\n"), nil
+			case len(args) > 0 && args[0] == "capture-pane":
+				return []byte(readyScreen), nil
+			default:
+				return nil, nil
+			}
+		},
+		LookPath: func(string) (string, error) {
+			return "/usr/bin/tmux", nil
+		},
+	})
+	pane, err := controller.NewPane(context.Background(), tmuxagent.PaneSpec{
+		Name:    "task",
+		Agent:   "claude",
+		Command: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewPane returned error: %v", err)
+	}
+
+	session := newTmuxClaudeSession(diagnostics.New(t.TempDir()), "claude", nil, readyFixture.Workdir, time.Second, 0)
+	session.pane = pane
+	session.currentState = "busy"
+	session.busyTransitions = 1
+
+	snapshot, err := session.snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot returned error: %v", err)
+	}
+	if snapshot.observedState != "idle" || snapshot.observedSource != "screen" || !snapshot.classified {
+		t.Fatalf("expected ready screen to override stale busy title, got %#v", snapshot)
+	}
+	if snapshot.currentState != "idle" {
+		t.Fatalf("expected currentState to become idle, got %q", snapshot.currentState)
+	}
+	if snapshot.idleTransitions != 1 {
+		t.Fatalf("expected one idle transition, got %d", snapshot.idleTransitions)
 	}
 }
 

@@ -150,7 +150,6 @@ func checkpointRunnerConfig(workspace, planPath, fakeCodex, fakeClaude string) *
 		DefaultWorkflow:      "implement",
 		Claude: config.ClaudeConfig{
 			Command:         fakeClaude,
-			Version:         "claude-test 1.0",
 			Args:            []string{"--test-agent"},
 			Transport:       config.ClaudeTransportPrint,
 			StartupTimeout:  "2s",

@@ -40,8 +40,8 @@ const (
 	AgentClaude = "claude"
 	AgentCodex  = "codex"
 
-	DefaultCoderAgent    = AgentClaude
-	DefaultReviewerAgent = AgentCodex
+	DefaultCoderAgent    = AgentCodex
+	DefaultReviewerAgent = AgentClaude
 
 	StepActorCoder    = "coder"
 	StepActorReviewer = "reviewer"
@@ -74,7 +74,6 @@ type ParallelConfig struct {
 
 type ClaudeConfig struct {
 	Command             string   `yaml:"command"`
-	Version             string   `yaml:"version"`
 	Args                []string `yaml:"args"`
 	Transport           string   `yaml:"transport"`
 	StartupTimeout      string   `yaml:"startup_timeout"`
@@ -149,7 +148,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Claude.Command == "" {
 		cfg.Claude.Command = "claude"
 	}
-	cfg.Claude.Version = strings.TrimSpace(cfg.Claude.Version)
 	if cfg.Claude.Transport == "" {
 		cfg.Claude.Transport = ClaudeTransportTUI
 	} else {

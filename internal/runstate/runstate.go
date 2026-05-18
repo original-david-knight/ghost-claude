@@ -2,17 +2,27 @@ package runstate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const RelativePath = ".vibedrive/run-state.json"
 
 var mu sync.Mutex
+
+var processAlive = func(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
 
 type File struct {
 	Runs []Run `json:"runs,omitempty"`
@@ -202,6 +212,9 @@ func ActiveTasksForPlan(file *File, planPath string) map[string]Task {
 
 	planPath = cleanOptionalPath(planPath)
 	for _, run := range file.Runs {
+		if !processAlive(run.PID) {
+			continue
+		}
 		if planPath != "" && run.PlanFile != "" && run.PlanFile != planPath {
 			continue
 		}

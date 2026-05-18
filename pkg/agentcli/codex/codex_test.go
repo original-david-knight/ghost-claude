@@ -14,6 +14,15 @@ import (
 	"vibedrive/internal/diagnostics"
 )
 
+type failingOutputWriter struct {
+	writes int
+}
+
+func (w *failingOutputWriter) Write(_ []byte) (int, error) {
+	w.writes++
+	return 0, os.ErrClosed
+}
+
 func TestNewDefaultsToTUIWhenNoSubcommandIsPresent(t *testing.T) {
 	client, err := New("codex", []string{"--dangerously-bypass-approvals-and-sandbox"}, ".", "", "", io.Discard, io.Discard)
 	if err != nil {
@@ -113,6 +122,37 @@ sys.stderr.flush()
 	}
 	if session.Started || session.tui != nil {
 		t.Fatalf("exec transport must not start a TUI session: %#v", session)
+	}
+}
+
+func TestRunPromptExecIgnoresLiveOutputWriteErrors(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-codex.py")
+	writeExecutable(t, scriptPath, `#!/usr/bin/env python3
+import sys
+
+_ = sys.stdin.read()
+sys.stdout.write("stdout-ok\n")
+sys.stdout.flush()
+sys.stderr.write("stderr-ok\n")
+sys.stderr.flush()
+`)
+
+	stdout := &failingOutputWriter{}
+	stderr := &failingOutputWriter{}
+	client, err := New(scriptPath, nil, dir, TransportExec, "1s", stdout, stderr)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	if err := client.RunPrompt(context.Background(), &Session{}, "prompt"); err != nil {
+		t.Fatalf("RunPrompt returned error: %v", err)
+	}
+	if stdout.writes == 0 {
+		t.Fatal("expected stdout display writer to receive output")
+	}
+	if stderr.writes == 0 {
+		t.Fatal("expected stderr display writer to receive output")
 	}
 }
 
@@ -251,6 +291,25 @@ func TestTitleMonitorClassifiesIdleAndBusyTitles(t *testing.T) {
 	}
 }
 
+func TestTitleMonitorAcceptsGitRootTitle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Tether")
+	workdir := filepath.Join(root, "TetherGame")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .git returned error: %v", err)
+	}
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir returned error: %v", err)
+	}
+
+	monitor := newTitleMonitor(workdir)
+	if state, ok := monitor.classifyTitle("Tether"); !ok || state != "idle" {
+		t.Fatalf("expected git-root title to classify idle, got state=%q ok=%v", state, ok)
+	}
+	if state, ok := monitor.classifyTitle("⠴ Tether"); !ok || state != "busy" {
+		t.Fatalf("expected spinner git-root title to classify busy, got state=%q ok=%v", state, ok)
+	}
+}
+
 func TestTitleMonitorWaitsForBusyThenIdleBeforeStartupReady(t *testing.T) {
 	monitor := newTitleMonitor("/tmp/vibedrive")
 
@@ -267,6 +326,103 @@ func TestTitleMonitorWaitsForBusyThenIdleBeforeStartupReady(t *testing.T) {
 	monitor.consume(titleChunk("vibedrive"))
 	if !monitor.snapshot().readyForPrompt() {
 		t.Fatal("expected idle after busy to mark startup ready")
+	}
+}
+
+func TestStartTUIAcceptsReadyScreenWhenTitleDoesNotMatchWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-codex.py")
+	writeExecutable(t, scriptPath, `#!/usr/bin/env python3
+import os
+import sys
+
+sys.stdout.write("\x1b]0;repo-root\x07")
+sys.stdout.write("\x1b]0;⠋ repo-root\x07")
+sys.stdout.write("""
+OpenAI Codex (v0.130.0)
+
+model:        gpt-5.5 xhigh
+directory:    ~/workspace/Tether/TetherGame
+permissions: YOLO mode
+
+Tip: Use /rename to rename your threads for easier thread resuming.
+""")
+sys.stdout.flush()
+
+while True:
+    ch = os.read(0, 1)
+    if not ch or ch == b"\x04":
+        break
+`)
+
+	var stdout bytes.Buffer
+	client, err := New(scriptPath, []string{"--dangerously-bypass-approvals-and-sandbox"}, dir, TransportTUI, "500ms", &stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	tui, err := client.startTUI(context.Background())
+	if err != nil {
+		t.Fatalf("startTUI returned error: %v\nstdout:\n%s", err, stdout.String())
+	}
+	defer func() {
+		_ = tui.Close()
+	}()
+}
+
+func TestRunPromptCompletesWhenCodexUsesGitRootTitle(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "Tether")
+	workdir := filepath.Join(root, "TetherGame")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll .git returned error: %v", err)
+	}
+	if err := os.MkdirAll(workdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll workdir returned error: %v", err)
+	}
+	scriptPath := filepath.Join(dir, "fake-codex.py")
+	writeExecutable(t, scriptPath, `#!/usr/bin/env python3
+import os
+import sys
+import time
+
+sys.stdout.write("\x1b]0;Tether\x07")
+sys.stdout.flush()
+time.sleep(0.05)
+sys.stdout.write("\x1b]0;⠋ Tether\x07")
+sys.stdout.flush()
+time.sleep(0.05)
+sys.stdout.write("\x1b]0;Tether\x07")
+sys.stdout.flush()
+
+while True:
+    ch = os.read(0, 1)
+    if not ch or ch == b"\x04":
+        break
+    if ch in (b"\r", b"\n"):
+        sys.stdout.write("\x1b]0;⠋ Tether\x07")
+        sys.stdout.flush()
+        time.sleep(0.05)
+        sys.stdout.write("done\n")
+        sys.stdout.write("\x1b]0;Tether\x07")
+        sys.stdout.flush()
+`)
+
+	var stdout bytes.Buffer
+	client, err := New(scriptPath, []string{"--dangerously-bypass-approvals-and-sandbox"}, workdir, TransportTUI, "2s", &stdout, io.Discard)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	session, err := NewSession()
+	if err != nil {
+		t.Fatalf("NewSession returned error: %v", err)
+	}
+	defer func() {
+		_ = client.Close(session)
+	}()
+
+	if err := client.RunPrompt(context.Background(), session, "write components"); err != nil {
+		t.Fatalf("RunPrompt returned error: %v\nstdout:\n%s", err, stdout.String())
 	}
 }
 

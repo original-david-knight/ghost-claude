@@ -286,6 +286,83 @@ func claudeTrustPromptCompact(compact string) bool {
 	return strings.Contains(compact, "yesitrustthisfolder")
 }
 
+// ReadyScreen reports whether captured Claude screen text looks ready for a prompt.
+func ReadyScreen(text string) bool {
+	if claudeTrustPrompt(text) || claudeActiveScreen(text) {
+		return false
+	}
+	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	return strings.Contains(text, "❯") &&
+		strings.Contains(compact, "shifttabtocycle")
+}
+
+// ScreenState classifies captured Claude screen text as idle or busy when known.
+func ScreenState(text string) (string, bool) {
+	if claudeActiveScreen(text) {
+		return "busy", true
+	}
+	if ReadyScreen(text) {
+		return "idle", true
+	}
+	return "", false
+}
+
+func claudeActiveScreen(text string) bool {
+	lines := strings.Split(text, "\n")
+	start, end := 0, len(lines)
+	if composer := lastClaudeComposerLine(lines); composer >= 0 {
+		end = composer
+		start = composer - 12
+		if start < 0 {
+			start = 0
+		}
+	}
+	for _, line := range lines[start:end] {
+		if claudeActiveStatusLine(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func lastClaudeComposerLine(lines []string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "❯") {
+			return i
+		}
+	}
+	return -1
+}
+
+func claudeActiveStatusLine(line string) bool {
+	line = strings.ToLower(strings.TrimSpace(line))
+	if line == "" {
+		return false
+	}
+	if strings.Contains(line, "running") && (strings.Contains(line, "...") || strings.Contains(line, "…")) {
+		return true
+	}
+	if (strings.Contains(line, "churning") || strings.Contains(line, "channeling")) &&
+		strings.Contains(line, "tokens") {
+		return true
+	}
+	if strings.Contains(line, "tokens") &&
+		(strings.Contains(line, "thinking") || strings.Contains(line, "thought for")) {
+		return true
+	}
+	return claudeStatusLineHasTokenCounter(line)
+}
+
+func claudeStatusLineHasTokenCounter(line string) bool {
+	if !strings.Contains(line, "tokens") || !strings.Contains(line, "(") || !strings.Contains(line, ")") {
+		return false
+	}
+	if strings.Contains(line, "↑") || strings.Contains(line, "↓") {
+		return true
+	}
+	return strings.Contains(line, " · ")
+}
+
 func (p *visibleTextParser) consume(chunk []byte) string {
 	p.recent += ptyrunner.CompactVisibleText(chunk)
 	if len(p.recent) > visibleTextMaxBytes {

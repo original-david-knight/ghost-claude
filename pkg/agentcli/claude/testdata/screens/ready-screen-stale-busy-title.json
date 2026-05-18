@@ -1,10 +1,10 @@
 {
-  "name": "busy-title",
-  "branch": "busy title",
-  "source": "tmux capture from claude-code 2.1.132 while a Bash sleep tool was running in this worktree on 2026-05-07",
+  "name": "ready-screen-stale-busy-title",
+  "branch": "ready screen",
+  "source": "synthetic regression using a captured Claude ready composer with a stale busy tmux title, matching the post-completion stale-title failure mode observed on 2026-05-12",
   "workdir": "/home/david/workspace/vibedrive/.vibedrive/worktrees/001-claude-screen-detector-test-harness-406583e13bd3",
-  "title": "⠐ Run sleep command and verify output",
-  "screen_file": "working-screen.txt",
+  "title": "⠐ Implement ECSNet wire serialization and session schemas",
+  "screen_file": "idle-title.txt",
   "want": {
     "classifyClaudeTmuxTitle": {
       "state": "busy",
@@ -15,9 +15,9 @@
       "ok": true
     },
     "claudeTrustPrompt": false,
-    "claudeReadyScreen": false,
+    "claudeReadyScreen": true,
     "claudeScreenState": {
-      "state": "busy",
+      "state": "idle",
       "ok": true
     },
     "titleMonitorSnapshot": {

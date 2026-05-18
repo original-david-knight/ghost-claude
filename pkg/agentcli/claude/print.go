@@ -81,12 +81,35 @@ func (c *Client) printArgs() []string {
 }
 
 func printOutputWriter(user io.Writer, tails ...io.Writer) io.Writer {
-	writers := make([]io.Writer, 0, len(tails)+1)
-	if user != nil {
-		writers = append(writers, user)
+	return printOutputFanout{
+		display: user,
+		tails:   tails,
 	}
-	writers = append(writers, tails...)
-	return io.MultiWriter(writers...)
+}
+
+type printOutputFanout struct {
+	display io.Writer
+	tails   []io.Writer
+}
+
+func (w printOutputFanout) Write(p []byte) (int, error) {
+	for _, tail := range w.tails {
+		if tail == nil {
+			continue
+		}
+		n, err := tail.Write(p)
+		if err != nil {
+			return n, err
+		}
+		if n != len(p) {
+			return n, io.ErrShortWrite
+		}
+	}
+
+	if w.display != nil {
+		_, _ = w.display.Write(p)
+	}
+	return len(p), nil
 }
 
 func writePrintPrompt(stdin io.WriteCloser, prompt string) error {

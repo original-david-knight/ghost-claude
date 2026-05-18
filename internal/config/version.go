@@ -28,9 +28,6 @@ func (c *Config) CheckPinnedAgentVersions() error {
 		return nil
 	}
 
-	if err := checkPinnedAgentVersion(AgentClaude, c.Claude.Command, c.Claude.Version, c.Workspace); err != nil {
-		return err
-	}
 	if err := checkPinnedAgentVersion(AgentCodex, c.Codex.Command, c.Codex.Version, c.Workspace); err != nil {
 		return err
 	}

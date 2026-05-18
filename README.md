@@ -64,8 +64,8 @@ vibedrive init --source DESIGN.md --source docs/specs
 vibedrive init --source DESIGN.md --source docs/specs --print-sources   # preview resolved sources without writing config or plan
 vibedrive restart           # replans from prior task notes, then resets vibedrive-plan.yaml to a fresh-run state
 vibedrive view              # prints current task status, dependency graph, and configured workflow steps
-vibedrive run    # starts the loop with coder=claude and reviewer=codex
-vibedrive run --coder codex --reviewer claude   # flips roles at run time without changing vibedrive-plan.yaml
+vibedrive run    # starts the loop with coder=codex and reviewer=claude
+vibedrive run --coder claude --reviewer codex   # flips roles at run time without changing vibedrive-plan.yaml
 vibedrive run --coder codex --reviewer codex    # same agent can both code and review
 ```
 
@@ -263,7 +263,7 @@ workflows:
           - "{{- if .Task.CommitMessage -}}{{ .Task.CommitMessage }}{{- else -}}{{ .Task.Title }}{{- end -}}"
 ```
 
-`claude.version` and `codex.version` are optional pins for the exact output of `<command> --version`. `vibedrive init` records the live versions in the scaffolded `vibedrive.yaml` when those CLIs are available. On startup, if a pin is set, vibedrive checks the resolved CLI and refuses to run when the reported version differs. These pins exist to keep TUI heuristics stable across runs; a silent agent CLI update can change screen titles or layout text that Vibedrive uses to drive the TUI. When an upgrade is intentional, update the CLI, run `claude --version` or `codex --version`, replace the matching `*.version` value in `vibedrive.yaml`, and rerun the usual verification.
+`codex.version` is an optional pin for the exact output of `codex --version`. `vibedrive init` records the live version in the scaffolded `vibedrive.yaml` when the CLI is available. On startup, if the pin is set, vibedrive checks the resolved CLI and refuses to run when the reported version differs. The pin exists to keep TUI heuristics stable across runs; a silent agent CLI update can change screen titles or layout text that Vibedrive uses to drive the TUI. When an upgrade is intentional, update the CLI, run `codex --version`, replace `codex.version` in `vibedrive.yaml`, and rerun the usual verification. `claude.version` is recorded for diagnostics but no longer enforced.
 
 ### `vibedrive-plan.yaml`
 
@@ -574,7 +574,7 @@ Codex runs the same fullscreen terminal UI you get from invoking `codex` yoursel
 | ------------------- | ----------- | ----------------------------------------------------------------- |
 | `name`              | all         | Required. Shown in logs.                                          |
 | `type`              | all         | `claude` (default), `codex`, `agent`, or `exec`.                  |
-| `actor`             | agent       | `coder` or `reviewer`. Resolved at runtime from `--coder` / `--reviewer`, defaulting to `claude` and `codex`. |
+| `actor`             | agent       | `coder` or `reviewer`. Resolved at runtime from `--coder` / `--reviewer`, defaulting to `codex` and `claude`. |
 | `prompt`            | claude, codex, agent | Go template rendered and sent to the resolved agent.        |
 | `command`           | exec        | Argv list to run. Each element is a Go template.                  |
 | `working_dir`       | exec        | Defaults to `workspace`. Relative paths resolve from `workspace`. |
@@ -620,12 +620,12 @@ Prompts, `command`, `working_dir`, and `env` values are rendered with Go's `text
 - `vibedrive view` loads the plan without launching agents and displays progress, the task dependency graph, and each task's configured workflow steps.
 - If a task result says `done` and a `verify_commands` command fails, the finalizer rewrites the task to `in_progress`, appends a verification-failure note in `.vibedrive/task-notes.yaml`, removes the result file, and returns an error without committing. During `vibedrive run`, that recorded failure is treated as progress so the next iteration can repair it.
 - `vibedrive task finalize` also removes the default peer-review artifact for the task so it does not get staged into the commit.
-- `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs and fails the step immediately if the files are still missing afterward.
+- `required_outputs` lets a step declare files it must leave behind. The runner creates parent directories before the step runs. Agent steps that leave required outputs missing or invalid get one repair prompt from the same agent. If a built-in task result or peer-review artifact is still missing or invalid afterward, Vibedrive writes a conservative `in_progress` or `changes_requested` fallback so the run can continue without treating the task as done; non-agent and custom-output failures still fail immediately.
 - The finalizer stages changes with `git add -A` and only creates a commit when something is actually staged.
 - Codex steps use native TUI mode, so the app shows the same Codex interface you get from running `codex` directly.
 - Parallel agent steps require tmux. Use the printed attach command to inspect the running worker windows.
 - `--coder` and `--reviewer` are independent. You can set them to different agents or to the same agent.
-- Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`claude` and reviewer=`codex`.
+- Agent role selection is runtime-only. Use `--coder` and `--reviewer` to override the defaults of coder=`codex` and reviewer=`claude`.
 - `vibedrive init` uses the selected bootstrap author and critic through their TUI flows. Defaults are author=`codex` and critic=`claude`. `--author claude` uses Claude for authoring, `--critic codex` uses Codex for critique, and each bootstrap phase uses a fresh instance even when both roles resolve to the same agent type.
 - In TUI mode, YAML multiline prompts are flattened into one submitted message, because real newlines would be interpreted as separate messages by Claude's composer.
 - In a fresh workspace, the runner auto-confirms Claude's trust dialog so the loop can start unattended.

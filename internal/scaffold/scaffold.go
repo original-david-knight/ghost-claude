@@ -24,7 +24,6 @@ parallel:
 
 claude:
   command: claude
-%s
   # transport: tui keeps a human-watchable Claude session.
   # Change to print for non-interactive orchestrated agent steps.
   transport: tui
@@ -350,7 +349,6 @@ func Write(configPath string, force bool) error {
 func sampleConfig() []byte {
 	return []byte(fmt.Sprintf(
 		sampleConfigTemplate,
-		renderPinnedVersionComment("claude", scaffoldedVersion("claude")),
 		renderPinnedVersionComment("codex", scaffoldedVersion("codex")),
 	))
 }

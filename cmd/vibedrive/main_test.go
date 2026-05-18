@@ -258,10 +258,14 @@ tasks:
 		"[ ] ui (todo) - Build UI",
 		"steps (implement): [x] execute(agent:coder) -> [x] review(agent:reviewer) -> [x] finalize(exec)",
 		"steps (implement): [~] execute(agent:coder) -> [~] review(agent:reviewer) -> [~] finalize(exec)",
+		"1/3 tasks completed",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("expected view output to contain %q, got %q", want, output)
 		}
+	}
+	if !strings.HasSuffix(output, "1/3 tasks completed\n") {
+		t.Fatalf("expected view output to end with task completion summary, got %q", output)
 	}
 }
 
@@ -301,7 +305,7 @@ tasks:
 	}
 	if err := runstate.UpsertTask(runstate.Path(dir), runstate.Run{
 		ID:        "run-1",
-		PID:       1234,
+		PID:       os.Getpid(),
 		Workspace: dir,
 		PlanFile:  planPath,
 	}, runstate.Task{
@@ -380,7 +384,7 @@ tasks:
 	}
 	if err := runstate.UpsertTask(runstate.Path(dir), runstate.Run{
 		ID:        "run-1",
-		PID:       1234,
+		PID:       os.Getpid(),
 		Workspace: dir,
 		PlanFile:  planPath,
 	}, runstate.Task{
@@ -475,11 +479,11 @@ func TestApplyRuntimeAgentRolesUsesDefaults(t *testing.T) {
 		t.Fatalf("applyRuntimeAgentRoles returned error: %v", err)
 	}
 
-	if cfg.CoderAgent() != config.AgentClaude {
-		t.Fatalf("expected default coder %q, got %q", config.AgentClaude, cfg.CoderAgent())
+	if cfg.CoderAgent() != config.AgentCodex {
+		t.Fatalf("expected default coder %q, got %q", config.AgentCodex, cfg.CoderAgent())
 	}
-	if cfg.ReviewerAgent() != config.AgentCodex {
-		t.Fatalf("expected default reviewer %q, got %q", config.AgentCodex, cfg.ReviewerAgent())
+	if cfg.ReviewerAgent() != config.AgentClaude {
+		t.Fatalf("expected default reviewer %q, got %q", config.AgentClaude, cfg.ReviewerAgent())
 	}
 }
 

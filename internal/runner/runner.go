@@ -52,7 +52,10 @@ type Runner struct {
 	runStatePlanFile  string
 }
 
-var errFinalizeVerificationRecorded = errors.New("finalize verification failure recorded")
+var (
+	errFinalizeVerificationRecorded = errors.New("finalize verification failure recorded")
+	errFallbackTaskResultRecorded   = errors.New("fallback task result recorded")
+)
 
 type TemplateData struct {
 	ConfigPath     string
@@ -64,6 +67,7 @@ type TemplateData struct {
 	TaskNotesPath  string
 	ReviewPath     string
 	ArtifactRoot   string
+	Isolated       bool
 	Workspace      string
 	PlanFile       string
 	Plan           *plan.File
@@ -75,6 +79,7 @@ type TaskExecutionPaths struct {
 	TaskID           string
 	Name             string
 	Workspace        string
+	GitWorktree      string
 	PlanFile         string
 	WorktreeRoot     string
 	ArtifactBaseRoot string
@@ -163,6 +168,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	if !r.cfg.DryRun {
 		defer r.clearRuntimeRun()
 	}
+	if done, err := r.preflightRunnablePlan(); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
 	runTmux := false
 	if !r.cfg.DryRun && r.shouldUseRunTmux() {
 		if err := r.ensureRunTmux(ctx); err != nil {
@@ -177,6 +187,28 @@ func (r *Runner) Run(ctx context.Context) error {
 		return r.runParallelPlan(ctx)
 	}
 	return r.runPlan(ctx)
+}
+
+func (r *Runner) preflightRunnablePlan() (bool, error) {
+	currentPlan, err := plan.Load(r.cfg.PlanFile)
+	if err != nil {
+		return false, err
+	}
+
+	if _, err := currentPlan.FindNextReady(); err != nil {
+		switch {
+		case errors.Is(err, plan.ErrAllTasksDone):
+			if r.stdout != nil {
+				fmt.Fprintln(r.stdout, "All runnable plan tasks are complete.")
+			}
+			return true, nil
+		case errors.Is(err, plan.ErrNoReadyTasks):
+			return false, fmt.Errorf("no ready tasks remain in %s; unfinished tasks: %s", r.cfg.PlanFile, summarizeUnfinishedTasks(currentPlan.UnfinishedTasks()))
+		default:
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (r *Runner) runPlan(ctx context.Context) error {
@@ -219,6 +251,7 @@ func (r *Runner) runPlan(ctx context.Context) error {
 
 func (r *Runner) runParallelPlan(ctx context.Context) error {
 	stalled := 0
+	batchProgress := parallelBatchProgressTracker{}
 
 	for iteration := 1; ; iteration++ {
 		if r.cfg.MaxIterations > 0 && iteration > r.cfg.MaxIterations {
@@ -268,6 +301,15 @@ func (r *Runner) runParallelPlan(ctx context.Context) error {
 			fmt.Fprintf(r.stdout, "Parallel ready batch (%d/%d): %s\n", len(analysis.Selected), analysis.Limit, summarizeTaskIDs(analysis.Selected))
 		}
 
+		currentNotes, err := tasknotes.Load(tasknotes.Path(r.cfg.Workspace))
+		if err != nil {
+			return err
+		}
+		initialProgress, err := parallelTaskProgressSignatures(currentPlan, analysis.Selected, currentNotes)
+		if err != nil {
+			return err
+		}
+
 		results, err := r.runParallelBatch(ctx, currentPlan, analysis.Selected, iteration)
 		if r.shouldLogProgress() {
 			for _, result := range results {
@@ -285,7 +327,92 @@ func (r *Runner) runParallelPlan(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		nextPlan, err := plan.Load(r.cfg.PlanFile)
+		if err != nil {
+			return err
+		}
+		nextNotes, err := tasknotes.Load(tasknotes.Path(r.cfg.Workspace))
+		if err != nil {
+			return err
+		}
+		if err := batchProgress.observe(nextPlan, analysis.Selected, initialProgress, nextNotes, r.cfg.MaxStalledIterations); err != nil {
+			return err
+		}
 	}
+}
+
+type parallelBatchProgressTracker struct {
+	key                   string
+	nonTerminalIterations int
+}
+
+func (t *parallelBatchProgressTracker) observe(file *plan.File, selected []plan.Task, initialProgress map[string]string, notesFile *tasknotes.File, limit int) error {
+	if t == nil || len(selected) == 0 {
+		return nil
+	}
+	if limit < 1 {
+		limit = 1
+	}
+
+	terminal := make([]string, 0, len(selected))
+	nonTerminal := make([]string, 0, len(selected))
+	madeProgress := false
+	for _, task := range selected {
+		updated, ok := file.FindTask(task.ID)
+		if !ok {
+			return fmt.Errorf("task %q disappeared from %s while checking parallel progress", task.ID, file.Path)
+		}
+		if updated.IsTerminal() {
+			terminal = append(terminal, updated.ID)
+		} else {
+			nonTerminal = append(nonTerminal, updated.ID)
+		}
+		if before, ok := initialProgress[task.ID]; ok && taskProgressSignature(updated, notesFile) != before {
+			madeProgress = true
+		}
+	}
+
+	if len(terminal) > 0 || madeProgress {
+		t.key = ""
+		t.nonTerminalIterations = 0
+		return nil
+	}
+
+	key := selectedTaskIDsKey(selected)
+	if key == t.key {
+		t.nonTerminalIterations++
+	} else {
+		t.key = key
+		t.nonTerminalIterations = 1
+	}
+	if t.nonTerminalIterations >= limit {
+		return fmt.Errorf("parallel batch %s made no progress for %d consecutive iterations while remaining non-terminal; stopping to avoid a retry loop. Unfinished selected tasks: %s", key, t.nonTerminalIterations, strings.Join(nonTerminal, ", "))
+	}
+	return nil
+}
+
+func parallelTaskProgressSignatures(file *plan.File, selected []plan.Task, notesFile *tasknotes.File) (map[string]string, error) {
+	signatures := make(map[string]string, len(selected))
+	for _, task := range selected {
+		current := task
+		if file != nil {
+			updated, ok := file.FindTask(task.ID)
+			if !ok {
+				return nil, fmt.Errorf("task %q disappeared from %s while checking parallel progress", task.ID, file.Path)
+			}
+			current = updated
+		}
+		signatures[task.ID] = taskProgressSignature(current, notesFile)
+	}
+	return signatures, nil
+}
+
+func selectedTaskIDsKey(tasks []plan.Task) string {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, strings.TrimSpace(task.ID))
+	}
+	return strings.Join(ids, ",")
 }
 
 func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File, task plan.Task, iteration int, stalled *int) (bool, error) {
@@ -309,6 +436,7 @@ func (r *Runner) runSerialIteration(ctx context.Context, currentPlan *plan.File,
 		TaskNotesPath:  paths.TaskNotesPath,
 		ReviewPath:     paths.ReviewPath,
 		ArtifactRoot:   paths.ArtifactRoot,
+		Isolated:       paths.Isolated,
 		Workspace:      paths.Workspace,
 		PlanFile:       paths.PlanFile,
 		Plan:           currentPlan,
@@ -537,6 +665,7 @@ func (r *Runner) runPreparedParallelTask(ctx context.Context, work preparedParal
 		TaskNotesPath:  work.Paths.TaskNotesPath,
 		ReviewPath:     work.Paths.ReviewPath,
 		ArtifactRoot:   work.Paths.ArtifactRoot,
+		Isolated:       work.Paths.Isolated,
 		Workspace:      work.Paths.Workspace,
 		PlanFile:       work.Paths.PlanFile,
 		Plan:           work.IsolatedPlan,
@@ -613,7 +742,7 @@ func (r *Runner) integrateParallelResult(ctx context.Context, result parallelTas
 		if err := r.recordParallelTaskStatus(ctx, result.Task, status, result.Notes); err != nil {
 			return err
 		}
-		return fmt.Errorf("parallel task reported %s", status)
+		return nil
 	case plan.StatusDone, plan.StatusInProgress:
 	default:
 		return fmt.Errorf("unsupported parallel task status %q", status)
@@ -1507,7 +1636,7 @@ func (r *Runner) prepareParallelTaskWorkspace(ctx context.Context, currentPlan *
 		if copyErr := copyWorkspace(r.cfg.Workspace, paths.Workspace, paths.WorktreeRoot, paths.ArtifactBaseRoot); copyErr != nil {
 			return fmt.Errorf("prepare non-git isolated workspace copy: %w; fallback copy failed: %v", err, copyErr)
 		}
-	} else if err := addGitWorktree(ctx, r.cfg.Workspace, paths.Workspace); err != nil {
+	} else if err := addGitWorktree(ctx, r.cfg.Workspace, paths.gitWorktreePath()); err != nil {
 		return err
 	}
 
@@ -1519,7 +1648,7 @@ func (r *Runner) prepareParallelTaskWorkspace(ctx context.Context, currentPlan *
 
 func removeExistingIsolatedWorkspace(ctx context.Context, rootWorkspace string, paths TaskExecutionPaths) error {
 	if paths.Isolated {
-		_ = exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "remove", "--force", paths.Workspace).Run()
+		_ = exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "remove", "--force", paths.gitWorktreePath()).Run()
 		_ = exec.CommandContext(ctx, "git", "-C", rootWorkspace, "worktree", "prune").Run()
 	}
 	return cleanupTaskExecutionPaths(paths)
@@ -2035,6 +2164,9 @@ func (r *Runner) runSteps(ctx context.Context, steps []config.Step, data Templat
 			if errors.Is(err, errFinalizeVerificationRecorded) {
 				return closeSharedSession(nil)
 			}
+			if errors.Is(err, errFallbackTaskResultRecorded) {
+				return closeSharedSession(nil)
+			}
 			if step.ContinueOnError {
 				if r.shouldLogProgress() {
 					fmt.Fprintf(r.stderr, "warning: step %q failed but continue_on_error is set: %v\n", step.Name, err)
@@ -2391,16 +2523,8 @@ func (r *Runner) runStep(ctx context.Context, session *claude.Session, codexSess
 			stdoutTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
 			stderrTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
 			combinedTail := diagnostics.NewTailBuffer(diagnostics.ExecOutputLimit)
-			if r.stdout != nil {
-				cmd.Stdout = io.MultiWriter(r.stdout, stdoutTail, combinedTail)
-			} else {
-				cmd.Stdout = io.MultiWriter(stdoutTail, combinedTail)
-			}
-			if r.stderr != nil {
-				cmd.Stderr = io.MultiWriter(r.stderr, stderrTail, combinedTail)
-			} else {
-				cmd.Stderr = io.MultiWriter(stderrTail, combinedTail)
-			}
+			cmd.Stdout = execOutputWriter(r.stdout, stdoutTail, combinedTail)
+			cmd.Stderr = execOutputWriter(r.stderr, stderrTail, combinedTail)
 			cmd.Env = os.Environ()
 			for key, value := range envMap {
 				cmd.Env = append(cmd.Env, key+"="+value)
@@ -2453,6 +2577,38 @@ func commandOutputSuffix(output string) string {
 		output = "... " + output[len(output)-max:]
 	}
 	return "\ncommand output:\n" + output
+}
+
+type execOutputFanout struct {
+	display io.Writer
+	tails   []io.Writer
+}
+
+func execOutputWriter(display io.Writer, tails ...io.Writer) io.Writer {
+	return execOutputFanout{
+		display: display,
+		tails:   tails,
+	}
+}
+
+func (w execOutputFanout) Write(p []byte) (int, error) {
+	for _, tail := range w.tails {
+		if tail == nil {
+			continue
+		}
+		n, err := tail.Write(p)
+		if err != nil {
+			return n, err
+		}
+		if n != len(p) {
+			return n, io.ErrShortWrite
+		}
+	}
+
+	if w.display != nil {
+		_, _ = w.display.Write(p)
+	}
+	return len(p), nil
 }
 
 func (r *Runner) runAgentPrompt(ctx context.Context, target string, session *claude.Session, codexSession *codex.Session, taskID, stepName, prompt string) error {
@@ -2539,6 +2695,16 @@ func (r *Runner) ensureRequiredOutputsAfterStep(ctx context.Context, target stri
 		fmt.Fprintf(r.stderr, "warning: step %q did not produce valid required outputs; asking %s to repair them\n", stepName, target)
 	}
 	if err := r.runAgentPrompt(ctx, target, session, codexSession, data.Task.ID, stepName, requiredOutputsRepairPrompt(stepName, data.Task.ID, issues)); err != nil {
+		if wrote, writeErr := writeFallbackReviewAfterRepair(stepName, data, issues); writeErr != nil {
+			return fmt.Errorf("ask %s to create required outputs after step %q: %w; also failed to write fallback review: %v", target, stepName, err, writeErr)
+		} else if wrote {
+			return nil
+		}
+		if wrote, writeErr := writeFallbackTaskResultAfterRepair(stepName, data, issues); writeErr != nil {
+			return fmt.Errorf("ask %s to create required outputs after step %q: %w; also failed to write fallback task result: %v", target, stepName, err, writeErr)
+		} else if wrote {
+			return errFallbackTaskResultRecorded
+		}
 		return fmt.Errorf("ask %s to create required outputs after step %q: %w", target, stepName, err)
 	}
 
@@ -2547,9 +2713,160 @@ func (r *Runner) ensureRequiredOutputsAfterStep(ctx context.Context, target stri
 		return err
 	}
 	if len(issues) > 0 {
-		return requiredOutputsIssueError(stepName, issues)
+		if wrote, writeErr := writeFallbackReviewAfterRepair(stepName, data, issues); writeErr != nil {
+			return fmt.Errorf("%w; also failed to write fallback review: %v", requiredOutputsRepairFailedError(stepName, target, issues), writeErr)
+		} else if wrote {
+			return nil
+		}
+		if wrote, writeErr := writeFallbackTaskResultAfterRepair(stepName, data, issues); writeErr != nil {
+			return fmt.Errorf("%w; also failed to write fallback task result: %v", requiredOutputsRepairFailedError(stepName, target, issues), writeErr)
+		} else if wrote {
+			if data.Isolated {
+				return errFallbackTaskResultRecorded
+			}
+			return nil
+		}
+		return requiredOutputsRepairFailedError(stepName, target, issues)
 	}
 	return nil
+}
+
+func writeFallbackReviewAfterRepair(stepName string, data TemplateData, issues []requiredOutputIssue) (bool, error) {
+	if data.Isolated {
+		return false, nil
+	}
+	if !onlyReviewOutputIssues(data, issues) {
+		return false, nil
+	}
+
+	reviewPath := strings.TrimSpace(data.ReviewPath)
+	if reviewPath == "" {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o755); err != nil {
+		return false, err
+	}
+
+	summary := "Peer review did not produce a valid review artifact after a repair prompt."
+	finding := fmt.Sprintf("The %q step did not produce a valid peer review artifact after Vibedrive asked the reviewer to repair it (%s). Treat this task as not peer-reviewed and keep the task result in_progress so peer review can be retried.", stepName, requiredOutputIssuesSummary(issues))
+	review := reviewOutput{
+		Decision: "changes_requested",
+		Summary:  summary,
+		Findings: []string{finding},
+	}
+	encoded, err := json.Marshal(review)
+	if err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(reviewPath, append(encoded, '\n'), 0o644); err != nil {
+		return false, err
+	}
+
+	if err := writeIncompleteReviewTaskResult(stepName, data, issues); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func writeIncompleteReviewTaskResult(stepName string, data TemplateData, issues []requiredOutputIssue) error {
+	resultPath := strings.TrimSpace(data.TaskResultPath)
+	if resultPath == "" {
+		return nil
+	}
+
+	note := fmt.Sprintf("Peer review step %q did not produce a valid review artifact after the repair prompt (%s); recorded in_progress so peer review can be retried.", stepName, requiredOutputIssuesSummary(issues))
+	if existing, ok := readExistingTaskResult(resultPath); ok && strings.TrimSpace(existing.Notes) != "" && !strings.Contains(existing.Notes, note) {
+		note = strings.TrimSpace(existing.Notes) + " " + note
+	}
+	return writeTaskResult(resultPath, automation.TaskResult{
+		Status: plan.StatusInProgress,
+		Notes:  note,
+	})
+}
+
+func readExistingTaskResult(path string) (automation.TaskResult, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return automation.TaskResult{}, false
+	}
+	var result automation.TaskResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return automation.TaskResult{}, false
+	}
+	return result, true
+}
+
+func writeFallbackTaskResultAfterRepair(stepName string, data TemplateData, issues []requiredOutputIssue) (bool, error) {
+	if !data.Isolated && !onlyTaskResultOutputIssues(data, issues) {
+		return false, nil
+	}
+
+	resultPath := strings.TrimSpace(data.TaskResultPath)
+	if resultPath == "" {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
+		return false, err
+	}
+
+	result := automation.TaskResult{
+		Status: plan.StatusInProgress,
+		Notes:  fallbackTaskResultNotes(stepName, issues),
+	}
+	if err := writeTaskResult(resultPath, result); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func writeTaskResult(path string, result automation.TaskResult) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(encoded, '\n'), 0o644)
+}
+
+func onlyTaskResultOutputIssues(data TemplateData, issues []requiredOutputIssue) bool {
+	if len(issues) == 0 || strings.TrimSpace(data.TaskResultPath) == "" {
+		return false
+	}
+	for _, issue := range issues {
+		if !sameRequiredOutputPath(issue.Path, data.TaskResultPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func onlyReviewOutputIssues(data TemplateData, issues []requiredOutputIssue) bool {
+	if len(issues) == 0 || strings.TrimSpace(data.ReviewPath) == "" {
+		return false
+	}
+	for _, issue := range issues {
+		if !sameRequiredOutputPath(issue.Path, data.ReviewPath) {
+			return false
+		}
+	}
+	return true
+}
+
+func fallbackTaskResultNotes(stepName string, issues []requiredOutputIssue) string {
+	problem := "a required output was missing"
+	for _, issue := range issues {
+		if issue.Missing {
+			problem = "required output was missing: " + filepath.Base(issue.Path)
+			break
+		}
+		if text := strings.TrimSpace(issue.Problem); text != "" {
+			problem = "required output was invalid: " + text
+			break
+		}
+	}
+	return fmt.Sprintf("Step %q returned without a valid task result after the repair prompt (%s); recorded in_progress so a later run can continue.", stepName, problem)
 }
 
 type requiredOutputIssue struct {
@@ -2783,14 +3100,16 @@ func taskExecutionPaths(cfg *config.Config, taskID string, iteration int, isolat
 	worktreeRoot := cfg.ParallelWorktreeRoot()
 	artifactBaseRoot := cfg.ParallelArtifactRoot()
 	artifactRoot := filepath.Join(artifactBaseRoot, name)
-	workspace := filepath.Join(worktreeRoot, name)
+	gitWorktree := filepath.Join(worktreeRoot, name)
+	workspace, planFile := isolatedWorkspaceLayout(cfg.Workspace, cfg.PlanFile, gitWorktree)
 	artifacts := automation.IsolatedArtifactPaths(artifactRoot, taskID)
 
 	return TaskExecutionPaths{
 		TaskID:           taskID,
 		Name:             name,
 		Workspace:        workspace,
-		PlanFile:         planFileInWorkspace(cfg.Workspace, cfg.PlanFile, workspace),
+		GitWorktree:      gitWorktree,
+		PlanFile:         planFile,
 		WorktreeRoot:     worktreeRoot,
 		ArtifactBaseRoot: artifactBaseRoot,
 		ArtifactRoot:     artifactRoot,
@@ -2799,6 +3118,46 @@ func taskExecutionPaths(cfg *config.Config, taskID string, iteration int, isolat
 		ReviewPath:       artifacts.ReviewPath,
 		Isolated:         true,
 	}
+}
+
+func isolatedWorkspaceLayout(rootWorkspace, rootPlanFile, gitWorktree string) (string, string) {
+	workspace := gitWorktree
+	planFile := planFileInWorkspace(rootWorkspace, rootPlanFile, workspace)
+
+	gitRoot, ok := gitWorkspaceRoot(rootWorkspace)
+	if !ok {
+		return workspace, planFile
+	}
+
+	workspaceRel, err := filepath.Rel(gitRoot, filepath.Clean(rootWorkspace))
+	if err != nil || !isLocalRelativePath(workspaceRel) {
+		return workspace, planFile
+	}
+	if workspaceRel != "." {
+		workspace = filepath.Join(gitWorktree, workspaceRel)
+	}
+
+	planRel, err := filepath.Rel(gitRoot, filepath.Clean(rootPlanFile))
+	if err != nil || !isLocalRelativePath(planRel) {
+		return workspace, planFileInWorkspace(rootWorkspace, rootPlanFile, workspace)
+	}
+	return workspace, filepath.Join(gitWorktree, planRel)
+}
+
+func gitWorkspaceRoot(workspace string) (string, bool) {
+	output, err := exec.Command("git", "-C", workspace, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", false
+	}
+	root := strings.TrimSpace(string(output))
+	if root == "" {
+		return "", false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(absRoot), true
 }
 
 func isolatedWorkspaceName(cfg *config.Config, taskID string, iteration int) string {
@@ -2859,12 +3218,19 @@ func planFileInWorkspace(rootWorkspace, rootPlanFile, workspace string) string {
 	return filepath.Join(workspace, rel)
 }
 
+func (p TaskExecutionPaths) gitWorktreePath() string {
+	if strings.TrimSpace(p.GitWorktree) != "" {
+		return p.GitWorktree
+	}
+	return p.Workspace
+}
+
 func cleanupTaskExecutionPaths(paths TaskExecutionPaths) error {
 	if !paths.Isolated {
 		return nil
 	}
 
-	workspace, err := ownedChildPath(paths.WorktreeRoot, paths.Workspace)
+	workspace, err := ownedChildPath(paths.WorktreeRoot, paths.gitWorktreePath())
 	if err != nil {
 		return err
 	}
@@ -3119,6 +3485,29 @@ func requiredOutputsIssueError(stepName string, issues []requiredOutputIssue) er
 		parts = append(parts, issue.Path+": "+issue.Problem)
 	}
 	return fmt.Errorf("step %q did not produce valid required outputs: %s", stepName, strings.Join(parts, "; "))
+}
+
+func requiredOutputsRepairFailedError(stepName, target string, issues []requiredOutputIssue) error {
+	if len(issues) == 0 {
+		return nil
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = "the agent"
+	}
+	return fmt.Errorf("step %q still has missing or invalid required outputs after %s was asked to repair them: %s", stepName, target, requiredOutputIssuesSummary(issues))
+}
+
+func requiredOutputIssuesSummary(issues []requiredOutputIssue) string {
+	parts := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Missing {
+			parts = append(parts, issue.Path+" is missing")
+			continue
+		}
+		parts = append(parts, issue.Path+": "+issue.Problem)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (r *Runner) stepAgent(step config.Step) (string, error) {

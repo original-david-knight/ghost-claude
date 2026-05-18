@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -80,6 +81,7 @@ type tmuxClaudeSession struct {
 type tmuxCodexSession struct {
 	pane                *tmuxagent.Pane
 	idleTitle           string
+	idleTitles          []string
 	idleTransitions     int
 	busyTransitions     int
 	trustPrompts        int
@@ -574,6 +576,12 @@ func (s *tmuxClaudeSession) snapshot(ctx context.Context) (tmuxTitleSnapshot, er
 			observedSource = "trust_prompt"
 			observedState = tmuxObservedStateTrustPrompt
 			observedKnown = true
+		} else if state, ok := claude.ScreenState(text); ok {
+			s.recordState("screen", title, state)
+			snap := s.snapshotWithObservation("screen", title, state, true)
+			snap.captureFingerprint = fingerprint
+			snap.captureValid = captureValid
+			return snap, nil
 		}
 	}
 	snap := s.snapshotWithObservation(observedSource, title, observedState, observedKnown)
@@ -671,6 +679,7 @@ func newTmuxCodexSession(workdir string, idleActivityTimeout time.Duration) *tmu
 	}
 	return &tmuxCodexSession{
 		idleTitle:           idleTitle,
+		idleTitles:          codexTmuxIdleTitles(workdir, idleTitle),
 		busyTransitions:     1,
 		currentState:        "busy",
 		idleActivityTimeout: idleActivityTimeout,
@@ -857,13 +866,55 @@ func (s *tmuxCodexSession) classifyTitle(title string) (string, bool) {
 	if isCodexBusyTitle(trimmed) {
 		return "busy", true
 	}
-	if codexTitleMatchesIdle(trimmed, s.idleTitle) {
-		return "idle", true
+	for _, idleTitle := range s.idleTitles {
+		if codexTitleMatchesIdle(trimmed, idleTitle) {
+			return "idle", true
+		}
 	}
 	if codexTitleLooksIdleStatus(trimmed) {
 		return "idle", true
 	}
 	return "busy", true
+}
+
+func codexTmuxIdleTitles(workdir, fallback string) []string {
+	seen := map[string]bool{}
+	var titles []string
+	add := func(title string) {
+		title = strings.TrimSpace(title)
+		if title == "" || seen[title] {
+			return
+		}
+		seen[title] = true
+		titles = append(titles, title)
+	}
+
+	add(fallback)
+	if gitRoot, ok := findTmuxGitRoot(workdir); ok {
+		add(filepath.Base(gitRoot))
+	}
+	return titles
+}
+
+func findTmuxGitRoot(workdir string) (string, bool) {
+	dir := filepath.Clean(workdir)
+	if dir == "." || dir == "" {
+		abs, err := filepath.Abs(dir)
+		if err == nil {
+			dir = abs
+		}
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 func isCodexBusyTitle(title string) bool {

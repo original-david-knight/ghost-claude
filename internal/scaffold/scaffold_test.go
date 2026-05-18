@@ -94,8 +94,6 @@ func TestWritePinsLiveAgentVersions(t *testing.T) {
 
 	restore := stubVersionResolver(func(command string) (string, error) {
 		switch command {
-		case "claude":
-			return "claude 1.2.3", nil
 		case "codex":
 			return "codex-cli 4.5.6", nil
 		default:
@@ -114,14 +112,15 @@ func TestWritePinsLiveAgentVersions(t *testing.T) {
 	}
 	content := string(configContent)
 	for _, want := range []string{
-		`version: "claude 1.2.3"`,
 		`version: "codex-cli 4.5.6"`,
-		"version pins the exact claude --version output to keep TUI heuristics stable",
 		"version pins the exact codex --version output to keep TUI heuristics stable",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("expected scaffolded config to contain %q, got %q", want, content)
 		}
+	}
+	if strings.Contains(content, `version: "claude`) {
+		t.Fatalf("expected scaffolded config to omit claude.version pin, got %q", content)
 	}
 }
 

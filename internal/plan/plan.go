@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -148,7 +149,8 @@ func (f *File) Validate() error {
 		return fmt.Errorf("plan must contain at least one task")
 	}
 
-	components, err := validateComponents(f.Project.Components)
+	pathScope := f.pathMetadataScope()
+	components, err := validateComponents(f.Project.Components, pathScope)
 	if err != nil {
 		return err
 	}
@@ -181,13 +183,13 @@ func (f *File) Validate() error {
 			}
 		}
 
-		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].owns_paths", i), task.OwnsPaths); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].owns_paths", i), task.OwnsPaths, pathScope); err != nil {
 			return err
 		}
-		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].reads_contracts", i), task.ReadsContracts); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].reads_contracts", i), task.ReadsContracts, pathScope); err != nil {
 			return err
 		}
-		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].provides_contracts", i), task.ProvidesContracts); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("tasks[%d].provides_contracts", i), task.ProvidesContracts, pathScope); err != nil {
 			return err
 		}
 	}
@@ -216,7 +218,44 @@ func (f *File) Validate() error {
 	return nil
 }
 
-func validateComponents(components []Component) (map[string]struct{}, error) {
+func (f *File) pathMetadataScope() pathMetadataScope {
+	if f == nil || strings.TrimSpace(f.Path) == "" {
+		return pathMetadataScope{}
+	}
+	absPath, err := filepath.Abs(f.Path)
+	if err != nil {
+		return pathMetadataScope{}
+	}
+	baseDir := filepath.Dir(absPath)
+	gitRoot, _ := findGitRoot(baseDir)
+	return pathMetadataScope{
+		baseDir: baseDir,
+		gitRoot: gitRoot,
+	}
+}
+
+type pathMetadataScope struct {
+	baseDir string
+	gitRoot string
+}
+
+func findGitRoot(dir string) (string, bool) {
+	output, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", false
+	}
+	root := strings.TrimSpace(string(output))
+	if root == "" {
+		return "", false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(absRoot), true
+}
+
+func validateComponents(components []Component, pathScope pathMetadataScope) (map[string]struct{}, error) {
 	seen := make(map[string]struct{}, len(components))
 	for i, component := range components {
 		id := strings.TrimSpace(component.ID)
@@ -228,20 +267,20 @@ func validateComponents(components []Component) (map[string]struct{}, error) {
 		}
 		seen[id] = struct{}{}
 
-		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].owned_paths", i), component.OwnedPaths); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].owned_paths", i), component.OwnedPaths, pathScope); err != nil {
 			return nil, err
 		}
-		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].reads_contracts", i), component.ReadsContracts); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].reads_contracts", i), component.ReadsContracts, pathScope); err != nil {
 			return nil, err
 		}
-		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].provides_contracts", i), component.ProvidesContracts); err != nil {
+		if err := validatePathMetadata(fmt.Sprintf("project.components[%d].provides_contracts", i), component.ProvidesContracts, pathScope); err != nil {
 			return nil, err
 		}
 	}
 	return seen, nil
 }
 
-func validatePathMetadata(field string, values StringList) error {
+func validatePathMetadata(field string, values StringList, pathScope pathMetadataScope) error {
 	for i, value := range values {
 		item := strings.TrimSpace(value)
 		if item == "" {
@@ -250,11 +289,31 @@ func validatePathMetadata(field string, values StringList) error {
 		if filepath.IsAbs(item) || strings.HasPrefix(item, "/") {
 			return fmt.Errorf("%s[%d] must be repo-relative, got %q", field, i, value)
 		}
-		if hasParentPathSegment(item) {
-			return fmt.Errorf("%s[%d] must not contain '..', got %q", field, i, value)
+		if hasParentPathSegment(item) && !pathScope.allowsParentPath(item) {
+			return fmt.Errorf("%s[%d] must not escape the git repository, got %q", field, i, value)
 		}
 	}
 	return nil
+}
+
+func (s pathMetadataScope) allowsParentPath(value string) bool {
+	if s.baseDir == "" || s.gitRoot == "" {
+		return false
+	}
+	resolved := filepath.Join(s.baseDir, metadataPathForHost(value))
+	return pathWithin(s.gitRoot, resolved)
+}
+
+func metadataPathForHost(value string) string {
+	return filepath.FromSlash(strings.ReplaceAll(value, `\`, "/"))
+}
+
+func pathWithin(root, target string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(target))
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func hasParentPathSegment(value string) bool {

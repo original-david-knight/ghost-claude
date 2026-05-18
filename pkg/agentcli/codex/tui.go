@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -32,11 +33,13 @@ type tuiSession struct {
 type titleMonitor struct {
 	mu              sync.Mutex
 	idleTitle       string
+	idleTitles      []string
 	parser          ptyrunner.TitleParser
 	idleTransitions int
 	busyTransitions int
 	trustPrompts    int
 	trustDetected   bool
+	readyScreen     bool
 	currentState    string
 	visibleTail     string
 }
@@ -45,6 +48,7 @@ type titleSnapshot struct {
 	idleTransitions int
 	busyTransitions int
 	trustPrompts    int
+	readyScreen     bool
 	currentState    string
 }
 
@@ -228,7 +232,10 @@ func newTitleMonitor(workdir string) *titleMonitor {
 		idleTitle = "codex"
 	}
 
-	return &titleMonitor{idleTitle: idleTitle}
+	return &titleMonitor{
+		idleTitle:  idleTitle,
+		idleTitles: codexIdleTitles(workdir, idleTitle),
+	}
 }
 
 func (m *titleMonitor) Consume(chunk []byte) {
@@ -262,6 +269,7 @@ func (m *titleMonitor) snapshot() titleSnapshot {
 		idleTransitions: m.idleTransitions,
 		busyTransitions: m.busyTransitions,
 		trustPrompts:    m.trustPrompts,
+		readyScreen:     m.readyScreen,
 		currentState:    m.currentState,
 	}
 }
@@ -278,10 +286,11 @@ func (m *titleMonitor) recordVisibleTextLocked(chunk []byte) {
 		m.trustPrompts++
 	}
 	m.trustDetected = detected
+	m.readyScreen = codexReadyScreenCompact(m.visibleTail)
 }
 
 func (s titleSnapshot) readyForPrompt() bool {
-	return s.currentState == "idle" && s.busyTransitions > 0
+	return s.readyScreen || (s.currentState == "idle" && s.busyTransitions > 0)
 }
 
 func (m *titleMonitor) classifyTitle(title string) (string, bool) {
@@ -292,13 +301,55 @@ func (m *titleMonitor) classifyTitle(title string) (string, bool) {
 	if isBusyTitle(trimmed) {
 		return "busy", true
 	}
-	if titleMatchesIdle(trimmed, m.idleTitle) {
-		return "idle", true
+	for _, idleTitle := range m.idleTitles {
+		if titleMatchesIdle(trimmed, idleTitle) {
+			return "idle", true
+		}
 	}
 	if titleLooksIdleStatus(trimmed) {
 		return "idle", true
 	}
 	return "busy", true
+}
+
+func codexIdleTitles(workdir, fallback string) []string {
+	seen := map[string]bool{}
+	var titles []string
+	add := func(title string) {
+		title = strings.TrimSpace(title)
+		if title == "" || seen[title] {
+			return
+		}
+		seen[title] = true
+		titles = append(titles, title)
+	}
+
+	add(fallback)
+	if gitRoot, ok := findGitRoot(workdir); ok {
+		add(filepath.Base(gitRoot))
+	}
+	return titles
+}
+
+func findGitRoot(workdir string) (string, bool) {
+	dir := filepath.Clean(workdir)
+	if dir == "." || dir == "" {
+		abs, err := filepath.Abs(dir)
+		if err == nil {
+			dir = abs
+		}
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 func isBusyTitle(title string) bool {
@@ -409,6 +460,10 @@ func codexReadyScreen(text string) bool {
 // ReadyScreen reports whether captured Codex screen text looks ready for a prompt.
 func ReadyScreen(text string) bool {
 	compact := strings.ToLower(ptyrunner.CompactVisibleText([]byte(text)))
+	return codexReadyScreenCompact(compact)
+}
+
+func codexReadyScreenCompact(compact string) bool {
 	return strings.Contains(compact, "openaicodex") &&
 		strings.Contains(compact, "model") &&
 		strings.Contains(compact, "directory") &&
